@@ -88,6 +88,20 @@ def test_check_line():
     assert m.check_line({"state": "done", "command": "pytest -q", "passed": 41, "failed": 0, "ok": True}) == "pytest: 41 passed, 0 failed, ok"
     assert "NEW failures: test_x" in m.check_line({"state": "done", "command": "npm test", "passed": 3, "failed": 1, "new": ["test_x"], "ok": False})
     assert m.check_line({"state": "failed", "command": "make check"}) == "make: could not run"
+    assert m.first_paragraph("**Done.** The `badge` is in.\n\nFiles changed:\n- x") == "Done. The badge is in."
+
+
+def test_facts_keep_the_card_short_and_the_report_whole(tmp_path):
+    m = _mod()
+    p = m.Plugin(); p.ctx = FakeCtx()
+    w = m.Work({"id": 1, "title": "t"}, str(tmp_path), str(tmp_path)); w.root = str(tmp_path); w.run_id = "r"
+    long_report = "Done. Added the badge.\n\n" + "detail line\n" * 400
+    f = p._facts(w, {"id": "r", "summary": "w1 merged: badge added, 11 tests pass.", "check": {"state": "done", "command": "npm test", "code": 0, "ok": True}},
+                 {"id": "i", "report": long_report, "decisions": ["kept css"], "unverified": ["plugin side"]}, ok=True)
+    assert f["summary"] == "w1 merged: badge added, 11 tests pass." and f["report"].startswith("Done. Added") and len(f["report"]) > 3000
+    assert f["decisions"] == ["kept css"] and f["not_verified"] == ["plugin side"] and f["tests"] == "npm: exit 0, ok"
+    f2 = p._facts(w, {"id": "r"}, {"id": "i", "report": long_report}, ok=True)
+    assert f2["summary"] == "Done. Added the badge."
 
 
 def test_a_ticket_runs_publishes_and_reports_with_screenshots(tmp_path):

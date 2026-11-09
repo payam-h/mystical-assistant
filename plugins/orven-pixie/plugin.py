@@ -67,6 +67,12 @@ def http(url: str, body: dict | None = None, headers: dict | None = None, method
         return code, text
 
 
+def first_paragraph(text: str, limit: int = 700) -> str:
+    """The lead of a report: up to its first blank line, bullets and headings stripped of markdown noise."""
+    lead = (text or "").strip().split("\n\n")[0].strip()
+    return re.sub(r"\*\*|`", "", lead)[:limit]
+
+
 def check_line(v: dict) -> str:
     """One line for a check record from workrun: `pytest: 41 passed, 0 failed` plus new failures."""
     cmd = str(v.get("command") or "check").split()[0]
@@ -267,7 +273,7 @@ class Plugin:
                 self._remember(w.id, str(t.get("title") or ""), "failed", facts.get("why") or "", w.run_id, None)
                 return
             shots = [{"name": os.path.basename(p), "data": base64.b64encode(open(p, "rb").read()).decode()} for p in facts.get("pictures", [])[:MAX_SHOTS] if os.path.isfile(p) and os.path.getsize(p) < 6_000_000]
-            body = {"summary": facts.get("summary") or "(no summary)", "tests": facts.get("tests"), "checks": facts.get("checks"), "pr_url": facts.get("pr_url"),
+            body = {"summary": facts.get("summary") or "(no summary)", "report": facts.get("report"), "tests": facts.get("tests"), "checks": facts.get("checks"), "pr_url": facts.get("pr_url"),
                     "branch": facts.get("branch"), "decisions": facts.get("decisions"), "not_verified": facts.get("not_verified"), "cost_usd": facts.get("cost"), "screenshots": shots}
             code, out = self._api(f"/{w.id}/finish", body)
             if code >= 400:
@@ -385,11 +391,12 @@ class Plugin:
             v = run.get(k)
             if isinstance(v, dict) and v.get("state") not in (None, "running"):
                 checks[label] = check_line(v)
-        summary = (run.get("summary") or "").strip()
-        report = (item.get("report") or item.get("summary") or "").strip()
-        text = "\n\n".join(x for x in (summary, report) if x)
-        return {"ok": ok, "summary": text[:3500] or "(the run left no summary)", "decisions": item.get("decisions") or None, "not_verified": item.get("unverified") or None,
-                "checks": checks or None, "pictures": pictures, "tests": checks.get("after"), "cost": None}
+        # The card the owner sees carries the manager's short summary; the helper's whole report goes along
+        # as `report` for the board, so a long reply never spills the card into several messages.
+        summary = (run.get("summary") or "").strip() or first_paragraph(item.get("summary") or item.get("report") or "")
+        report = (item.get("report") or "").strip()
+        return {"ok": ok, "summary": summary[:1200] or "(the run left no summary)", "report": report[:12000] or None, "decisions": item.get("decisions") or None,
+                "not_verified": item.get("unverified") or None, "checks": checks or None, "pictures": pictures, "tests": checks.get("after"), "cost": None}
 
     def _publish(self, w: Work, facts: dict) -> tuple[str | None, str | None]:
         """The run branch becomes pixie/<id>-<slug>, pushed, with a PR into the branch the run started from."""
@@ -450,7 +457,7 @@ class Plugin:
         from bridge import workrun
         parsed = workrun.read_report(text) if text else {}
         git.push(path)
-        return {"ok": ok, "why": None if ok else (job.error_msg or "the revision did not finish"), "summary": text[:3500], "decisions": parsed.get("decisions") or None,
+        return {"ok": ok, "why": None if ok else (job.error_msg or "the revision did not finish"), "summary": (parsed.get("summary") or first_paragraph(text))[:1200], "report": text[:12000] or None, "decisions": parsed.get("decisions") or None,
                 "not_verified": parsed.get("unverified") or None, "pictures": pictures, "branch": branch, "pr_url": w.ticket.get("pr_url"), "cost": job.cost, "checks": None, "tests": None}
 
     # --- state -------------------------------------------------------------------------------
