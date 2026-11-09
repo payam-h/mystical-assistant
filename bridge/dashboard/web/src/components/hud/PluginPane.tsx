@@ -73,3 +73,21 @@ export function PluginPane({ p }: { p: Integration }) {
     </div>
   );
 }
+
+/** Several plugins' panes as one tab (manifest pane.group): stacked sections, each with the
+    plugin's name and status line, every pane still mounted by its own module. */
+export function PluginGroupPane({ ps }: { ps: Integration[] }) {
+  return (
+    <div style={{ height: "100%", overflow: "auto", display: "flex", flexDirection: "column" }}>
+      {ps.map((p) => (
+        <section key={p.id} style={{ borderBottom: "1px solid color-mix(in srgb, var(--acc) 12%, transparent)", display: "flex", flexDirection: "column" }}>
+          <header style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "8px 12px 0", fontSize: "var(--t85, 9px)", letterSpacing: "1.5px", color: "var(--txl)", fontWeight: 600 }}>
+            <span>{p.pane?.title || p.label.toUpperCase()}</span>
+            {p.status?.line ? <span style={{ fontWeight: 400, letterSpacing: 0, textTransform: "none", color: p.status.ok === false ? "var(--err)" : "var(--txd)", fontSize: "var(--t9, 10px)" }}>{p.status.line}</span> : null}
+          </header>
+          <PluginPane p={p} />
+        </section>
+      ))}
+    </div>
+  );
+}

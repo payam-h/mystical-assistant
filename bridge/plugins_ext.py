@@ -111,17 +111,13 @@ def _validate(m: dict, d: str, source: str) -> dict:
             raise PluginError(f"{pid}: pane needs an entry ending in .js")
         if not os.path.isfile(os.path.join(d, "ui", str(pane["entry"]))):
             raise PluginError(f"{pid}: ui/{pane['entry']} is missing")
-        icon = None
-        if pane.get("icon"):      # the rail tab's own icon: a small inline SVG drawn with currentColor, from ui/
-            ipath = os.path.join(d, "ui", str(pane["icon"]))
-            try:
-                with open(ipath, encoding="utf-8") as f:
-                    icon = f.read(8192).strip()
-            except OSError:
-                raise PluginError(f"{pid}: ui/{pane['icon']} is missing")
-            if not icon.startswith("<svg") or len(icon) > 6000 or "<script" in icon.lower() or "javascript:" in icon.lower() or re.search(r"\son\w+\s*=", icon):
-                raise PluginError(f"{pid}: pane icon must be a small plain <svg> (no scripts or handlers)")
-        pane = {"title": str(pane.get("title") or pid.upper()), "entry": str(pane["entry"]), "icon": icon,
+        icon = _read_icon(d, pid, pane.get("icon"))
+        group = pane.get("group")
+        if group is not None:     # several plugins' panes as one rail tab, stacked (the first installed one's title/icon)
+            if not isinstance(group, dict) or not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", str(group.get("id") or "")):
+                raise PluginError(f"{pid}: pane group needs an id like 'agents'")
+            group = {"id": str(group["id"]), "title": str(group.get("title") or group["id"]).upper()[:24], "icon": _read_icon(d, pid, group.get("icon"))}
+        pane = {"title": str(pane.get("title") or pid.upper()), "entry": str(pane["entry"]), "icon": icon, "group": group,
                 "css": str(pane.get("css") or "") or None, "scope": pane.get("scope") if pane.get("scope") in ("project", "worktree") else None}
     return {
         "id": pid, "label": str(m.get("label") or pid), "version": str(m.get("version") or "0"),
@@ -131,6 +127,20 @@ def _validate(m: dict, d: str, source: str) -> dict:
         "telegram": [str(c) for c in m.get("telegram") or []],
         "dir": d, "source": source,
     }
+
+
+def _read_icon(d: str, pid: str, name) -> "str | None":
+    """A rail icon from ui/: a small plain inline SVG drawn with currentColor, or None when the manifest names none."""
+    if not name:
+        return None
+    try:
+        with open(os.path.join(d, "ui", str(name)), encoding="utf-8") as f:
+            icon = f.read(8192).strip()
+    except OSError:
+        raise PluginError(f"{pid}: ui/{name} is missing")
+    if not icon.startswith("<svg") or len(icon) > 6000 or "<script" in icon.lower() or "javascript:" in icon.lower() or re.search(r"\son\w+\s*=", icon):
+        raise PluginError(f"{pid}: {name} must be a small plain <svg> (no scripts or handlers)")
+    return icon
 
 
 def _scan(root: str, source: str, found: dict) -> None:
