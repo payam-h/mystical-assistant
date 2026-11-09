@@ -245,3 +245,18 @@ def test_scan_takes_claudes_own_title_and_keeps_a_manual_rename():
     os.utime(path, (os.path.getmtime(path) + 10, os.path.getmtime(path) + 10))
     native.scan(chat_id=OWNER)
     assert store.get_by_claude_session_id("uuid-ai-title")["title"] == "My own name"
+
+
+def test_scan_survives_a_transcript_whose_uuid_is_already_a_bridge_row():
+    """A bridge session's row id is a Claude uuid; when its transcript turns up with a different
+    claude_session_id on the row, the scan must treat it as the same session and carry on."""
+    cwd = os.path.join(_BASE, "collide"); os.makedirs(cwd, exist_ok=True)
+    store.create_session(OWNER, "/collide", session_id="uuid-collide", origin="dashboard", cwd=cwd)
+    from contextlib import closing
+    with closing(store._connect()) as c:
+        c.execute("UPDATE sessions SET claude_session_id='some-other-claude-id' WHERE id='uuid-collide'")
+    _write_native("uuid-collide", cwd, first_user="colliding one")
+    _write_native("uuid-after", cwd, first_user="the one after it")
+    native.scan(chat_id=OWNER)
+    assert store.get_session("uuid-collide")["origin"] == "dashboard"          # not reclassified, not duplicated
+    assert store.get_by_claude_session_id("uuid-after")["title"] == "the one after it"
