@@ -97,7 +97,8 @@ def resolve_paths(ticket: dict, allowed: list[str]) -> tuple[str, str]:
     if ws not in allowed_real:
         raise RuntimeError(f"workspace {ws_raw} is not one of this machine's dev workspaces")
     repo = os.path.realpath(os.path.join(ws, str(ticket.get("repo") or "")))
-    if not repo.startswith(ws + os.sep) or not os.path.isdir(repo):
+    # "." (or empty) means the workspace is itself the repo, e.g. ~/Desktop/pixie
+    if not (repo == ws or repo.startswith(ws + os.sep)) or not os.path.isdir(repo):
         raise RuntimeError(f"repo {ticket.get('repo')} is not a folder inside {ws_raw}")
     return ws, repo
 

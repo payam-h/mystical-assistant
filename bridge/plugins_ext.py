@@ -156,7 +156,8 @@ def registry(refresh: bool = False) -> "tuple[dict, ...]":
     with _lock:
         if _registry is None or refresh:
             found: dict = {}
-            _scan(_REPO_DIR, "bundled", found)
+            if os.environ.get("MYSTICAL_PLUGINS_BUNDLED", "1") not in ("0", "false", "no", ""):   # tests: upstream's suite counts two bundled plugins
+                _scan(_REPO_DIR, "bundled", found)
             _scan(_ext_dir(), "external", found)
             _registry = found
         return tuple(_registry.values())
