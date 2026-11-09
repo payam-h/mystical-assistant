@@ -10,6 +10,14 @@ every call: x-agent-token, x-agent-id, x-agent-slots. The Orven Mac app did this
 workspace, origin `forge:<template>`), so the transcript, the cost and the limit-fallback machinery
 ("3 ways on") apply to Forge runs, and they appear in the dashboard like any other session.
 
+Two ways to run a task. Forge's volume is small tasks — comment moderation, 1,800 a day at 15 s
+each (2026-11-09) — and a Mystical session per task would flood the store and the sidebar. So a
+task runs as a **one-shot** (runner.run_blocking with tools, no context pack, no MCP: the Forge
+prompt reaches claude as rendered) unless it is heavy: an Opus model, a tool allow-list, or a
+template named in FORGE_SESSION_TEMPLATES (translations, biographies). Heavy tasks are **sessions**
+(start_streaming_job, origin `forge:<template>`): transcript, cost, cancel from Forge, and the
+limit-fallback machinery apply, and they appear in the dashboard like any other session.
+
 The two rules the Mac app learned the hard way, kept:
   - one workspace per SLOT, wiped before each task, never shared: `<BASE_PATH>/.forge/<slot>` —
     under BASE_PATH so the session may run there (browser.within_base), hidden so the project
@@ -87,6 +95,32 @@ def natural_end(job) -> tuple[bool, str]:
     return True, ""
 
 
+class OneShot:
+    """What run_blocking returned, shaped like a Job for natural_end() and the finish payload."""
+
+    def __init__(self, text: str, session_id, cost, is_error: bool):
+        self.result = text
+        self.texts = [text] if text else []
+        self.session_id = session_id
+        self.cost = cost
+        self.store_session_id = None
+        self.events: list = []
+        self.timed_out = text.startswith("⏱️")
+        self.interrupted = False
+        self.refusal = None
+        self.error_msg = text if (is_error and not self.timed_out) else None
+        self.status = "error" if is_error else "done"
+
+
+def heavy(job: dict, session_templates: str) -> bool:
+    """A session (not a one-shot) for Opus, for a tool allow-list, or for a template named in the setting."""
+    model = str(job.get("model") or "").lower()
+    if "opus" in model or str(job.get("allowedTools") or "").strip():
+        return True
+    names = {t.strip() for t in str(session_templates or "").split(",") if t.strip()}
+    return str(job.get("templateKey") or "") in names
+
+
 class Run:
     def __init__(self, task_id: str, job: dict, slot: int, workdir: str):
         self.task_id, self.job, self.slot, self.workdir = task_id, job, slot, workdir
@@ -95,6 +129,7 @@ class Run:
         self.session_id: str | None = None
         self.sent_events = 0
         self.state = "starting"
+        self.mode = "session"
 
 
 class Plugin:
@@ -113,7 +148,8 @@ class Plugin:
         # injectable for tests
         self.http: Callable = http
         self.start_run: Callable | None = None   # (prompt, workdir, model, permission_mode, allowed_tools, origin, hang) -> job
-        self.wait_job: Callable | None = None    # (job, timeout) -> None
+        self.wait_job: Callable | None = None    # (job, run, timeout) -> None
+        self.run_once: Callable | None = None    # (prompt, workdir, model, permission_mode, hang) -> OneShot
 
     # --- lifecycle ---------------------------------------------------------------------------
     def start(self, ctx) -> None:
@@ -266,22 +302,26 @@ class Plugin:
                 with urllib.request.urlopen(req, timeout=120) as r:
                     with open(os.path.join(work, "input", fname), "wb") as f:
                         shutil.copyfileobj(r, f)
-            self._output(run, f"· workspace: {os.path.basename(work)} (slot {run.slot}) · Mystical session\n")
+            run.mode = "session" if heavy(job, self._s().get("FORGE_SESSION_TEMPLATES", "")) else "one-shot"
+            self._output(run, f"· workspace: {os.path.basename(work)} (slot {run.slot}) · Mystical {run.mode}\n")
 
-            # 2) the session
+            # 2) the run
             try:
                 max_min = int(self._s().get("FORGE_MAX_RUN_MIN") or 160)
             except ValueError:
                 max_min = 160
-            job_obj = (self.start_run or self._start_session)(
-                str(job.get("renderedPrompt") or ""), work, str(job.get("model") or "") or None,
-                str(job.get("permissionMode") or "bypassPermissions"), str(job.get("allowedTools") or ""),
-                f"forge:{run.label}", max_min * 60)
-            if job_obj is None:
-                raise RuntimeError("could not start a session (busy)")
+            prompt = str(job.get("renderedPrompt") or "")
+            model = str(job.get("model") or "") or None
+            pm = str(job.get("permissionMode") or "bypassPermissions")
             run.state = "running"
-            run.session_id = getattr(job_obj, "store_session_id", None)
-            (self.wait_job or self._wait)(job_obj, run, max_min * 60)
+            if run.mode == "one-shot":
+                job_obj = (self.run_once or self._run_once)(prompt, work, model, pm, max_min * 60)
+            else:
+                job_obj = (self.start_run or self._start_session)(prompt, work, model, pm, str(job.get("allowedTools") or ""), f"forge:{run.label}", max_min * 60)
+                if job_obj is None:
+                    raise RuntimeError("could not start a session (busy)")
+                run.session_id = getattr(job_obj, "store_session_id", None)
+                (self.wait_job or self._wait)(job_obj, run, max_min * 60)
 
             # 3) verdict, artifacts, finish
             ok, why = natural_end(job_obj)
@@ -310,6 +350,13 @@ class Plugin:
             with self._lock:
                 self.runs.pop(run.slot, None)
             shutil.rmtree(work, ignore_errors=True)
+
+    def _run_once(self, prompt: str, workdir: str, model: str | None, permission_mode: str, hang: int) -> OneShot:
+        """One claude -p in the workspace: tools on, no context pack, no MCP (skip_pack with a permission mode)."""
+        from bridge import config, runner
+        text, sid, cost, is_error = runner.run_blocking(config.DASH_CHAT_ID, prompt, cwd=workdir, timeout=hang, model=model,
+                                                        skip_pack=True, permission_mode=permission_mode)
+        return OneShot(text or "", sid, cost, bool(is_error))
 
     def _start_session(self, prompt: str, workdir: str, model: str | None, permission_mode: str, allowed_tools: str, origin: str, hang: int):
         from bridge import config, profiles, runner, store
@@ -400,7 +447,7 @@ class Plugin:
             self.recent = []
 
     def _remember(self, run: Run, status: str, why: str, cost) -> None:
-        self.recent.insert(0, {"task": run.task_id, "label": run.label, "slot": run.slot, "status": status, "why": why[:200] if why else "",
+        self.recent.insert(0, {"task": run.task_id, "label": run.label, "slot": run.slot, "mode": run.mode, "status": status, "why": why[:200] if why else "",
                                "cost": cost, "session": run.session_id, "seconds": int(time.time() - run.started), "at": time.time()})
         self.recent = self.recent[:20]
         try:
@@ -415,7 +462,7 @@ class Plugin:
         return {
             "url": self._url(), "configured": bool(s.get("FORGE_AGENT_TOKEN")), "paused": str(s.get("FORGE_PAUSED") or "0") not in ("0", "", "false", "no"),
             "online": self.online, "slots": self._slots(), "agentId": self._agent_id() if self.ctx else None,
-            "running": [{"slot": r.slot, "task": r.task_id, "label": r.label, "state": r.state, "session": r.session_id, "seconds": int(time.time() - r.started)} for r in sorted(self.runs.values(), key=lambda r: r.slot)],
+            "running": [{"slot": r.slot, "task": r.task_id, "label": r.label, "state": r.state, "mode": r.mode, "session": r.session_id, "seconds": int(time.time() - r.started)} for r in sorted(self.runs.values(), key=lambda r: r.slot)],
             "lastClaimAt": self.last_claim_at, "lastBeatAt": self.last_beat_at, "error": self.last_error, "recent": self.recent,
         }
 

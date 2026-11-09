@@ -62,6 +62,25 @@ def test_natural_end_contract():
     assert "refused" in m.natural_end(FakeJob(refusal="no login"))[1]
 
 
+def test_heavy_picks_sessions_for_opus_tools_or_named_templates():
+    m = _mod()
+    names = "actor-bio,caption-translate"
+    assert m.heavy({"templateKey": "comment-moderation", "model": "haiku"}, names) is False
+    assert m.heavy({"templateKey": "actor-bio", "model": "opus"}, names) is True
+    assert m.heavy({"templateKey": "caption-translate", "model": "sonnet"}, names) is True
+    assert m.heavy({"templateKey": "comment-audit", "model": "sonnet", "allowedTools": "Read Write"}, names) is True
+    assert m.heavy({"templateKey": "x", "model": "claude-opus-5-5"}, "") is True
+
+
+def test_one_shot_result_shapes_like_a_job():
+    m = _mod()
+    ok = m.OneShot("verdicts written", "sid", 0.01, False)
+    assert m.natural_end(ok) == (True, "")
+    assert m.natural_end(m.OneShot("❌ No output.", None, None, True))[0] is False
+    to = m.OneShot("⏱️ Timed out after 2 min.", None, None, True)
+    assert to.timed_out and "watchdog" in m.natural_end(to)[1]
+
+
 def test_multipart_has_fields_and_file():
     m = _mod()
     body, ctype = m.multipart({"name": "translated"}, "out.srt", b"1\n00:00 --> 00:01\nhi")
@@ -90,7 +109,8 @@ def test_claim_reserves_capacity_and_runs_the_pipeline(monkeypatch, tmp_path):
     calls = []
     job = {"templateKey": "srt-translate", "renderedPrompt": "translate", "model": "sonnet", "permissionMode": "bypassPermissions",
            "allowedTools": "", "slot": 0, "inputs": [], "outputs": [{"name": "translated", "path": "output/translated.srt"}]}
-    p = _plugin(m, calls, [{"task": {"id": "task-1234567890"}, "job": job}, {}])
+    p = _plugin(m, calls, [{"task": {"id": "task-1234567890"}, "job": job}, {}],
+                settings={"FORGE_URL": "https://forge.test", "FORGE_AGENT_TOKEN": "tok", "FORGE_SLOTS": "2", "FORGE_MAX_RUN_MIN": "1", "FORGE_SESSION_TEMPLATES": "srt-translate"})
     started = {}
     def start_run(prompt, workdir, model, pm, tools, origin, hang):
         started.update(prompt=prompt, workdir=workdir, model=model, pm=pm, origin=origin, hang=hang)
@@ -121,12 +141,40 @@ def test_claim_reserves_capacity_and_runs_the_pipeline(monkeypatch, tmp_path):
     assert not os.path.exists(started["workdir"])           # the slot's folder is wiped after the run
 
 
+def test_a_light_task_runs_as_a_one_shot(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config
+    monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
+    calls = []
+    job = {"templateKey": "comment-moderation", "renderedPrompt": "judge", "model": "haiku", "slot": 0,
+           "outputs": [{"name": "verdicts", "path": "output/verdicts.json"}]}
+    p = _plugin(m, calls, [{"task": {"id": "task-light"}, "job": job}])
+    seen = {}
+    def run_once(prompt, workdir, model, pm, hang):
+        seen.update(prompt=prompt, model=model, pm=pm, hang=hang)
+        with open(os.path.join(workdir, "output", "verdicts.json"), "w") as f:
+            f.write('{"ok":true}')
+        return m.OneShot("done", "sid-1", 0.002, False)
+    p.run_once = run_once
+    p.start_run = lambda *a: (_ for _ in ()).throw(AssertionError("a light task must not open a session"))
+    assert p.claim_once() == "claimed"
+    for _ in range(50):
+        if not p.runs:
+            break
+        time.sleep(0.05)
+    assert seen == {"prompt": "judge", "model": "haiku", "pm": "bypassPermissions", "hang": 60}
+    fin = next(c for c in calls if c[0].endswith("/finish"))
+    assert fin[1]["status"] == "ok" and fin[1]["costUsd"] == 0.002
+    assert any(c[0].endswith("/artifact") for c in calls)
+    assert p.recent[0]["mode"] == "one-shot"
+
+
 def test_a_cut_off_run_fails_and_uploads_nothing(monkeypatch, tmp_path):
     m = _mod()
     from bridge import config
     monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
     calls = []
-    job = {"templateKey": "actor-bio", "renderedPrompt": "x", "slot": 1, "outputs": [{"name": "report", "path": "output/report.md"}]}
+    job = {"templateKey": "actor-bio", "renderedPrompt": "x", "model": "opus", "slot": 1, "outputs": [{"name": "report", "path": "output/report.md"}]}
     p = _plugin(m, calls, [{"task": {"id": "task-2"}, "job": job}])
     def start_run(prompt, workdir, *a):
         os.makedirs(os.path.join(workdir, "output"), exist_ok=True)
