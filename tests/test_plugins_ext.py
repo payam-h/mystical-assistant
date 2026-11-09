@@ -182,3 +182,28 @@ def test_stop_refusal_becomes_an_integration_error(ext, monkeypatch):
     with pytest.raises(integrations.IntegrationError):
         integrations.set_installed("sticky", False)
     assert integrations.installed("sticky") is True                 # the flag did not flip
+
+
+def test_flags_answer_for_every_plugin_even_with_an_older_file(monkeypatch, tmp_path):
+    """plugins.json written before an external plugin existed has no key for it; origins() and
+    state() index flags() by id, so a missing key was a KeyError on every turn-done notice."""
+    from bridge import integrations
+    f = tmp_path / "plugins.json"
+    f.write_text('{"rivendell": true}')
+    monkeypatch.setattr(integrations, "_path", lambda: str(f))
+    monkeypatch.setattr(integrations, "_cache", None, raising=False)
+    on = integrations.flags()
+    assert set(on) == {p["id"] for p in integrations.PLUGINS} and on["rivendell"] is True
+    assert all(on[p["id"]] is False for p in integrations.PLUGINS if p["id"] != "rivendell")
+    assert integrations.is_plugin_origin("rivendell:prod") and not integrations.is_plugin_origin("pixie")
+
+
+def test_the_forks_bundled_manifests_validate():
+    """plugins/*/plugin.json as shipped: each one discovers and validates, whatever the test env says."""
+    from bridge import plugins_ext
+    found: dict = {}
+    plugins_ext._scan(plugins_ext._REPO_DIR, "bundled", found)
+    assert {"orven", "orven-forge", "orven-jobs", "orven-pixie"} <= set(found)
+    px = found["orven-pixie"]
+    assert px["pane"]["title"] == "DEV TEAM" and "PIXIE_DEV_TOKEN" in px["env_keys"] and px["telegram"] == ["devteam"]
+    assert next(s for s in px["settings"] if s["key"] == "PIXIE_DEV_TOKEN")["secret"] is True

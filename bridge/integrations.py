@@ -139,9 +139,12 @@ def installed(pid: str) -> bool:
 
 
 def flags() -> dict[str, bool]:
-    """Every plugin's answer, id -> installed."""
+    """Every plugin's answer, id -> installed. Every id in PLUGINS has an answer: a file
+    written before a plugin existed (or adopted on a fresh machine) has no key for it, and
+    origins()/state() index by id."""    # fork: ids from plugins_ext may be missing from the file
     with _lock:
-        return dict(_load())
+        raw = _load()
+        return {p["id"]: bool(raw.get(p["id"])) for p in PLUGINS}
 
 
 def set_installed(pid: str, on: bool) -> None:

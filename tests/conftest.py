@@ -9,6 +9,14 @@ and, worse, point tests at the real ~/.bridge_state DB and the real chat-id
 allow-list. We hard-assign (not setdefault) so a shell value can never leak in.
 """
 
+# --- fork: plugins --- upstream's suite counts two bundled plugins (Rivendell, Claude Design) and
+# compares flags()/state() exactly; the fork's bundled plugins (plugins/*) stay out of the registry
+# under pytest, and their own tests load plugin.py directly or scan plugins/ themselves.
+import os  # noqa: E402
+os.environ.setdefault("MYSTICAL_PLUGINS_BUNDLED", "0")
+# --- /fork ---
+
+
 import json
 import os
 import shutil

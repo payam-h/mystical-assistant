@@ -149,6 +149,7 @@ def test_loader_sees_the_manifest(monkeypatch):
     monkeypatch.setattr(plugins_ext, "_ext_dir", lambda: tempfile.mkdtemp())
     dirs = {}
     monkeypatch.setattr(plugins_ext, "data_dir", lambda pid: dirs.setdefault(pid, tempfile.mkdtemp()))
+    monkeypatch.setenv("MYSTICAL_PLUGINS_BUNDLED", "1")   # this test wants the shipped manifest
     plugins_ext._registry = None; plugins_ext._live.clear(); plugins_ext._broken.clear()
     try:
         man = plugins_ext.manifest("orven-jobs")

@@ -63,6 +63,7 @@ def test_workspace_fencing(tmp_path):
     allowed = [str(ws)]
     w, r = m.resolve_paths({"workspace": str(ws), "repo": "FlixDrama-PHP"}, allowed)
     assert r.endswith("FlixDrama-PHP") and w == os.path.realpath(str(ws))
+    assert m.resolve_paths({"workspace": str(ws), "repo": "."}, allowed)[1] == w     # the workspace is itself the repo
     for bad in ({"workspace": str(tmp_path), "repo": "flixdrama"}, {"workspace": str(ws), "repo": "../"}, {"workspace": str(ws), "repo": "nope"}):
         try:
             m.resolve_paths(bad, allowed)
