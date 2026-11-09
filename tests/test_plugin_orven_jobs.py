@@ -60,10 +60,10 @@ def test_fixes_are_framed_before_the_prompt():
 def _plugin(m, calls, claim_answers, token_calls=None, first_code=200):
     p = m.Plugin()
     p.ctx = FakeCtx()
-    tokens = iter(["tok-old", "tok-new"])
+    fresh = iter(["tok-new", "tok-newer"])
     def gate_token(refresh):
         (token_calls if token_calls is not None else []).append(refresh)
-        return next(tokens) if refresh else "tok-old"
+        return next(fresh) if refresh else "tok-old"
     p.gate_token = gate_token
     codes = {"first": first_code}
     def fake_http(url, body=None, headers=None, method=None, timeout=30):
