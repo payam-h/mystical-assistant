@@ -338,6 +338,7 @@ class Plugin:
             ("GET", "/gate"): self._r_gate,
             ("POST", "/gate/settings"): self._r_gate_settings,
             ("POST", "/devices/revoke"): self._r_revoke,
+            ("POST", "/devices/rename"): self._r_rename,
             ("POST", "/forget"): self._r_forget,
             ("POST", "/keygen"): lambda req: ({"publicKey": self.gate.keys.ensure()}, 200),
             ("POST", "/adopt"): self._r_adopt,
@@ -386,6 +387,17 @@ class Plugin:
         except Exception as e:  # noqa: BLE001
             return {"error": str(e)[:200]}, 502
         return {"settings": out}, 200
+
+    def _r_rename(self, req):
+        """Orven keeps one name per device (what the enrolling app sent, "My Mac" for each of the Mac app's); this is the edit."""
+        dev, name = str(req["body"].get("id") or ""), str(req["body"].get("name") or "").strip()[:80]
+        if not dev or not name:
+            return {"error": "id and name"}, 400
+        out = self.gate.admin(f"/gate/devices/{dev}", {"name": name}, method="PATCH", creds=self._creds())
+        if dev == self.gate.state.get("deviceId"):
+            self.gate.state["deviceName"] = name
+            self.gate._save()
+        return {"ok": True, "name": (out or {}).get("name", name)}, 200
 
     def _r_revoke(self, req):
         dev = str(req["body"].get("id") or "")

@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from "react";
+import { useRef, type ReactNode, Fragment } from "react";
 import { rightBodyW } from "../lib/shell";
 
 export interface PanelTab {
@@ -14,6 +14,8 @@ export interface PanelTab {
   ask?: boolean;
   // Panel owns its scroller — the wrapper must not add a second one.
   ownScroll?: boolean;
+  // fork: plugins — a hairline above this tab: the first of a group that sits apart on the rail.
+  sep?: boolean;
   // Panel's WHOLE body is one session's data — "project" for the repo-wide
   // ones, "worktree" for the ones whose data is per-branch (two worktrees of
   // the same repo are different trees). Switching outside that scope rebuilds
@@ -106,9 +108,9 @@ export function RightPanel({
         {railHead && <div className="mb-1 flex flex-col items-stretch border-b border-border pb-1">{railHead}</div>}
         {tabs.map((t) => {
           const on = open && t.id === current?.id;
-          return (
+          return (<Fragment key={t.id}>
+            {t.sep ? <div className="srail-sep mx-auto my-1" aria-hidden /> : null}
             <button
-              key={t.id}
               onClick={() => onTab(t.id)}
               title={on ? `${t.label} — click to collapse` : t.label}
               aria-label={t.label}
@@ -135,7 +137,7 @@ export function RightPanel({
                   style={{ background: t.alert ? "var(--err)" : "var(--ask, var(--warn))", boxShadow: `0 0 6px ${t.alert ? "var(--err)" : "var(--ask, var(--warn))"}` }} />
               ) : null}
             </button>
-          );
+          </Fragment>);
         })}
         {railFoot && <div className="mt-auto flex flex-col items-stretch">{railFoot}</div>}
       </div>

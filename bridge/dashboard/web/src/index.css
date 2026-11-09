@@ -7425,3 +7425,7 @@ mark.clg-m { padding: 0; border-radius: 2px; background: color-mix(in oklab, var
    marks the caps as the title bar to drag. */
 :root[data-wco="linux"] { --wco-l: 0px; --wco-r: 0px; }
 .lxclose:hover { color: var(--err) !important; background: color-mix(in srgb, var(--err) 12%, transparent) !important; }
+
+/* fork: plugins — a manifest's own rail icon (inline SVG, currentColor) */
+.rail-svg { display: inline-flex; width: 18px; height: 18px; }
+.rail-svg svg { width: 18px; height: 18px; display: block; }

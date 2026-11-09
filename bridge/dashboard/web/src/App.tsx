@@ -2558,14 +2558,6 @@ export function App() {
           onRead={(k) => setLessonsRead((r) => new Set(r).add(k))} />
       ),
     }] : []),
-    // --- fork: plugins --- one tab per installed plugin with a pane (bridge/plugins_ext.py)
-    ...extPanes.map((p) => ({
-      id: `plugin:${p.id}`, label: p.pane!.title, icon: <Puzzle {...RAIL} />, ownScroll: true,
-      alert: !!p.broken || p.status?.ok === false,
-      ...(p.pane!.scope ? { scope: p.pane!.scope } : {}),
-      render: () => <PluginPane key={p.id} p={p} />,
-    })),
-    // --- /fork ---
     ...(rivendellOn ? [{
       id: "rivendell", label: rivendellDown ? "Rivendell tasks — link broken" : "Rivendell tasks",
       icon: <RivendellIcon {...RAIL} />, ownScroll: true, scope: "project" as const, alert: rivendellDown,
@@ -2593,6 +2585,16 @@ export function App() {
         <UsagePanel onOpenProject={(rel) => openAnalyze(rel)} />
       ),
     },
+    // --- fork: plugins --- one tab per installed plugin with a pane (bridge/plugins_ext.py), its own
+    // group under a hairline after USAGE, each with the icon its manifest ships (ui/icon.svg) or a puzzle piece.
+    ...extPanes.map((p, i) => ({
+      id: `plugin:${p.id}`, label: p.pane!.title, ownScroll: true, sep: i === 0,
+      icon: p.pane!.icon ? <span className="rail-svg" aria-hidden dangerouslySetInnerHTML={{ __html: p.pane!.icon }} /> : <Puzzle {...RAIL} />,
+      alert: !!p.broken || p.status?.ok === false,
+      ...(p.pane!.scope ? { scope: p.pane!.scope } : {}),
+      render: () => <PluginPane key={p.id} p={p} />,
+    })),
+    // --- /fork ---
   ];
 
   // The login the open session spends: its turn in flight's, else the one its

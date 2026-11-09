@@ -111,7 +111,17 @@ def _validate(m: dict, d: str, source: str) -> dict:
             raise PluginError(f"{pid}: pane needs an entry ending in .js")
         if not os.path.isfile(os.path.join(d, "ui", str(pane["entry"]))):
             raise PluginError(f"{pid}: ui/{pane['entry']} is missing")
-        pane = {"title": str(pane.get("title") or pid.upper()), "entry": str(pane["entry"]),
+        icon = None
+        if pane.get("icon"):      # the rail tab's own icon: a small inline SVG drawn with currentColor, from ui/
+            ipath = os.path.join(d, "ui", str(pane["icon"]))
+            try:
+                with open(ipath, encoding="utf-8") as f:
+                    icon = f.read(8192).strip()
+            except OSError:
+                raise PluginError(f"{pid}: ui/{pane['icon']} is missing")
+            if not icon.startswith("<svg") or len(icon) > 6000 or "<script" in icon.lower() or "javascript:" in icon.lower() or re.search(r"\son\w+\s*=", icon):
+                raise PluginError(f"{pid}: pane icon must be a small plain <svg> (no scripts or handlers)")
+        pane = {"title": str(pane.get("title") or pid.upper()), "entry": str(pane["entry"]), "icon": icon,
                 "css": str(pane.get("css") or "") or None, "scope": pane.get("scope") if pane.get("scope") in ("project", "worktree") else None}
     return {
         "id": pid, "label": str(m.get("label") or pid), "version": str(m.get("version") or "0"),
