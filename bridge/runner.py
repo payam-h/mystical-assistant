@@ -836,6 +836,7 @@ class Job:
         self._held: dict[str, str] = {}   # a pick made before the child existed
         self.texts: list[str] = []       # assistant text this turn
         self.ctx_tokens: int | None = None  # window fill on the last request (see _ctx_of)
+        self.compacted: "dict | None" = None  # set by a compact_boundary (see _handle_line)
         # What the turn spent: the same four counters, summed instead of last-wins.
         # None until a message actually reports usage, so a stream that never did
         # leaves the columns NULL — unknown rather than free.
@@ -2346,6 +2347,15 @@ def _handle_event(job: Job, d: dict):
         job.status, job.elapsed = "running", None
     elif t == "system" and d.get("subtype") == "hook_response":
         _hook_log(job, d)
+    elif t == "system" and d.get("subtype") == "compact_boundary":
+        # /compact (or auto-compact) finished. The turn has no words of its own,
+        # so it said nothing and the meter kept the pre-compact fill until the
+        # next turn. Remember it: the answer says what happened, and the stale
+        # fill is cleared at turn end (the next request reports the real one).
+        meta = d.get("compact_metadata") or d.get("compactMetadata") or {}
+        job.compacted = {"pre": meta.get("pre_tokens") or meta.get("preTokens"),
+                         "trigger": meta.get("trigger") or ""}
+        job.ctx_tokens = None
     elif t == "control_response":
         # The CLI's answer to one of ours (interrupt, set_model,
         # set_permission_mode). Only a refusal earns a row: the pick it carried
@@ -2358,6 +2368,10 @@ def _handle_event(job: Job, d: dict):
         job.control_answered(r.get("request_id"), r.get("subtype") == "success")
     elif t == "result":
         job.result = d.get("result", "") or d.get("error", "")
+        if not job.result and getattr(job, "compacted", None):
+            pre = job.compacted.get("pre")
+            job.result = ("Context compacted" + (f": {round(pre / 1000)}k tokens summarized" if pre else "")
+                          + ". The conversation carries on from the summary.")
         job.cost = d.get("total_cost_usd")
         if d.get("session_id"):
             job.session_id = d["session_id"]
@@ -2939,6 +2953,10 @@ def _run_streaming(job: Job, prompt: str, image_paths: list[str], cwd: str,
                 # Also on a killed/timed-out turn: the last request's fill is still
                 # what the next one resumes into.
                 store.set_ctx_tokens(job.store_session_id, job.ctx_tokens)
+            elif getattr(job, "compacted", None):
+                # Compacted with no request after it: the old fill is gone, the
+                # new one is unknown until the next turn.
+                store.set_ctx_tokens(job.store_session_id, None)
             # Also on a killed turn: what it spent before dying was still spent,
             # and a capped turn is exactly the one worth accounting for.
             store.set_turn_tokens(job.id, job.tokens)

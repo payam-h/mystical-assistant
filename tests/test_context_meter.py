@@ -166,3 +166,23 @@ def test_only_hooks_with_something_to_say_reach_the_transcript():
         ("hook", "PreToolUse:Bash", "injected context", False),
         ("hook", "PreToolUse:Write", "blocked", True),
     ]
+
+
+def test_a_compact_turn_says_what_it_did_and_drops_the_stale_fill():
+    # /compact answers with no words; the meter kept the pre-compact 78% until
+    # the next turn. The boundary clears the fill and the empty answer says why.
+    job = runner.Job("j3", 555)
+    runner._handle_event(job, {"type": "assistant", "message": {
+        "usage": _usage(1, 780000, 0), "content": []}})
+    runner._handle_event(job, {"type": "system", "subtype": "compact_boundary",
+                               "compact_metadata": {"trigger": "manual", "pre_tokens": 785651}})
+    runner._handle_event(job, {"type": "result", "result": ""})
+    assert job.ctx_tokens is None
+    assert "786k tokens summarized" in job.result
+
+
+def test_a_turn_with_its_own_answer_keeps_it_after_a_compaction():
+    job = runner.Job("j4", 555)
+    runner._handle_event(job, {"type": "system", "subtype": "compact_boundary", "compact_metadata": {}})
+    runner._handle_event(job, {"type": "result", "result": "done the plan"})
+    assert job.result == "done the plan"
