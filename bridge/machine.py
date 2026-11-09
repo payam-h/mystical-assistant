@@ -133,6 +133,34 @@ def list_running() -> list[dict]:
     return out
 
 
+def live_session_starts() -> dict[str, float]:
+    """Session id -> when its live Claude process started (seconds), for every live one,
+    the bridge's sdk-cli children included. 0.0 when the registry gives no start time.
+
+    A session can be alive again in a NEW process (a terminal or the Orven app reopening
+    yesterday's tab with --resume): what the dead process left unfinished is not running."""
+    out: dict[str, float] = {}
+    try:
+        names = os.listdir(SESSIONS_DIR)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(SESSIONS_DIR, name)) as f:
+                raw = json.load(f)
+        except (OSError, ValueError):
+            continue
+        sid = raw.get("sessionId")
+        if not sid or not _alive(raw.get("pid")):
+            continue
+        st = raw.get("startedAt")
+        st = (st / 1000.0 if st > 1e12 else float(st)) if isinstance(st, (int, float)) else 0.0
+        out[sid] = min(out[sid], st) if sid in out and st else (st or out.get(sid, 0.0))
+    return out
+
+
 def live_session_ids() -> set[str]:
     """Session ids whose Claude process is still alive — including the bridge's own
     sdk-cli children that list_running() drops. Nothing can still be running in a

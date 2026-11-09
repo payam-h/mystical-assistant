@@ -14,7 +14,7 @@ os.environ.setdefault("BRIDGE_DB", os.path.join(tempfile.mkdtemp(), "t.db"))
 from bridge import agents, machine, transcript_jsonl  # noqa: E402
 
 
-def _register(sid, alive=True):
+def _register(sid, alive=True, started_ms=None):
     """Write a Claude session-registry entry for `sid` (conftest points
     machine.SESSIONS_DIR at an empty temp dir). Agents only count as running while
     their parent process does, so a live pid is part of the fixture. Fresh dir per
@@ -23,7 +23,7 @@ def _register(sid, alive=True):
     pid = os.getpid() if alive else 2 ** 22   # >/proc/sys/kernel/pid_max → dead
     with open(os.path.join(machine.SESSIONS_DIR, f"{pid}.json"), "w") as f:
         json.dump({"pid": pid, "sessionId": sid, "cwd": "/tmp/proj",
-                   "entrypoint": "sdk-cli"}, f)
+                   "entrypoint": "sdk-cli", **({"startedAt": started_ms} if started_ms else {})}, f)
 
 
 def _fixture(alive=True):
@@ -356,5 +356,28 @@ def test_background_agent_runs_until_its_task_notification():
                 "text": "<task-notification>\n<task-id>a3</task-id>\n<status>stopped</status>\n"
                         "</task-notification>"}]}})
         assert status() == ("done", 1)
+    finally:
+        transcript_jsonl.PROJECTS_DIR = orig
+
+
+def test_a_reopened_session_does_not_revive_its_old_agents():
+    """The Orven app reopens yesterday's tabs with --resume: the session is alive again in a
+    new process, and the agents the old process left unfinished are not working (they read
+    "14 working · 1118h" in the sidebar)."""
+    import time as _t
+    root, sid = _fixture(alive=True)
+    a2 = os.path.join(root, "-tmp-proj", sid, "subagents", "agent-a2.jsonl")
+    with open(a2, "w") as f:      # a2 started a month ago
+        f.write(json.dumps({"type": "assistant", "isSidechain": True, "timestamp": "2026-10-09T10:00:00Z",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "still going"}]}}) + "\n")
+    _register(sid, alive=True, started_ms=int(_t.time() * 1000))     # the process started just now
+    orig = transcript_jsonl.PROJECTS_DIR
+    transcript_jsonl.PROJECTS_DIR = root
+    try:
+        out = agents.session_agents({"claude_session_id": sid})
+        assert out["running"] == 0
+        assert agents.agent_activity({"claude_session_id": sid}, "agent-a2")["status"] == "done"
+        _register(sid, alive=True, started_ms=int(_t.mktime((2026, 10, 9, 9, 0, 0, 0, 0, -1)) * 1000))   # process older than a2
+        assert agents.session_agents({"claude_session_id": sid})["running"] == 1
     finally:
         transcript_jsonl.PROJECTS_DIR = orig

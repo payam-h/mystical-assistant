@@ -27,6 +27,13 @@ _summary_cache: "dict[str, tuple]" = {}     # jsonl path -> ((mtime, size), summ
 _summary_lock = threading.Lock()
 
 
+def _mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def _summary(path: str) -> dict:
     """What the roster says about one agent, off its own records: when it started
     and last wrote — the records' timestamps, since st_ctime is the inode-change
@@ -95,8 +102,33 @@ def _session_alive(session: dict) -> bool:
     'running' while its parent is: a killed / exited parent never writes the
     tool_result that would mark its agents done, so without this every abandoned
     fan-out reads "N agents working" forever."""
+    return _alive_since(session) is not None
+
+
+# A sub-agent records its first line a moment after its parent process may have started.
+_SINCE_SLACK = 120.0
+
+
+def _alive_since(session: dict) -> "float | None":
+    """When the live process that owns this session started (0.0: alive, start unknown),
+    or None when no process holds it. fork: a reopened session — the Orven app restores
+    its tabs with --resume — is alive again, and every agent its previous process left
+    unfinished weeks ago read as "working" for 1118 hours. Only an agent that started
+    after this process did can be running."""
     sid = session.get("claude_session_id")
-    return bool(sid) and sid in machine.live_session_ids()
+    if not sid:
+        return None
+    return machine.live_session_starts().get(sid)
+
+
+def _ran_here(since: "float | None", started_at: float, fallback: float = 0.0) -> bool:
+    """Could an agent that started at `started_at` belong to the live process?"""
+    if since is None:
+        return False
+    if not since:
+        return True
+    t = started_at or fallback
+    return not t or t >= since - _SINCE_SLACK
 
 
 def _subagents_dir(session: dict) -> str | None:
@@ -190,7 +222,7 @@ def _run_status(rec: dict, alive: bool = True) -> str:
     return "done" if (raw and raw != "running") or not alive else "running"
 
 
-def _session_workflows(subagents_dir: str, alive: bool = True) -> list[dict]:
+def _session_workflows(subagents_dir: str, alive: bool = True, since: "float | None" = 0.0) -> list[dict]:
     """Group Workflow-spawned sub-agents (subagents/workflows/<run>/) by run,
     enriched with the run record. Ordered by first sub-agent start."""
     wf_root = os.path.join(subagents_dir, "workflows")
@@ -219,6 +251,11 @@ def _session_workflows(subagents_dir: str, alive: bool = True) -> list[dict]:
                         "status": status,          # sub-agents mirror the run
                         **_summary(os.path.join(run_dir, agent_id + ".jsonl"))})
         sub.sort(key=lambda a: a["started_at"])
+        # a run the previous process left "running" is not this process's run (see _alive_since)
+        if status == "running" and sub and not _ran_here(since, sub[0]["started_at"]):
+            status = "done"
+            for a in sub:
+                a["status"] = "done"
         out.append({"run_id": run_id,
                     "name": rec.get("workflowName") or run_id,
                     "status": status,
@@ -237,7 +274,8 @@ def session_agents(session: dict) -> dict:
     if not d:
         return {"running": 0, "total": 0, "agents": [], "workflows": []}
     marks = _finished_marks(session)
-    alive = _session_alive(session)
+    since = _alive_since(session)
+    alive = since is not None
     out: list[dict] = []
     for meta_path in glob.glob(os.path.join(d, "*.meta.json")):
         try:
@@ -247,16 +285,18 @@ def session_agents(session: dict) -> dict:
             continue
         agent_id = os.path.basename(meta_path)[:-len(".meta.json")]
         tool_use_id = meta.get("toolUseId") or ""
-        status = "done" if _finished(meta, agent_id, marks) or not alive else "running"
+        summ = _summary(os.path.join(d, agent_id + ".jsonl"))
+        here = _ran_here(since, summ["started_at"], _mtime(meta_path))
+        status = "done" if _finished(meta, agent_id, marks) or not here else "running"
         out.append({"agent_id": agent_id,
                     "agent_type": meta.get("agentType") or "agent",
                     "description": meta.get("description") or "",
                     "tool_use_id": tool_use_id,
                     "spawn_depth": meta.get("spawnDepth") or 1,
                     "status": status,
-                    **_summary(os.path.join(d, agent_id + ".jsonl"))})
+                    **summ})
     out.sort(key=lambda a: a["started_at"])
-    workflows = _session_workflows(d, alive)
+    workflows = _session_workflows(d, alive, since)
     wf_agents = [a for w in workflows for a in w["agents"]]
     return {"running": sum(1 for a in out if a["status"] == "running")
                        + sum(1 for a in wf_agents if a["status"] == "running"),
@@ -295,7 +335,8 @@ def agent_activity(session: dict, agent_id: str, cursor: int = 0,
     except (OSError, json.JSONDecodeError):
         pass
     run = transcript_jsonl.parse_jsonl(jsonl, cursor, sidechain=True)
-    alive = _session_alive(session)
+    since = _alive_since(session)
+    alive = _ran_here(since, _summary(jsonl)["started_at"])
     if workflow_id:                                       # status follows the run
         status = _run_status(_workflow_records(d).get(workflow_id, {}), alive)
     else:
