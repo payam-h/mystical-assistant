@@ -1,0 +1,21 @@
+{
+  "id": "orven-forge",
+  "label": "Forge",
+  "version": "0.1.0",
+  "blurb": "Runs Forge tasks (Claude Code as a service, forge.imagelens.xyz) on this machine as Mystical sessions: claim → workspace → session → artifacts → finish. Adds the FORGE tab (slots, queue, recent runs) and /forge on Telegram. Replaces the Orven Mac app's Forge work-source.",
+  "needs": "the Forge agent token",
+  "entry": "plugin.py",
+  "routes": ["/plugin/orven-forge"],
+  "origins": ["forge"],
+  "settings": [
+    {"key": "FORGE_URL", "label": "Forge URL", "default": "https://forge.imagelens.xyz"},
+    {"key": "FORGE_AGENT_TOKEN", "label": "Agent token", "secret": true, "hint": "FORGE_AGENT_TOKEN on the Forge box; sent as x-agent-token"},
+    {"key": "FORGE_AGENT_NAME", "label": "Agent name", "default": "Mystical on this Mac"},
+    {"key": "FORGE_SLOTS", "label": "Slots (parallel tasks)", "default": "1", "hint": "the Forge dashboard's per-device cap applies too"},
+    {"key": "FORGE_POLL_SEC", "label": "Claim every (s)", "default": "10"},
+    {"key": "FORGE_MAX_RUN_MIN", "label": "Max minutes per task", "default": "160"},
+    {"key": "FORGE_PAUSED", "label": "Paused (1 = claim nothing)", "default": "0"}
+  ],
+  "pane": {"title": "FORGE", "entry": "pane.js", "css": "pane.css"},
+  "telegram": ["forge"]
+}
