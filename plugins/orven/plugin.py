@@ -193,7 +193,10 @@ class Gate:
                 if not creds or not creds[0]:
                     raise RuntimeError("admin email/password not set")
                 self.login(*creds)
-            code, out, _ = http(f"{self.base}/api{path}", body, {"Cookie": f"orven_token={self._jwt}"}, method)
+            # Behind the gate (nginx auth_request) an admin call needs the gate cookie too; once this device
+            # has unlocked we have one. Before the first enrolment only an allowed IP gets through.
+            cookie = f"orven_token={self._jwt}" + (f"; orven_gate={self.state['token']}" if self.state.get("token") else "")
+            code, out, _ = http(f"{self.base}/api{path}", body, {"Cookie": cookie, **({"x-gate-token": self.state["token"]} if self.state.get("token") else {})}, method)
             if code in (401, 403) and attempt == 0:
                 self._jwt = None
                 continue
@@ -314,10 +317,18 @@ class Plugin:
         return {
             "panel": self.gate.base if self.gate else None,
             "enrolled": bool(st.get("deviceId")), "deviceId": st.get("deviceId"), "deviceName": st.get("deviceName"),
+            "publicKey": st.get("publicKey") or self._pubkey_if_any(),
             "ip": self.last.get("ip"), "checkedAt": self.last.get("checkedAt"), "error": self.last.get("error"),
             "allowedIp": st.get("ip"), "allowedUntil": st.get("ipExpiresAt"), "lastUnlockAt": st.get("lastUnlockAt"),
             "adminConfigured": bool(self._creds()[0] and self._creds()[1]),
         }
+
+    def _pubkey_if_any(self) -> "str | None":
+        """The device public key once a key exists (so an owner can enrol it from the panel by hand)."""
+        try:
+            return self.gate.keys.public() if self.gate and os.path.isfile(self.gate.keys.path) else None
+        except Exception:  # noqa: BLE001
+            return None
 
     def routes(self) -> dict:
         return {
@@ -328,6 +339,8 @@ class Plugin:
             ("POST", "/gate/settings"): self._r_gate_settings,
             ("POST", "/devices/revoke"): self._r_revoke,
             ("POST", "/forget"): self._r_forget,
+            ("POST", "/keygen"): lambda req: ({"publicKey": self.gate.keys.ensure()}, 200),
+            ("POST", "/adopt"): self._r_adopt,
         }
 
     def _r_unlock(self, req):
@@ -383,6 +396,15 @@ class Plugin:
         except Exception as e:  # noqa: BLE001
             return {"error": str(e)[:200]}, 502
         return {"ok": True}, 200
+
+    def _r_adopt(self, req):
+        """The device was enrolled by hand in the panel (its id pasted here): remember it and unlock."""
+        dev = str(req["body"].get("deviceId") or "").strip()
+        if not dev:
+            return {"error": "deviceId"}, 400
+        self.gate.state.update({"deviceId": dev, "deviceName": req["body"].get("name") or self.ctx.settings().get("ORVEN_DEVICE_NAME"), "publicKey": self.gate.keys.ensure(), "enrolledAt": time.time()})
+        self.gate._save()
+        return {"did": self.tick(), **self._view()}, 200
 
     def _r_forget(self, req):
         self.gate.state = {}
