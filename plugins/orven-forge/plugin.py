@@ -353,8 +353,10 @@ class Plugin:
 
     def _run_once(self, prompt: str, workdir: str, model: str | None, permission_mode: str, hang: int) -> OneShot:
         """One claude -p in the workspace: tools on, no context pack, no MCP (skip_pack with a permission mode)."""
-        from bridge import config, runner
-        text, sid, cost, is_error = runner.run_blocking(config.DASH_CHAT_ID, prompt, cwd=workdir, timeout=hang, model=model,
+        from bridge import config, native, runner
+        # Tagged like the bridge's own one-shots: the session scanner (bridge/native.py) would otherwise list
+        # every run — comment-moderation alone is ~1,800 a day — as a session in the sidebar.
+        text, sid, cost, is_error = runner.run_blocking(config.DASH_CHAT_ID, f"{native.INTERNAL_ONESHOT_TAG}\n{prompt}", cwd=workdir, timeout=hang, model=model,
                                                         skip_pack=True, permission_mode=permission_mode)
         return OneShot(text or "", sid, cost, bool(is_error))
 
