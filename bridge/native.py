@@ -51,6 +51,14 @@ def _is_internal_oneshot(title: str) -> bool:
             or title.startswith(_LEGACY_INTERNAL_PREFIXES))
 
 
+_PLUGIN_SCRATCH = (".forge",)     # fork: folders under BASE_PATH whose sessions are a plugin's throwaway runs
+
+
+def _in_plugin_scratch(cwd: str) -> bool:
+    rel_path = os.path.relpath(os.path.realpath(cwd), config.BASE_PATH)
+    return rel_path.split(os.sep)[0] in _PLUGIN_SCRATCH
+
+
 def refresh(chat_id: int | None = None, *, force: bool = False) -> int:
     """Debounced scan() for the hot path (session-list requests), so a session
     just started in VSCode shows up without rescanning on every poll."""
@@ -137,6 +145,10 @@ def scan(chat_id: int | None = None) -> int:
                 _scanned[path] = (mtime, False)
                 continue
             indexed = bool(cwd and within_base(cwd))
+            # fork: a plugin's scratch workspace (BASE_PATH/.forge/<slot>) is not a project; its runs are
+            # one-shots, tagged from now on, but older transcripts there carry no tag.
+            if indexed and _in_plugin_scratch(cwd):
+                indexed = False
             if indexed:
                 title = transcript_jsonl.first_user_text(path)
                 if title and _is_internal_oneshot(title):

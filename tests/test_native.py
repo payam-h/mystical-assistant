@@ -260,3 +260,11 @@ def test_scan_survives_a_transcript_whose_uuid_is_already_a_bridge_row():
     native.scan(chat_id=OWNER)
     assert store.get_session("uuid-collide")["origin"] == "dashboard"          # not reclassified, not duplicated
     assert store.get_by_claude_session_id("uuid-after")["title"] == "the one after it"
+
+
+def test_scan_skips_a_plugins_scratch_workspace():
+    """BASE_PATH/.forge/<slot> holds Forge one-shots; an untagged old transcript there must not list."""
+    cwd = os.path.join(_BASE, ".forge", "anvil"); os.makedirs(cwd, exist_ok=True)
+    _write_native("uuid-forge-old", cwd, first_user="You are one run of an automated comment-moderation pipeline")
+    native.scan(chat_id=OWNER)
+    assert store.get_by_claude_session_id("uuid-forge-old") is None
