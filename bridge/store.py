@@ -366,7 +366,10 @@ def upsert_native_session(claude_sid: str, chat_id: int, project: str, cwd: str,
     per branch. Nothing lets you move a native row to another project by hand,
     so there is no human choice here to clobber."""
     now = updated if updated is not None else time.time()
-    existing = get_by_claude_session_id(claude_sid)
+    # fork: a row whose id IS this uuid but whose claude_session_id differs (a bridge session that
+    # went on under a new Claude id, or one not run yet) is the same session, not a new one — the
+    # INSERT below would hit UNIQUE(sessions.id) and the whole scan pass died on it.
+    existing = get_by_claude_session_id(claude_sid) or get_session(claude_sid)
     with closing(_connect()) as c:
         if existing:
             # Refresh mtime/cwd; keep an existing human title but heal auto-titles

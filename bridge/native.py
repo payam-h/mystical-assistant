@@ -12,6 +12,7 @@ is refreshed in place, not duplicated or reclassified. Stdlib only.
 """
 
 import os
+import sys
 import threading
 import time
 
@@ -129,17 +130,27 @@ def scan(chat_id: int | None = None) -> int:
                 if cached[1]:
                     count += 1
                 continue
-            cwd, origin = transcript_jsonl.recover_meta(path)
+            try:    # fork: one bad transcript or row must not end the pass for the rest
+                cwd, origin = transcript_jsonl.recover_meta(path)
+            except Exception as e:  # noqa: BLE001
+                print(f"[native] {os.path.basename(path)}: {e!r}", file=sys.stderr)
+                _scanned[path] = (mtime, False)
+                continue
             indexed = bool(cwd and within_base(cwd))
             if indexed:
                 title = transcript_jsonl.first_user_text(path)
                 if title and _is_internal_oneshot(title):
                     indexed = False               # bridge-internal one-shot — never list
                 else:
-                    row = store.upsert_native_session(uid, owner,
-                                                      rel(git.main_checkout(cwd)), cwd,
-                                                      title=title.strip()[:60] if title else None,
-                                                      updated=mtime, origin=origin)
+                    try:
+                        row = store.upsert_native_session(uid, owner,
+                                                          rel(git.main_checkout(cwd)), cwd,
+                                                          title=title.strip()[:60] if title else None,
+                                                          updated=mtime, origin=origin)
+                    except Exception as e:  # noqa: BLE001 - fork: see above
+                        print(f"[native] {uid[:8]}: {e!r}", file=sys.stderr)
+                        _scanned[path] = (mtime, False)
+                        continue
                     # fork: ai titles — Claude's own name for the session beats the first prompt, and
                     # follows it when Claude renames; a subject or a manual rename stays (store.set_ai_title).
                     ai = transcript_jsonl.latest_ai_title(path)
