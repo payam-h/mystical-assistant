@@ -42,3 +42,15 @@ assert.equal(failureKind("mcp__x__y", "anything"), "tool:mcp__x__y");
 // a failed call with no id can't be paired, and reads as nothing
 assert.equal(analyzeFailures([{ type: "tool", name: "Bash", summary: "x" }]).unresolved.length, 0);
 console.log("failures.check: ok");
+
+// refused before it ran: not a failure, not unresolved
+r = analyzeFailures([tool("a", "Bash", "sleep 240; cat x"), bad("a", "<tool_use_error>Blocked: sleep 240 followed by: cat x. To wait for a condition, use Monitor"), tool("b", "Bash", "ls"), ok("b")]);
+assert.equal(r.unresolved.length, 0);
+assert.deepEqual(r.refused.map((f) => f.id), ["a"]);
+r = analyzeFailures([tool("a", "Bash", "rm -rf x"), bad("a", "Permission for this command was denied by a built-in Claude Code safety check")]);
+assert.equal(r.unresolved.length, 0);
+assert.equal(r.refused.length, 1);
+// a real error is still a failure
+r = analyzeFailures([tool("a", "Bash", "pytest"), bad("a", "Exit code 1\nBlocked by 3 failing tests")]);
+assert.equal(r.unresolved.length, 1);
+assert.equal(r.refused.length, 0);

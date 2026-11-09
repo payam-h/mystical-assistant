@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, ChevronDown, CircleX, ExternalLink, FileDiff, GitCommitHorizontal, GitPullRequest, Upload, X } from "lucide-react";
+import { Ban, Check, ChevronDown, CircleX, ExternalLink, FileDiff, GitCommitHorizontal, GitPullRequest, Upload, X } from "lucide-react";
 import { fmtTokens } from "../lib/week";
 import { runtimeBadge } from "../lib/agents";
 import { wall } from "../lib/surfaces";
@@ -100,6 +100,13 @@ export function TurnReceipt({ r, onJump }: { r: Receipt; onJump: (i: number) => 
           <button type="button" className="ma-link" onClick={() => onJump(f.i)}>show</button>
         </div>
       ))}
+      {r.refused.length > 0 && (
+        <div className="ma-rc-refused" role="note" title={r.refused.map((f) => `${f.what}\n${f.text}`).join("\n\n")}>
+          <Ban size={12} aria-hidden />
+          <span>{r.refused.length === 1 ? "1 call was refused before it ran" : `${r.refused.length} calls were refused before they ran`} — nothing happened</span>
+          <button type="button" className="ma-link" onClick={() => onJump(r.refused[0].i)}>show</button>
+        </div>
+      )}
     </div>
   );
 }

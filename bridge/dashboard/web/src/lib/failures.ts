@@ -45,12 +45,21 @@ function errorText(d: Ev): string {
   return t.length > 400 ? `${t.slice(0, 399)}…` : t;
 }
 
-export function analyzeFailures(events: Ev[]): { unresolved: Failure[]; recovered: Set<string> } {
+// A call that never ran: the harness's safety check or a hook blocked it, or the person declined the permission.
+// Nothing happened, so it is not a failure to fix — the receipt shows it apart, quietly (fork).
+const REFUSED = /^\s*(?:<tool_use_error>\s*)?(?:Blocked:|Permission (?:for this command was|to use \S+ has been) denied|The user doesn't want to proceed|Hook \S+ blocked|This command requires approval)/i
+
+export function wasRefused(text: string): boolean {
+  return REFUSED.test(text)
+}
+
+export function analyzeFailures(events: Ev[]): { unresolved: Failure[]; recovered: Set<string>; refused: Failure[] } {
   const done = new Map<string, Ev>();
   for (const e of events) if (e.type === "tool_done" && e.id) done.set(e.id, e);
   // Newest first: a kind is good from the moment one of its calls last succeeded.
   const goodAfter = new Set<string>();
   const unresolved: Failure[] = [];
+  const refused: Failure[] = [];
   const recovered = new Set<string>();
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
@@ -59,8 +68,10 @@ export function analyzeFailures(events: Ev[]): { unresolved: Failure[]; recovere
     if (!d) continue;
     const kind = failureKind(e.name, e.summary, e.detail);
     if (!d.is_error) { goodAfter.add(kind); continue; }
-    if (goodAfter.has(kind)) recovered.add(e.id);
-    else unresolved.unshift({ i, id: e.id, name: e.name, what: e.detail ?? e.summary ?? "", text: errorText(d) });
+    const f = { i, id: e.id, name: e.name, what: e.detail ?? e.summary ?? "", text: errorText(d) };
+    if (wasRefused((d.output ?? "") || (d.stat ?? ""))) refused.unshift(f);
+    else if (goodAfter.has(kind)) recovered.add(e.id);
+    else unresolved.unshift(f);
   }
-  return { unresolved, recovered };
+  return { unresolved, recovered, refused };
 }

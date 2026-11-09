@@ -28,6 +28,8 @@ export type Receipt = {
   tokens: number | null;
   runtime: string | null;
   unresolved: Failure[];
+  /** Calls refused before they ran (harness check, hook, declined permission): shown apart, not as failures. */
+  refused: Failure[];
 };
 
 /** A `checks` event as words: the numbers, and how they stand against the known
@@ -135,12 +137,12 @@ export function receiptOf(events: Ev[], meta: { elapsed?: number | null; tokens?
     secs,
     tokens: typeof meta.tokens === "number" && meta.tokens > 0 ? meta.tokens : null,
     runtime: meta.runtime || null,
-    unresolved: analyzeFailures(events).unresolved,
+    ...(({ unresolved, refused }) => ({ unresolved, refused }))(analyzeFailures(events)),
   };
 }
 
 /** Nothing worth a row. */
 export function receiptEmpty(r: Receipt): boolean {
   return !r.files.length && !r.checks.length && !r.commits.length && !r.pushed.length && !r.prs.length
-    && r.secs == null && r.tokens == null && !r.runtime && !r.unresolved.length;
+    && r.secs == null && r.tokens == null && !r.runtime && !r.unresolved.length && !r.refused.length;
 }

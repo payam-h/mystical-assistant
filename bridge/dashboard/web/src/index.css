@@ -7429,3 +7429,7 @@ mark.clg-m { padding: 0; border-radius: 2px; background: color-mix(in oklab, var
 /* fork: plugins — a manifest's own rail icon (inline SVG, currentColor) */
 .rail-svg { display: inline-flex; width: 18px; height: 18px; }
 .rail-svg svg { width: 18px; height: 18px; display: block; }
+
+/* fork: a refused call (harness check, hook, declined permission) — never ran, so not a red failure */
+.ma-rc-refused { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: var(--t11); color: var(--txl); }
+.ma-rc-refused .ma-link { margin-left: 4px; }
