@@ -966,6 +966,15 @@ def set_subject_title(session_id: str, title: str) -> None:
                   "WHERE id=? AND title_source='auto'", (title, session_id))
 
 
+
+def set_ai_title(session_id: str, title: str) -> None:     # fork: ai titles
+    """The name Claude Code gave the session itself (an ai-title line in its transcript), marked
+    'ai'. Replaces a first-prompt title or an older ai title; never a subject or a manual rename."""
+    with closing(_connect()) as c:
+        c.execute("UPDATE sessions SET title=?, title_source='ai' "
+                  "WHERE id=? AND title_source IN ('auto','ai') AND (title IS NULL OR title<>?)",
+                  (title, session_id, title))
+
 def rename(session_id: str, title: str) -> None:
     with closing(_connect()) as c:
         c.execute("UPDATE sessions SET title=?, title_source='manual' WHERE id=?",

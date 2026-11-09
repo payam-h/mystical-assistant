@@ -136,10 +136,15 @@ def scan(chat_id: int | None = None) -> int:
                 if title and _is_internal_oneshot(title):
                     indexed = False               # bridge-internal one-shot — never list
                 else:
-                    store.upsert_native_session(uid, owner,
-                                                rel(git.main_checkout(cwd)), cwd,
-                                                title=title.strip()[:60] if title else None,
-                                                updated=mtime, origin=origin)
+                    row = store.upsert_native_session(uid, owner,
+                                                      rel(git.main_checkout(cwd)), cwd,
+                                                      title=title.strip()[:60] if title else None,
+                                                      updated=mtime, origin=origin)
+                    # fork: ai titles — Claude's own name for the session beats the first prompt, and
+                    # follows it when Claude renames; a subject or a manual rename stays (store.set_ai_title).
+                    ai = transcript_jsonl.latest_ai_title(path)
+                    if ai and row and row.get("title_source") in (None, "auto", "ai") and row.get("title") != ai:
+                        store.set_ai_title(row["id"], ai)
                     count += 1
             # Classification is a pure function of file content, so cache it: an
             # unchanged file always yields the same indexed/skip outcome.

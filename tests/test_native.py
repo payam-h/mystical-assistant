@@ -226,3 +226,22 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     raise SystemExit(1 if failed else 0)
+
+
+def test_scan_takes_claudes_own_title_and_keeps_a_manual_rename():
+    cwd = os.path.join(_BASE, "titled"); os.makedirs(cwd, exist_ok=True)
+    path = _write_native("uuid-ai-title", cwd, first_user="can you check the asiatech server please")
+    native.scan(chat_id=OWNER)
+    assert store.get_by_claude_session_id("uuid-ai-title")["title"] == "can you check the asiatech server please"
+    with open(path, "a") as f:
+        f.write(json.dumps({"type": "ai-title", "aiTitle": "Asiatech health check", "sessionId": "uuid-ai-title"}) + "\n")
+    os.utime(path, (os.path.getmtime(path) + 5, os.path.getmtime(path) + 5))     # the scanner skips an unchanged mtime
+    native.scan(chat_id=OWNER)
+    row = store.get_by_claude_session_id("uuid-ai-title")
+    assert (row["title"], row["title_source"]) == ("Asiatech health check", "ai")
+    store.rename(row["id"], "My own name")
+    with open(path, "a") as f:
+        f.write(json.dumps({"type": "ai-title", "aiTitle": "Newer AI name", "sessionId": "uuid-ai-title"}) + "\n")
+    os.utime(path, (os.path.getmtime(path) + 10, os.path.getmtime(path) + 10))
+    native.scan(chat_id=OWNER)
+    assert store.get_by_claude_session_id("uuid-ai-title")["title"] == "My own name"
