@@ -35,11 +35,11 @@ export function mount(root, ctx) {
     root.append(h("section", { class: "fg-sec" }, h("h3", {}, `SLOTS · ${v.running.length}/${v.slots}`),
       h("div", { class: "fg-slots" }, ...slots.map((r, i) => h("div", { class: "fg-slot" + (r ? " fg-busy" : "") },
         h("span", { class: "fg-k" }, `slot ${i}`),
-        r ? h("span", {}, r.label, h("span", { class: "fg-dim" }, ` · ${r.state} · ${mins(r.seconds)}`)) : h("span", { class: "fg-dim" }, "idle"),
+        r ? h("span", {}, r.label, h("span", { class: "fg-dim" }, ` · ${r.mode} · ${r.state} · ${mins(r.seconds)}`)) : h("span", { class: "fg-dim" }, "idle"),
         r && r.session ? h("a", { class: "fg-lnk", href: `/?session=${r.session}` }, "session") : null)))));
     root.append(h("section", { class: "fg-sec" }, h("h3", {}, "RECENT"),
       v.recent.length ? h("div", { class: "fg-list" }, ...v.recent.map((x) => h("div", { class: "fg-run " + (x.status === "ok" ? "fg-ok-b" : "fg-bad-b") },
-        h("span", {}, x.label, h("span", { class: "fg-dim" }, ` · ${x.task.slice(0, 8)}`)),
+        h("span", {}, x.label, h("span", { class: "fg-dim" }, ` · ${x.mode || "session"} · ${x.task.slice(0, 8)}`)),
         h("span", { class: x.status === "ok" ? "fg-ok" : "fg-warn" }, x.status, x.why ? ` — ${x.why}` : ""),
         h("span", { class: "fg-dim" }, `${mins(x.seconds)}${x.cost != null ? ` · $${Number(x.cost).toFixed(2)}` : ""} · ${ago(x.at)}`)))) : h("div", { class: "fg-dim" }, "No runs yet.")));
   };

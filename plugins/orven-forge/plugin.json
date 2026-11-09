@@ -14,7 +14,8 @@
     {"key": "FORGE_SLOTS", "label": "Slots (parallel tasks)", "default": "1", "hint": "the Forge dashboard's per-device cap applies too"},
     {"key": "FORGE_POLL_SEC", "label": "Claim every (s)", "default": "10"},
     {"key": "FORGE_MAX_RUN_MIN", "label": "Max minutes per task", "default": "160"},
-    {"key": "FORGE_PAUSED", "label": "Paused (1 = claim nothing)", "default": "0"}
+    {"key": "FORGE_PAUSED", "label": "Paused (1 = claim nothing)", "default": "0"},
+    {"key": "FORGE_SESSION_TEMPLATES", "label": "Templates run as sessions", "default": "actor-bio,caption-translate,srt-translate,trailer-subtitle,episode-translate", "hint": "comma list; the rest run as one-shots (no session row). Opus models and tool allow-lists always get a session"}
   ],
   "pane": {"title": "FORGE", "entry": "pane.js", "css": "pane.css"},
   "telegram": ["forge"]
