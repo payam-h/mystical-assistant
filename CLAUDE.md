@@ -89,7 +89,7 @@ the work list). Their tests live in `tests/test_plugin_<id>.py`, with the suite.
 denies launchd-spawned processes `~/Desktop` ("Operation not permitted" on run.sh, 2026-11-09), so the real
 checkout must stay outside the protected folders. Feature worktrees go under `~/Desktop/.worktrees/mystical/<branch>`
 (inside BASE_PATH, as bridge-worktree says; sessions, not launchd, open those). **Updates:** `payam` tracks `upstream/master`, so the right rail's
-UPDATE shows what ainurdev shipped; PULL is disabled on a fork (`selfupdate._is_fork`) — merge upstream by hand via
+UPDATE shows what ainurdev shipped; PULL is disabled on this install by the marker `~/.bridge_state/fork-pull-disabled` (`selfupdate._is_fork`; a file, so upstream's tests keep their behaviour) — merge upstream by hand via
 the weekly upstream-sync PR, run the suite, then ⟳. `remote.pushDefault=origin` keeps `git push` on the fork.
 
 **Workspace.** `BASE_PATH` is `~/Desktop`; the owner's umbrella folders (`flixdrama`, `Orven`, `pixie`) are

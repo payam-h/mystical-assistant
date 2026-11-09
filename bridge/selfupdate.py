@@ -40,11 +40,12 @@ restart_requested = False
 
 
 def _is_fork() -> bool:
-    """fork: true when `origin` is not the project's own repository."""
+    """fork: this install merges upstream by hand. A marker file beside the DB, not the remote's
+    URL, so upstream's own tests (a temp BRIDGE_DB) see the original behaviour and a forked
+    checkout opts in once: `touch ~/.bridge_state/fork-pull-disabled`."""
     try:
-        from bridge import git
-        rc, out, _ = git._run(REPO, "remote", "get-url", "origin")
-        return rc == 0 and "ainurdev/mystical-assistant" not in out
+        from bridge import config
+        return os.path.exists(os.path.join(os.path.dirname(config.BRIDGE_DB), "fork-pull-disabled"))
     except Exception:  # noqa: BLE001
         return False
 # Set by update_claude(); the entry point runs run_claude_update() before re-exec.
