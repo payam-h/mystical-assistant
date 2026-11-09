@@ -1,0 +1,14 @@
+.pd { padding: 10px 12px; font-size: var(--t10, 11px); color: var(--txb); display: flex; flex-direction: column; gap: 14px; }
+.pd-sec h3 { margin: 0 0 8px; font-size: var(--t85, 9px); letter-spacing: 1.5px; color: var(--txl); font-weight: 600; }
+.pd-grid { display: grid; grid-template-columns: 90px 1fr; gap: 5px 10px; align-items: baseline; }
+.pd-k { color: var(--txd); letter-spacing: 0.5px; }
+.pd-ok { color: var(--ok); } .pd-warn { color: var(--warn, #e8b24a); } .pd-err { color: var(--err); } .pd-dim { color: var(--txd); }
+.pd-row { display: flex; gap: 8px; margin-top: 10px; }
+.pd-btn { appearance: none; cursor: pointer; border: 1px solid var(--acc); background: color-mix(in srgb, var(--acc) 10%, transparent); color: var(--txb); font: inherit; font-size: var(--t9, 10px); letter-spacing: 1px; padding: 6px 12px; }
+.pd-btn:disabled { opacity: 0.45; cursor: default; }
+.pd-ghost { border-color: var(--line2, color-mix(in srgb, var(--acc) 20%, transparent)); background: transparent; color: var(--txd); }
+.pd-list { display: flex; flex-direction: column; gap: 4px; }
+.pd-run { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--acc) 12%, transparent); background: color-mix(in srgb, var(--panel2) 30%, transparent); }
+.pd-busy { border-color: color-mix(in srgb, var(--acc) 45%, transparent); }
+.pd-ok-b { border-left: 2px solid var(--ok); } .pd-bad-b { border-left: 2px solid var(--err); }
+.pd-lnk { color: var(--acc); text-decoration: none; font-size: var(--t9, 10px); }
