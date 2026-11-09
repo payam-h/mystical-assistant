@@ -1,0 +1,32 @@
+# Weekly: fetch ainurdev/mystical-assistant, fast-forward our mirror branch `master`, and open (or update)
+# a PR master → payam so upstream changes are merged on purpose, with the suite run, never behind our back.
+name: upstream-sync
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: fast-forward master to upstream
+        run: |
+          git remote add upstream https://github.com/ainurdev/mystical-assistant.git
+          git fetch upstream master
+          git merge --ff-only upstream/master
+          git push origin master
+      - name: open or refresh the merge PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh pr list --base payam --head master --state open --json number --jq 'length' | grep -q '^0$'; then
+            gh pr create --base payam --head master --title "upstream: merge ainurdev/master" \
+              --body "Weekly upstream sync. Review the delta-budget files for conflicts, let the suite run, then merge."
+          fi

@@ -67,3 +67,22 @@ preamble — put it in conftest, above the first bridge import.
 - **bridge-feature-slice** — wiring a capability across all three surfaces.
 - **bridge-eyes** — screenshotting/driving the UIs headlessly to verify frontend work.
 - **mystical-assistant-design** — the CRT-HUD brand system, tokens, components.
+
+<!-- FORK NOTES (payam-h/mystical-assistant) — keep this block; everything above is upstream's -->
+## Fork notes
+
+This is payam-h's fork. `master` mirrors `ainurdev/master` and is never committed to; `payam` is the
+branch the live bridge runs and where our work lands. A weekly action opens the merge PR master → payam.
+
+**Delta budget.** Our changes to upstream files are confined to small fenced blocks
+(`# --- fork: plugins ---` … `# --- /fork ---`) in at most these files: `bridge/integrations.py`,
+`bridge/dashboard/server.py`, `bridge/miniapp/server.py`, `bridge/gateway.py`, `bridge/dispatch.py`,
+`bin/mystical`, one dashboard web component. Everything else of ours is a new file: `bridge/plugins_ext.py`
+and `plugins/<id>/`. A change that needs a bigger seam is first proposed upstream.
+
+**Plugins.** `plugins/<id>/plugin.json` + `plugin.py` (spec: `docs/superpowers/specs/plugin-system.md`).
+Bundled: `orven` (gate watcher, ORVEN tab), `orven-forge`, `orven-jobs`, `orven-pixie` (Pixie's dev team →
+the work list). Their tests live in `plugins/<id>/tests/` and run with the suite.
+
+**Workspace.** `BASE_PATH` is `~/Desktop`; the owner's umbrella folders (`flixdrama`, `Orven`, `pixie`) are
+projects here, and dev-team sessions start in those folders, not in a single repo.

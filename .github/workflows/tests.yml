@@ -1,0 +1,21 @@
+# Fork CI: the upstream suite plus ours, on every push to payam and on PRs into it.
+name: tests
+on:
+  push:
+    branches: [payam]
+  pull_request:
+    branches: [payam]
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m pip install -q pytest
+      - run: python -m pytest tests/ -q
