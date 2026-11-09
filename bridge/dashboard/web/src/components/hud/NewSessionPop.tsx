@@ -8,7 +8,7 @@
  *  Design: .mystical/design-drafts/new-session (A · LIST). */
 import { useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
-import { ChevronDown, ChevronLeft, ChevronRight, Copy, CornerDownLeft, FolderPlus, GitBranch, Plus, Search } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, Copy, CornerDownLeft, Folder, FolderPlus, GitBranch, Plus, Search } from "lucide-react";
 import type { SessionBrief, SessionStatus } from "../../api";
 import { api } from "../../api";
 import { ago } from "../../lib/surfaces";
@@ -22,7 +22,7 @@ const ROWS = 5;       // rows a page shows before "N more · type to find"
 const ROW_H = 38;
 const RUNNING = ["working", "checking"];
 
-type Branches = { all: string[]; current: string; held: Set<string>; merged: Set<string> };
+type Branches = { repo?: boolean; all: string[]; current: string; held: Set<string>; merged: Set<string> };
 
 interface Props {
   groups: ProjectGroup[];
@@ -101,7 +101,9 @@ export function NewSessionPop({ groups, sessions, status, here, mine, scoped, on
     if (!want || br[want]) return;
     let live = true;
     void Promise.all([api.branches(want), api.worktrees(want).catch(() => ({ worktrees: [], merged: [] as string[] }))]).then(([b, w]) => {
-      if (live) setBr((m) => ({ ...m, [want]: { all: b.branches, current: b.current || b.branches[0] || "main",
+      // fork: a folder with no git (an umbrella like ~/Desktop/flixdrama) has no branches and no
+      // checkout; it gets one "start here" row instead of a made-up "main" and a worktree offer.
+      if (live) setBr((m) => ({ ...m, [want]: { all: b.branches, repo: b.branches.length > 0 || !!b.current, current: b.current || b.branches[0] || (b.branches.length ? "main" : ""),
         held: new Set(w.worktrees.map((x) => x.branch)), merged: new Set(w.merged) } }));
     }, () => {});
     return () => { live = false; };
@@ -146,15 +148,17 @@ export function NewSessionPop({ groups, sessions, status, here, mine, scoped, on
   const name = q.trim().replace(/\s+/g, "-");              // the form's rule for a new branch's name
   const fresh = !!name && !!d && !d.all.includes(name);    // ↵ on the worktree row makes it
   const base = page ? from ?? dflt(page) : "";
+  const plain = !!d && d.repo === false;                 // fork: not a git folder — one row, no worktrees
 
   // One list for the keys and the pointer: the page's rows, plus the new
   // worktree row under a project's branches.
-  const n = !page ? hits.length : picking ? bl.length : bhits.length + 1;
+  const n = !page ? hits.length : picking ? bl.length : plain ? 1 : bhits.length + 1;
   const at = Math.min(n - 1, hi >= 0 ? hi
     : !page ? 0 : picking ? Math.max(0, bl.indexOf(base)) : !d ? 0 : Math.max(0, bhits.indexOf(dflt(page))));
   function act(i: number) {
     if (!page) { const g = hits[i]; if (g) go(g.rel, dflt(g.rel)); return; }
     if (picking) { setFrom(bl[i]); setPicking(false); setHi(bhits.length); return; }
+    if (plain) { go(page, ""); return; }
     if (i < bhits.length) { go(page, bhits[i]); return; }
     if (fresh) go(page, name, true);
     else { setNaming(true); setQ(""); input.current?.focus(); }
@@ -168,7 +172,7 @@ export function NewSessionPop({ groups, sessions, status, here, mine, scoped, on
     else if (e.key === "ArrowLeft" && page && !scoped && !q) { e.preventDefault(); setPage(null); setHi(-1); }
   }
 
-  const label = !page ? (ql ? "Projects" : "Recent") : picking ? "New worktree from" : "Start on";
+  const label = !page ? (ql ? "Projects" : "Recent") : picking ? "New worktree from" : plain ? "Start in" : "Start on";
   const more = !page ? (!ql && list.length > ROWS ? `${list.length - ROWS} more · type to find` : "")
     : !picking && !ql && bl.length > ROWS ? `${bl.length - ROWS} more branches · type to find` : "";
   const empty = !page ? (list.length ? `no project matches “${q.trim()}”` : "no projects yet")
@@ -207,7 +211,7 @@ export function NewSessionPop({ groups, sessions, status, here, mine, scoped, on
         <input
           ref={input} value={q} onKeyDown={onKey}
           onChange={(e) => { setQ(e.target.value); setHi(-1); setPicking(false); }}
-          placeholder={!page ? "New session in…" : naming ? "new branch name…" : "branch…"}
+          placeholder={!page ? "New session in…" : naming ? "new branch name…" : plain ? "↵ starts here" : "branch…"}
           role="combobox" aria-expanded aria-controls={lid} aria-activedescendant={n ? `${lid}-${at}` : undefined}
           style={{ flex: "1 1 40px", minWidth: 0, height: "100%", padding: 0, border: 0, outline: "none", background: "transparent",
                    fontFamily: "inherit", fontSize: "var(--t13)", color: "var(--txb)" }}
@@ -239,7 +243,16 @@ export function NewSessionPop({ groups, sessions, status, here, mine, scoped, on
             {b === base && <span style={sub}>from</span>}
           </div>
         ))}
-        {page && !picking && d && bhits.map((b, i) => {
+        {page && !picking && plain && (
+          <div {...opt(0)} title={`${pageName} is not a git repository: the session starts in the folder itself`}>
+            <span style={glyph}><Folder size={14} strokeWidth={2} aria-hidden /></span>
+            <span style={nameStyle(at === 0)}>Start here</span>
+            <span style={{ flex: 1 }} />
+            <Running n={running(page)} />
+            <span style={sub}>not a git folder</span>
+          </div>
+        )}
+        {page && !picking && d && !plain && bhits.map((b, i) => {
           const wt = b !== d.current && d.held.has(b), r = running(page, b);
           return (
             <div key={b} {...opt(i)} title={b}>
@@ -252,7 +265,7 @@ export function NewSessionPop({ groups, sessions, status, here, mine, scoped, on
             </div>
           );
         })}
-        {(page ? !picking && !bhits.length : !hits.length) && (
+        {(page ? !picking && !plain && !bhits.length : !hits.length) && (
           <div style={{ padding: "10px", fontSize: "var(--t12)", color: "var(--txl)" }}>{empty}</div>
         )}
       </div>
@@ -270,7 +283,7 @@ export function NewSessionPop({ groups, sessions, status, here, mine, scoped, on
           <span style={kbd}><CornerDownLeft size={10} strokeWidth={2.4} aria-hidden /></span>start
           <span style={kbd}>→</span>branch
         </div>
-      ) : (
+      ) : plain ? null : (
         // While bases are listed it isn't a row of that list: a tap just folds them.
         <div {...(picking ? { onClick: () => setPicking(false), style: rowStyle(false) } : opt(bhits.length))}>
           <span style={{ ...glyph, color: "var(--acc)" }}><Plus size={15} strokeWidth={2.2} aria-hidden /></span>

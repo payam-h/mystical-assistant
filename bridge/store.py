@@ -366,16 +366,13 @@ def upsert_native_session(claude_sid: str, chat_id: int, project: str, cwd: str,
     per branch. Nothing lets you move a native row to another project by hand,
     so there is no human choice here to clobber."""
     now = updated if updated is not None else time.time()
-    # fork: a row whose id IS this uuid but whose claude_session_id differs (a bridge session that
-    # went on under a new Claude id, or one not run yet) is the same session, not a new one — the
-    # INSERT below would hit UNIQUE(sessions.id) and the whole scan pass died on it.
-    existing = get_by_claude_session_id(claude_sid) or get_session(claude_sid)
+    # fork: a bridge session that went on under a new Claude id carries this uuid in claude_session_id
+    # on a row with another id: update that row. Everything else is one atomic UPSERT on the id — two
+    # scanners (the disk pass and the live-registry pass, or two request threads) used to race the
+    # old SELECT-then-INSERT into "UNIQUE constraint failed: sessions.id" and lose the rest of the pass.
+    existing = get_by_claude_session_id(claude_sid)
     with closing(_connect()) as c:
-        if existing:
-            # Refresh mtime/cwd; keep an existing human title but heal auto-titles
-            # that captured a leading system tag (e.g. <ide_opened_file>…).
-            # Origin heals within the native pair only, so rows indexed before the
-            # scanner could tell VS Code from terminal pick up their real surface.
+        if existing and existing["id"] != claude_sid:
             c.execute(
                 "UPDATE sessions SET updated=MAX(updated, ?), cwd=COALESCE(cwd, ?), "
                 "project=?, "
@@ -388,7 +385,18 @@ def upsert_native_session(claude_sid: str, chat_id: int, project: str, cwd: str,
         c.execute(
             "INSERT INTO sessions(id,chat_id,project,claude_session_id,title,"
             "created,updated,archived,origin,cwd,permission_mode) "
-            "VALUES(?,?,?,?,?,?,?,0,?,?,?)",
+            "VALUES(?,?,?,?,?,?,?,0,?,?,?) "
+            # Refresh mtime/cwd; keep an existing human title but heal auto-titles
+            # that captured a leading system tag (e.g. <ide_opened_file>…).
+            # Origin heals within the native pair only, so rows indexed before the
+            # scanner could tell VS Code from terminal pick up their real surface.
+            "ON CONFLICT(id) DO UPDATE SET "
+            "updated=MAX(sessions.updated, excluded.updated), "
+            "cwd=COALESCE(sessions.cwd, excluded.cwd), "
+            "project=excluded.project, "
+            "title=CASE WHEN sessions.title IS NULL OR sessions.title='' OR sessions.title LIKE '<%' "
+            "THEN excluded.title ELSE sessions.title END, "
+            "origin=CASE WHEN sessions.origin IN ('vscode','terminal') THEN excluded.origin ELSE sessions.origin END",
             (claude_sid, chat_id, project, claude_sid, title, now, now, origin, cwd, None))
     return get_session(claude_sid)
 
