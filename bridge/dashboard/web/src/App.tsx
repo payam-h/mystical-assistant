@@ -73,7 +73,8 @@ import { redo, selectAll, undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
 import { useAiFeatures } from "./lib/ai";
 import { useExtPanes, useIntegrations } from "./lib/integrations";
-import { PluginPane } from "./components/hud/PluginPane";   // fork: plugins
+import type { Integration } from "./api";   // fork: plugins
+import { PluginPane, PluginGroupPane } from "./components/hud/PluginPane";   // fork: plugins
 import { useSessionPins, useStickyObj, useStickySet } from "./lib/prefs";
 import { SHOW_ALL, shows } from "./lib/sessionfilter";
 import type { Show } from "./lib/sessionfilter";
@@ -2585,15 +2586,42 @@ export function App() {
         <UsagePanel onOpenProject={(rel) => openAnalyze(rel)} />
       ),
     },
-    // --- fork: plugins --- one tab per installed plugin with a pane (bridge/plugins_ext.py), its own
-    // group under a hairline after USAGE, each with the icon its manifest ships (ui/icon.svg) or a puzzle piece.
-    ...extPanes.map((p, i) => ({
-      id: `plugin:${p.id}`, label: p.pane!.title, ownScroll: true, sep: i === 0,
-      icon: p.pane!.icon ? <span className="rail-svg" aria-hidden dangerouslySetInnerHTML={{ __html: p.pane!.icon }} /> : <Puzzle {...RAIL} />,
-      alert: !!p.broken || p.status?.ok === false,
-      ...(p.pane!.scope ? { scope: p.pane!.scope } : {}),
-      render: () => <PluginPane key={p.id} p={p} />,
-    })),
+    // --- fork: plugins --- the installed plugins' panes (bridge/plugins_ext.py) as their own group under
+    // USAGE behind a hairline: one tab per pane, or one tab per manifest pane.group with the panes stacked.
+    // Each tab wears the icon its manifest ships (ui/icon.svg) or a puzzle piece.
+    ...((): PanelTab[] => {
+      const out: PanelTab[] = [];
+      const groups = new Map<string, Integration[]>();
+      for (const p of extPanes) {
+        const g = p.pane!.group;
+        if (g) { const l = groups.get(g.id); if (l) l.push(p); else groups.set(g.id, [p]); }
+      }
+      const seen = new Set<string>();
+      const svg = (markup: string | null | undefined) => markup ? <span className="rail-svg" aria-hidden dangerouslySetInnerHTML={{ __html: markup }} /> : <Puzzle {...RAIL} />;
+      for (const p of extPanes) {
+        const g = p.pane!.group;
+        if (g) {
+          if (seen.has(g.id)) continue;
+          seen.add(g.id);
+          const ps = groups.get(g.id)!;
+          out.push({
+            id: `plugin-group:${g.id}`, label: ps.map((x) => x.pane!.title).join(" · ") || g.title, ownScroll: true,
+            icon: svg(ps.find((x) => x.pane!.group?.icon)?.pane!.group?.icon),
+            alert: ps.some((x) => !!x.broken || x.status?.ok === false),
+            render: () => <PluginGroupPane key={g.id} ps={ps} />,
+          });
+        } else {
+          out.push({
+            id: `plugin:${p.id}`, label: p.pane!.title, ownScroll: true, icon: svg(p.pane!.icon),
+            alert: !!p.broken || p.status?.ok === false,
+            ...(p.pane!.scope ? { scope: p.pane!.scope } : {}),
+            render: () => <PluginPane key={p.id} p={p} />,
+          });
+        }
+      }
+      if (out.length) out[0].sep = true;
+      return out;
+    })(),
     // --- /fork ---
   ];
 

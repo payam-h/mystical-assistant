@@ -60,7 +60,12 @@
     "title": "FORGE",
     "entry": "pane.js",
     "css": "pane.css",
-    "icon": "icon.svg"
+    "icon": "icon.svg",
+    "group": {
+      "id": "agents",
+      "title": "AGENTS",
+      "icon": "group.svg"
+    }
   },
   "telegram": [
     "forge"

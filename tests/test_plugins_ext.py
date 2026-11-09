@@ -207,3 +207,7 @@ def test_the_forks_bundled_manifests_validate():
     px = found["orven-pixie"]
     assert px["pane"]["title"] == "DEV TEAM" and "PIXIE_DEV_TOKEN" in px["env_keys"] and px["telegram"] == ["devteam"]
     assert next(s for s in px["settings"] if s["key"] == "PIXIE_DEV_TOKEN")["secret"] is True
+    for pid in ("orven-forge", "orven-jobs"):      # one rail tab for both: the AGENTS group
+        g = found[pid]["pane"]["group"]
+        assert g["id"] == "agents" and g["title"] == "AGENTS" and g["icon"].startswith("<svg")
+    assert found["orven"]["pane"]["group"] is None and found["orven"]["pane"]["icon"].startswith("<svg")
