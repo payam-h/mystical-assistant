@@ -1,0 +1,20 @@
+{
+  "id": "orven-pixie",
+  "label": "Pixie dev team",
+  "version": "0.1.0",
+  "blurb": "Works Pixie's dev tickets on this machine: each ticket becomes an item on the repo's work list and a run (a manager with a helper in its own worktree), then a branch + PR, and the report with its screenshots goes back to Pixie for the owner's ✅/🔁/❌. Adds the DEV TEAM tab and /devteam.",
+  "needs": "Pixie's dev-team token",
+  "entry": "plugin.py",
+  "routes": ["/plugin/orven-pixie"],
+  "origins": ["pixie"],
+  "settings": [
+    {"key": "PIXIE_URL", "label": "Pixie URL", "default": "https://pixie.orven.am"},
+    {"key": "PIXIE_DEV_TOKEN", "label": "Dev-team token", "secret": true, "hint": "the same value as Keys & services → Dev team token in Pixie"},
+    {"key": "PIXIE_POLL_SEC", "label": "Poll every (s)", "default": "30"},
+    {"key": "PIXIE_MAX_RUN_MIN", "label": "Max minutes per ticket", "default": "90"},
+    {"key": "PIXIE_PAUSED", "label": "Paused (1 = claim nothing)", "default": "0"},
+    {"key": "PIXIE_KNOWLEDGE", "label": "Knowledge files the helper reads first", "default": "CLAUDE.md,~/.claude/projects/-Users-payam-Desktop-flixdrama/memory/MEMORY.md", "hint": "comma list; relative paths resolve inside the ticket's workspace folder"}
+  ],
+  "pane": {"title": "DEV TEAM", "entry": "pane.js", "css": "pane.css"},
+  "telegram": ["devteam"]
+}
