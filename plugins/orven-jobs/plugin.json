@@ -1,0 +1,19 @@
+{
+  "id": "orven-jobs",
+  "label": "Orven jobs",
+  "version": "0.1.0",
+  "blurb": "Runs the Orven panel's Claude jobs (scheduled prompts in a project folder: health checks, reports, the newspaper) on this machine as Mystical sessions, one per job, resumed on every run. Needs the Orven plugin: it authenticates with this machine's gate token. Adds the JOBS tab and /jobs.",
+  "needs": "the Orven plugin, enrolled",
+  "entry": "plugin.py",
+  "routes": ["/plugin/orven-jobs"],
+  "origins": ["orven-job"],
+  "settings": [
+    {"key": "JOBS_PANEL_URL", "label": "Panel URL", "default": "https://console.orven.am"},
+    {"key": "JOBS_AGENT_NAME", "label": "Agent name", "default": "Mystical on this Mac"},
+    {"key": "JOBS_POLL_SEC", "label": "Claim every (s)", "default": "20"},
+    {"key": "JOBS_MAX_RUN_MIN", "label": "Max minutes per run", "default": "120"},
+    {"key": "JOBS_PAUSED", "label": "Paused (1 = claim nothing)", "default": "0"}
+  ],
+  "pane": {"title": "JOBS", "entry": "pane.js", "css": "pane.css"},
+  "telegram": ["jobs"]
+}
