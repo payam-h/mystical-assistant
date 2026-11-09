@@ -94,6 +94,8 @@ def _index_running(owner: int) -> int:
         cwd = os.path.expanduser(short)
         if not sid or not os.path.isdir(cwd):
             continue
+        if within_base(cwd) and _in_plugin_scratch(cwd):     # fork: a Forge one-shot running right now
+            continue
         store.upsert_native_session(
             sid, owner, rel(git.main_checkout(cwd)) if within_base(cwd) else short, cwd,
             updated=r.get("last_active") or r.get("started"),
