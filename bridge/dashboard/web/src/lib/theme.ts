@@ -391,7 +391,17 @@ export interface HudSettings {
   // Which key sends from the composer. "enter": Enter sends, Shift+Enter is a
   // newline. "ctrl-enter": Enter is a newline, Ctrl/Cmd+Enter sends.
   sendKey: SendKey;
+  // What Enter does while a turn runs. "steer": the message folds into the
+  // running turn at its next tool step (Alt+Enter queues). "queue": it waits
+  // for the turn to end (Alt+Enter steers).
+  busyEnter: BusyEnter;
+  // Claude's messages between steps stay in the flow, each with the steps
+  // after it folded under one line — how Claude Code reads. Off, they sit
+  // inside the WORK box with the steps.
+  stepNotes: boolean;
 }
+
+export type BusyEnter = "steer" | "queue";
 
 export type ChatLayout = "default" | "compact";
 export type SendKey = "enter" | "ctrl-enter";
@@ -437,7 +447,7 @@ const DEFAULTS: HudSettings = {
   model: "opus", allModels: false, effort: "", perm: "", ponytail: "",
   push: false, pushSound: true,
   pushTone: "blip", pushVolume: 0.6, chatBg: "none",
-  layout: "default", composer: "tabs", sendKey: "enter",
+  layout: "default", composer: "tabs", sendKey: "enter", busyEnter: "steer", stepNotes: true,
 };
 
 /** The base every size in the type scale is authored against (index.css --fs). */
@@ -527,6 +537,8 @@ export function loadSettings(): HudSettings {
         pushVolume: clamp01(p.pushVolume, 0.6),
         chatBg: toChatBg(p.chatBg),
         sendKey: p.sendKey === "ctrl-enter" ? "ctrl-enter" : "enter",
+        busyEnter: p.busyEnter === "queue" ? "queue" : "steer",
+        stepNotes: p.stepNotes !== false,
         layout: urlLayout() ?? (CHAT_LAYOUTS.includes(p.layout as ChatLayout) ? (p.layout as ChatLayout) : "default"),
         composer: urlComposer() ?? (COMPOSER_STYLES.includes(p.composer as ComposerStyle) ? (p.composer as ComposerStyle) : "tabs"),
       };

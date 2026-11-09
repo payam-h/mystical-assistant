@@ -4384,6 +4384,15 @@ export function SettingsModal(props: SettingsModalProps) {
                         />
                       </div>
                     </Row>
+                    <Row label="WHILE IT WORKS" desc="what Enter does while a turn is running — STEER folds your message into the turn at its next tool step, no stop needed; QUEUE runs it after the turn ends. Alt+Enter does the other one.">
+                      <div style={{ width: 220 }}>
+                        <Segmented
+                          options={[{ label: "STEER", value: "steer" }, { label: "QUEUE", value: "queue" }]}
+                          value={settings.busyEnter}
+                          onPick={(busyEnter) => onPatch({ busyEnter })}
+                        />
+                      </div>
+                    </Row>
                   </div>
                 </Section>
 
@@ -4418,6 +4427,15 @@ export function SettingsModal(props: SettingsModalProps) {
                       <Switch
                         on={!settings.foldsOpen}
                         onClick={() => onPatch({ foldsOpen: !settings.foldsOpen })}
+                      />
+                    </Row>
+                    <Row
+                      label="STEP MESSAGES"
+                      info="What Claude says between steps stays in the conversation as its own message, with the steps after it folded under one line — the way Claude Code reads. Off, those messages sit inside the WORK box with the steps, and only your prompt and the answer are outside it."
+                    >
+                      <Switch
+                        on={settings.stepNotes}
+                        onClick={() => onPatch({ stepNotes: !settings.stepNotes })}
                       />
                     </Row>
                   </div>

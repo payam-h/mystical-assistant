@@ -582,7 +582,7 @@ export function Composer({
     window.addEventListener("keydown", esc);
     return () => window.removeEventListener("keydown", esc);
   }, [openDrop]);
-  const { compact, lead, composer, sendKey } = useChatChrome();
+  const { compact, lead, composer, sendKey, busyEnter } = useChatChrome();
   const plugins = useIntegrations();   // the DESIGN button exists while Claude Design is installed
   // TABS / CONSOLE: COMPACT's new composers. CLASSIC is the old markup.
   const shelled = compact && composer !== "classic";
@@ -1382,7 +1382,13 @@ export function Composer({
         // CTRL+ENTER mode leaves a bare Enter to the editor, which makes it
         // the markdown-aware newline Shift+Enter is in the default mode.
         const send = sendKey === "ctrl-enter" ? e.ctrlKey || e.metaKey : !e.shiftKey;
-        if (e.key === "Enter" && send) { e.preventDefault(); submit(); }
+        if (e.key === "Enter" && send) {
+          e.preventDefault();
+          // While a turn runs, Enter goes to it at its next tool step (or to the
+          // queue, by the setting); Alt+Enter takes the other one.
+          const toTurn = running && !!onSteer && !ask?.send && (busyEnter === "steer") !== e.altKey;
+          if (toTurn) steer(); else submit();
+        }
       }}
       onPaste={(e) => { const imgs = imagesFrom(e.clipboardData?.items); if (imgs.length) { e.preventDefault(); addFiles(imgs); } }}
       onAttach={() => fileRef.current?.click()}
@@ -1390,7 +1396,7 @@ export function Composer({
         if (text.includes("\n")) void askConfirm("Clear the draft?", { ok: "Clear", danger: true }).then((yes) => { if (yes) setText(""); });
         else setText("");
       }}
-      placeholder={ask?.placeholder ?? (disabled ? "working…" : running ? "queue a prompt — runs after the current turn…" : placeholder ?? `message ${onAgent ? agentPick!.label.toLowerCase() : "claude"} — describe a change, paste an error…`)}
+      placeholder={ask?.placeholder ?? (disabled ? "working…" : running ? (busyEnter === "steer" && onSteer ? "steer — Claude reads this at its next step…" : "queue a prompt — runs after the current turn…") : placeholder ?? `message ${onAgent ? agentPick!.label.toLowerCase() : "claude"} — describe a change, paste an error…`)}
     />
   );
   const pfx = <span className="pb-pfx" style={{ color: "var(--purple)", fontSize: "var(--t13)", flex: "none", marginTop: 2 }}>~ ❯</span>;
@@ -1408,7 +1414,12 @@ export function Composer({
   };
   const hint = (
     <span className="pb-hint" aria-hidden>
-      {sendKey === "ctrl-enter" ? `⌘↵ ${ask?.send ? "answer" : running ? "queue" : "send"} · ↵ newline` : `↵ ${ask?.send ? "answer" : running ? "queue" : "send"} · ⇧↵ newline`}
+      {(() => {
+        const busy = running && onSteer && !ask?.send;
+        const main = ask?.send ? "answer" : busy ? (busyEnter === "steer" ? "steer" : "queue") : running ? "queue" : "send";
+        const alt = busy ? ` · ⌥↵ ${busyEnter === "steer" ? "queue" : "steer"}` : "";
+        return sendKey === "ctrl-enter" ? `⌘↵ ${main}${alt} · ↵ newline` : `↵ ${main}${alt} · ⇧↵ newline`;
+      })()}
     </span>
   );
 

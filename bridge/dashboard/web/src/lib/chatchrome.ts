@@ -1,4 +1,4 @@
-import type { ComposerStyle, SendKey } from "./theme";
+import type { BusyEnter, ComposerStyle, SendKey } from "./theme";
 import { createContext, useContext, type ReactNode } from "react";
 
 /** What the chat column hands down to the composer it hosts. In the COMPACT
@@ -13,7 +13,9 @@ export interface ChatChrome {
   /** Which shell COMPACT's composer wears (theme COMPOSER_STYLES). */
   composer: ComposerStyle;
   sendKey: SendKey;
+  /** What Enter does while a turn runs (theme busyEnter). */
+  busyEnter: BusyEnter;
 }
 
-export const ChatChromeContext = createContext<ChatChrome>({ compact: false, lead: null, composer: "tabs", sendKey: "enter" });
+export const ChatChromeContext = createContext<ChatChrome>({ compact: false, lead: null, composer: "tabs", sendKey: "enter", busyEnter: "steer" });
 export const useChatChrome = () => useContext(ChatChromeContext);

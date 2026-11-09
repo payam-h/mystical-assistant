@@ -3103,9 +3103,12 @@ export const RunStream = memo(function RunStream({
   const segs = segmentsOf(events, 0, inFlow, waiting);
   // Tier 1 and 2 (lib/dossier): the answer, the prose that introduces a card,
   // the cards, your steers, and what ends a turn. Everything else is work.
+  // STEP MESSAGES (hud.stepNotes): Claude's words between steps are tier 1 too,
+  // so each WORK zone holds only the steps between two of them.
+  const notesInFlow = dossier && !saidTier && (hud?.stepNotes ?? true);
   const topAt = (i: number): boolean => {
     const e = events[i];
-    if (e.type === "text") return i === finalText || asksNext(i);
+    if (e.type === "text") return i === finalText || asksNext(i) || (notesInFlow && !!e.text && !resultTexts.has(e.text.trim()));
     if (mx && (e.type === "secret_request" || shownLive(i))) return true;
     return TOP_TYPES.has(e.type);
   };

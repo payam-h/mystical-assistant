@@ -772,7 +772,7 @@ export function Terminal({
         <>
           {body}
           {grid && chatId && <AgentGrid sessionId={chatId} main={gridMain ?? null} top={compact ? ISLE_TOP + 40 : ISLE_EDGE + 8} />}
-          <ChatChromeContext.Provider value={{ compact, lead: compact ? nameplate : null, composer: hud?.composer ?? "tabs", sendKey: hud?.sendKey ?? "enter" }}>
+          <ChatChromeContext.Provider value={{ compact, lead: compact ? nameplate : null, composer: hud?.composer ?? "tabs", sendKey: hud?.sendKey ?? "enter", busyEnter: hud?.busyEnter ?? "steer" }}>
             {composer}
           </ChatChromeContext.Provider>
         </>
