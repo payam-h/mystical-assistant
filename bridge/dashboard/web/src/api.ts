@@ -1356,7 +1356,7 @@ export interface Integration {
   ext?: boolean;
   version?: string;
   source?: "bundled" | "external";
-  pane?: { title: string; entry: string; css?: string | null; scope?: "project" | "worktree" | null } | null;
+  pane?: { title: string; entry: string; css?: string | null; scope?: "project" | "worktree" | null; icon?: string | null } | null;
   settings?: { key: string; label: string; secret: boolean; default: string; hint: string; value: string; set: boolean }[];
   status?: { line: string; ok: boolean };
   broken?: string | null;

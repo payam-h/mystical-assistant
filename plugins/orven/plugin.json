@@ -5,16 +5,52 @@
   "blurb": "The Orven console gate from this machine: holds a device key, watches your public IP and re-unlocks the gate when it changes, so console.orven.am keeps opening after a network change. Adds the ORVEN tab (gate state, allowed IPs, devices) and /orven on Telegram.",
   "needs": "a panel login once, to enrol this machine",
   "entry": "plugin.py",
-  "routes": ["/plugin/orven"],
+  "routes": [
+    "/plugin/orven"
+  ],
   "origins": [],
   "settings": [
-    {"key": "ORVEN_PANEL_URL", "label": "Panel URL", "default": "https://console.orven.am", "hint": "where the gate lives"},
-    {"key": "ORVEN_ADMIN_EMAIL", "label": "Admin email", "hint": "the panel login used to enrol and to read devices/settings"},
-    {"key": "ORVEN_ADMIN_PASSWORD", "label": "Admin password", "secret": true, "hint": "kept 0600 beside the DB; only sent to the panel URL above"},
-    {"key": "ORVEN_DEVICE_NAME", "label": "Device name", "default": "Mystical on this Mac"},
-    {"key": "ORVEN_IP_CHECK_SEC", "label": "IP check every (s)", "default": "120"},
-    {"key": "ORVEN_OPENSSL", "label": "openssl binary", "default": "", "hint": "empty = the first one that can do Ed25519"}
+    {
+      "key": "ORVEN_PANEL_URL",
+      "label": "Panel URL",
+      "default": "https://console.orven.am",
+      "hint": "where the gate lives"
+    },
+    {
+      "key": "ORVEN_ADMIN_EMAIL",
+      "label": "Admin email",
+      "hint": "the panel login used to enrol and to read devices/settings"
+    },
+    {
+      "key": "ORVEN_ADMIN_PASSWORD",
+      "label": "Admin password",
+      "secret": true,
+      "hint": "kept 0600 beside the DB; only sent to the panel URL above"
+    },
+    {
+      "key": "ORVEN_DEVICE_NAME",
+      "label": "Device name",
+      "default": "Mystical on this Mac"
+    },
+    {
+      "key": "ORVEN_IP_CHECK_SEC",
+      "label": "IP check every (s)",
+      "default": "120"
+    },
+    {
+      "key": "ORVEN_OPENSSL",
+      "label": "openssl binary",
+      "default": "",
+      "hint": "empty = the first one that can do Ed25519"
+    }
   ],
-  "pane": {"title": "ORVEN", "entry": "pane.js", "css": "pane.css"},
-  "telegram": ["orven"]
+  "pane": {
+    "title": "ORVEN",
+    "entry": "pane.js",
+    "css": "pane.css",
+    "icon": "icon.svg"
+  },
+  "telegram": [
+    "orven"
+  ]
 }

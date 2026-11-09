@@ -25,3 +25,5 @@
 .orv-dev { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--acc) 12%, transparent); background: color-mix(in srgb, var(--panel2) 30%, transparent); }
 .orv-me { border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
 .orv-revoked { opacity: 0.5; }
+.orv-name { appearance: none; border: 0; background: transparent; color: inherit; font: inherit; padding: 0; cursor: text; border-bottom: 1px dashed color-mix(in srgb, var(--acc) 35%, transparent); }
+.orv-name:hover { color: var(--acc); }

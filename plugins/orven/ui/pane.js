@@ -63,7 +63,7 @@ export function mount(root, ctx) {
       const devs = Array.isArray(gate.devices) ? gate.devices : [];
       g.append(h("h4", {}, `DEVICES · ${devs.length}`));
       g.append(h("div", { class: "orv-list" }, ...devs.map((d) => h("div", { class: "orv-dev" + (d.id === state.deviceId ? " orv-me" : "") + (d.revokedAt ? " orv-revoked" : "") },
-        h("span", {}, d.name, d.id === state.deviceId ? h("span", { class: "orv-dim" }, " · this machine") : null),
+        h("span", {}, h("button", { class: "orv-name", title: "rename", onclick: () => { const n = prompt(`Name for this device`, d.name); if (n && n.trim() && n.trim() !== d.name) act("rename", () => ctx.api("/devices/rename", { json: { id: d.id, name: n.trim() } }).then(loadGate)); } }, d.name), d.id === state.deviceId ? h("span", { class: "orv-dim" }, " · this machine") : null),
         h("span", { class: "orv-dim" }, d.platform || "", d.lastSeenAt ? ` · seen ${when(d.lastSeenAt)}` : ""),
         d.revokedAt ? h("span", { class: "orv-dim" }, "revoked") : h("button", { class: "orv-x", title: "revoke", onclick: () => confirm(`Revoke ${d.name}?`) && act("revoke", () => ctx.api("/devices/revoke", { json: { id: d.id } }).then(loadGate)) }, "revoke")))));
     }

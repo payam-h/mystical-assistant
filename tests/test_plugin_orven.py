@@ -154,6 +154,16 @@ def test_routes_through_the_plugin_door(monkeypatch):
         assert code == 400 and "email" in body["error"]
         assert "orven" in plugins_ext.manifest("orven")["telegram"]
         assert plugins_ext.asset("/plugin/orven/ui/pane.js")[1].startswith("text/javascript")
+        assert plugins_ext.manifest("orven")["pane"]["icon"].startswith("<svg")     # the rail tab's own icon
+        # rename: Orven's one name per device, edited from the pane (PATCH /gate/devices/<id>)
+        inst = plugins_ext._live["orven"]
+        calls = []
+        inst.gate.admin = lambda path, body=None, method=None, creds=None: calls.append((method, path, body)) or {"ok": True, "name": body["name"]}
+        inst._creds = lambda: ("a@b", "pw")
+        body, code = plugins_ext.dispatch("POST", "/plugin/orven/devices/rename", {}, {"id": "dev-1", "name": "  MacBook Pro 16 "}, 555)
+        assert code == 200 and body["name"] == "MacBook Pro 16" and calls == [("PATCH", "/gate/devices/dev-1", {"name": "MacBook Pro 16"})]
+        body, code = plugins_ext.dispatch("POST", "/plugin/orven/devices/rename", {}, {"id": "dev-1"}, 555)
+        assert code == 400
     finally:
         plugins_ext.stop_all()
         plugins_ext._registry = None
