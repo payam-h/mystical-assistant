@@ -82,7 +82,7 @@ and `plugins/<id>/`. A change that needs a bigger seam is first proposed upstrea
 
 **Plugins.** `plugins/<id>/plugin.json` + `plugin.py` (spec: `docs/superpowers/specs/plugin-system.md`).
 Bundled: `orven` (gate watcher, ORVEN tab), `orven-forge`, `orven-jobs`, `orven-pixie` (Pixie's dev team →
-the work list). Their tests live in `plugins/<id>/tests/` and run with the suite.
+the work list). Their tests live in `tests/test_plugin_<id>.py`, with the suite.
 
 **Where it lives.** The live fork runs from `~/mystical` (launchd `cloud.ainurhq.mystical.bridge`,
 `~/.local/bin/mystical` → its `bin/mystical`); `~/Desktop/mystical` is a symlink to it for the eye only — macOS

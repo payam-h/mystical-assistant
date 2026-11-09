@@ -1,0 +1,27 @@
+/* ORVEN pane — leans on the HUD's tokens (--acc, --txb, --txd, --txl, --panel2, --ok, --warn, --err). */
+.orv { padding: 10px 12px; font-size: var(--t10, 11px); color: var(--txb); display: flex; flex-direction: column; gap: 14px; }
+.orv-sec h3 { margin: 0 0 8px; font-size: var(--t85, 9px); letter-spacing: 1.5px; color: var(--txl); font-weight: 600; }
+.orv-sec h4 { margin: 12px 0 6px; font-size: var(--t85, 9px); letter-spacing: 1.2px; color: var(--txl); font-weight: 500; }
+.orv-grid { display: grid; grid-template-columns: 96px 1fr; gap: 5px 10px; align-items: baseline; }
+.orv-k { color: var(--txd); letter-spacing: 0.5px; }
+.orv code { font-family: 'JetBrains Mono', monospace; font-size: var(--t9, 10px); color: var(--txd); }
+.orv-ok { color: var(--ok); }
+.orv-warn { color: var(--warn, #e8b24a); }
+.orv-err { color: var(--err); margin-bottom: 4px; }
+.orv-dim { color: var(--txd); }
+.orv-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+.orv-btn { appearance: none; cursor: pointer; border: 1px solid var(--acc); background: color-mix(in srgb, var(--acc) 10%, transparent); color: var(--txb); font: inherit; font-size: var(--t9, 10px); letter-spacing: 1px; padding: 6px 12px; }
+.orv-btn:disabled { opacity: 0.45; cursor: default; }
+.orv-ghost { border-color: var(--line2, color-mix(in srgb, var(--acc) 20%, transparent)); background: transparent; color: var(--txd); }
+.orv-sm { padding: 4px 8px; }
+.orv-in { box-sizing: border-box; background: color-mix(in srgb, var(--panel2) 60%, transparent); border: 1px solid color-mix(in srgb, var(--acc) 16%, transparent); outline: none; color: var(--txb); font-family: 'JetBrains Mono', monospace; font-size: var(--t10, 11px); padding: 5px 8px; }
+.orv-form { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.orv-inline { display: inline-flex; gap: 4px; align-items: center; }
+.orv-ipin { width: 130px; }
+.orv-ips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.orv-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid color-mix(in srgb, var(--acc) 25%, transparent); padding: 3px 8px; font-family: 'JetBrains Mono', monospace; }
+.orv-x { appearance: none; cursor: pointer; border: 0; background: transparent; color: var(--err); font: inherit; font-size: var(--t9, 10px); padding: 0 2px; }
+.orv-list { display: flex; flex-direction: column; gap: 4px; }
+.orv-dev { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--acc) 12%, transparent); background: color-mix(in srgb, var(--panel2) 30%, transparent); }
+.orv-me { border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.orv-revoked { opacity: 0.5; }

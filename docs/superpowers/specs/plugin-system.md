@@ -20,7 +20,7 @@ plugins/<id>/            (bundled, OFF until installed)   or   <state>/plugins/<
   plugin.json            the manifest
   plugin.py              the entry: class Plugin with optional start/stop/routes/tools/call_tool/telegram/status
   ui/pane.js             optional: an ES module exporting mount(el, ctx) — the pane in the right rail
-  tests/                 run with the suite
+  (tests: tests/test_plugin_<id>.py, with the suite)
 ```
 
 Manifest keys: `id` (`^[a-z][a-z0-9-]{1,40}$`), `label`, `version`, `blurb`, `needs`,
