@@ -37,6 +37,17 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Set by restart(); read by the entry point after its shutdown finishes.
 restart_requested = False
+
+
+def _is_fork() -> bool:
+    """fork: this install merges upstream by hand. A marker file beside the DB, not the remote's
+    URL, so upstream's own tests (a temp BRIDGE_DB) see the original behaviour and a forked
+    checkout opts in once: `touch ~/.bridge_state/fork-pull-disabled`."""
+    try:
+        from bridge import config
+        return os.path.exists(os.path.join(os.path.dirname(config.BRIDGE_DB), "fork-pull-disabled"))
+    except Exception:  # noqa: BLE001
+        return False
 # Set by update_claude(); the entry point runs run_claude_update() before re-exec.
 claude_update_requested = False
 
@@ -107,6 +118,12 @@ def update() -> tuple[bool, str, bool]:
     """Pull, rebuild both UIs, then arm the restart (delayed, so the caller's HTTP
     response still gets out). A failed pull or build restarts nothing. The last
     value says whether the pull landed, so a failed build isn't read as a refused pull."""
+    # --- fork: this checkout is a fork --- upstream's commits are shown (the UPDATE rail reads HEAD..@{u},
+    # and `payam` tracks ainurdev/master for exactly that), but they are merged by hand through the weekly
+    # upstream-sync PR after the suite runs. One click must not fast-forward a fork onto upstream.
+    if _is_fork():
+        return False, "This is a fork: upstream's changes are listed here and merged by hand (upstream-sync PR), never pulled over this checkout.", False
+    # --- /fork ---
     ok, output = git.pull(REPO)
     if not ok:
         return False, output, False

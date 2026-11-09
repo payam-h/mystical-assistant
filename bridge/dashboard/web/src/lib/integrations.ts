@@ -8,11 +8,13 @@ import { api, type Integration } from "../api";
  *  plugin's UI never flashes in before the bridge has answered. */
 
 let snapshot: Record<string, boolean> = {};
+let listSnapshot: Integration[] = [];     // fork: plugins — the full rows, for panes and cards
 let asked = false;
 const subs = new Set<() => void>();
 
-function publish(next: Record<string, boolean>): void {
+function publish(next: Record<string, boolean>, list?: Integration[]): void {
   snapshot = next;
+  if (list) listSnapshot = list;
   subs.forEach((fn) => fn());
 }
 
@@ -21,7 +23,8 @@ const flags = (list: Integration[]) => Object.fromEntries(list.map((p) => [p.id,
 /** Re-read the install flags. Call after anything that could flip one. */
 export async function refreshIntegrations(): Promise<void> {
   try {
-    publish(flags((await api.integrations()).plugins));
+    const list = (await api.integrations()).plugins;
+    publish(flags(list), list);
   } catch (e) {
     // A bridge older than this dashboard 404s "not found": it has no install step
     // and runs them all, so show them all.
@@ -36,7 +39,7 @@ export async function refreshIntegrations(): Promise<void> {
  *  over saves a round-trip and switches the tabs in the same frame. */
 export function setIntegrations(list: Integration[]): void {
   asked = true;
-  publish(flags(list));
+  publish(flags(list), list);
 }
 
 function subscribe(fn: () => void): () => void {
@@ -50,4 +53,10 @@ function subscribe(fn: () => void): () => void {
 
 export function useIntegrations(): Record<string, boolean> {
   return useSyncExternalStore(subscribe, () => snapshot);
+}
+
+/** fork: plugins — the installed out-of-tree plugins that bring a pane. */
+export function useExtPanes(): Integration[] {
+  const list = useSyncExternalStore(subscribe, () => listSnapshot);
+  return list.filter((p) => p.ext && p.installed && p.pane);
 }

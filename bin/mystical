@@ -437,6 +437,12 @@ from bridge import project_config
 project_config.set_design_project(sys.argv[1], sys.argv[2])
 ' "$2" "$3"
     ;;
+  plugin)
+    # --- fork: plugins --- ls | add <git-url|path> | rm <id> | update [<id>] (bridge/plugins_ext.py)
+    set -a; . "$ENV_FILE"; set +a
+    shift
+    PYTHONPATH="$REPO" exec python3 -m bridge.plugins_ext "$@"
+    ;;
   export|import)
     # Moving to another machine (bridge/move.py). .env is loaded the way run.sh
     # loads it, because bridge.config reads BASE_PATH and BRIDGE_DB from it.

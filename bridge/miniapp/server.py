@@ -393,6 +393,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "unauthorized"}, 401)
                 if (owner := integrations.route_owner(path)) and not integrations.installed(owner):
                     return self._json({"error": "not installed"}, 404)
+                if path.startswith("/api/plugin/"):          # fork: plugins
+                    from bridge import plugins_ext
+                    return self._json(*plugins_ext.dispatch("GET", path, qs, None, chat_id))
                 if path == "/api/state":
                     return self._api_state(chat_id)
                 if path == "/api/projects":
@@ -466,6 +469,9 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_json()
             if body is None:
                 return self._json({"error": "bad json"}, 400)
+            if path.startswith("/api/plugin/"):              # fork: plugins
+                from bridge import plugins_ext
+                return self._json(*plugins_ext.dispatch("POST", path, {}, body, chat_id))
             if path == "/api/hooks":
                 # A hook is a shell command that runs on every tool call: dashboard only.
                 return self._json({"error": "Change hooks on the dashboard."}, 403)

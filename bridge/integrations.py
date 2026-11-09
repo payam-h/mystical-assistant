@@ -60,6 +60,15 @@ PLUGINS: tuple[dict, ...] = (
      "routes": ("/local/design",)},
 )
 
+# --- fork: plugins --- bundled entries above; discovered ones (bridge/plugins_ext.py) join the same table
+from bridge import plugins_ext  # noqa: E402  (stdlib + config only; no cycle)
+BUILTIN = PLUGINS
+PLUGINS = BUILTIN + tuple(
+    {"id": m["id"], "label": m["label"], "blurb": m["blurb"], "needs": m["needs"],
+     "env_keys": m["env_keys"], "origins": m["origins"], "routes": m["routes"]}
+    for m in plugins_ext.registry())
+_EXT = {m["id"] for m in plugins_ext.registry()}
+# --- /fork ---
 _IDS = tuple(p["id"] for p in PLUGINS)
 _lock = threading.Lock()
 _cache: "dict | None" = None
@@ -92,6 +101,8 @@ def _adopt() -> dict:
             found[pid] = bool(probe())
         except Exception:  # noqa: BLE001 - an unreadable source counts as unused
             found[pid] = False
+    for pid in _EXT:          # fork: a discovered plugin starts OFF, like the bundled ones
+        found.setdefault(pid, False)
     return found
 
 
@@ -145,6 +156,11 @@ def set_installed(pid: str, on: bool) -> None:
         if not on and rivendell.busy():
             raise IntegrationError(
                 "A Rivendell run is in flight — let it finish, then remove Rivendell.")
+    if pid in _EXT and not on and plugins_ext.is_live(pid):    # fork: a plugin may refuse to stop mid-work
+        try:
+            plugins_ext.stop(pid)
+        except plugins_ext.PluginError as e:
+            raise IntegrationError(str(e)) from e
     with _lock:
         cur = dict(_load())
         cur[pid] = bool(on)
@@ -152,6 +168,8 @@ def set_installed(pid: str, on: bool) -> None:
         _save(cur)
     if pid == "rivendell":
         rivendell.reconfigure()     # outside the lock: it asks installed(), which takes it
+    if pid in _EXT and on:         # fork
+        plugins_ext.start(pid)
 
 
 def _count(n: int, noun: str) -> str:
@@ -163,6 +181,8 @@ def _summary(pid: str) -> str:
     that raises reads "": this is the page that installs and removes, so one bad
     store must not fail it (nor a POST that worked, which answers state())."""
     from bridge import project_config, rivendell_instances
+    if pid in _EXT:               # fork
+        return plugins_ext.summary(pid)
     try:
         if pid == "rivendell":
             rows = rivendell_instances.instances()
@@ -177,7 +197,8 @@ def state() -> list[dict]:
     on = flags()
     return [{"id": p["id"], "label": p["label"], "blurb": p["blurb"], "needs": p["needs"],
              "installed": on[p["id"]],
-             "summary": _summary(p["id"]) if on[p["id"]] else ""}
+             "summary": _summary(p["id"]) if on[p["id"]] else "",
+             **(plugins_ext.card(p["id"], on[p["id"]]) if p["id"] in _EXT else {})}   # fork
             for p in PLUGINS]
 
 
@@ -199,7 +220,7 @@ def route_owner(path: str) -> "str | None":
     for p in PLUGINS:
         if any(path == r or path.startswith(r + "/") for r in p["routes"]):
             return p["id"]
-    return None
+    return plugins_ext.owner_of(path)   # fork: /plugin/<id>/… of a plugin discovered after boot still 404s cleanly
 
 
 def hidden_env_keys() -> set[str]:

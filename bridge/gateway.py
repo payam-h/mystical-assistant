@@ -234,6 +234,10 @@ def tools_for(s: dict) -> list:
         if _rivendell_on(s):
             out += [RV_LIST, RV_NEW]
     out += list(gateway_tools.CORE_ALL)
+    # --- fork: plugins --- what live plugins offer (bridge/plugins_ext.py), prefixed <id>__
+    from bridge import plugins_ext
+    out += plugins_ext.tools_for(s)
+    # --- /fork ---
     # The rest are behind find_tools, so they cost nothing until wanted.
     out += [FIND, CALL]
     return _allowed(s, out)
@@ -439,6 +443,11 @@ def _call(s: dict, name: str, a: dict) -> dict:
         return _call_shared(s, a)
     if name in gateway_tools.HANDLED:
         return gateway_tools.call(s, job, name, a)
+    # --- fork: plugins ---
+    from bridge import plugins_ext
+    if plugins_ext.owns_tool(name):
+        return _text(plugins_ext.call_tool(s, name, a))
+    # --- /fork ---
     return _text(f"Unknown tool: {name}", error=True)
 
 
