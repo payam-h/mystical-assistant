@@ -227,3 +227,15 @@ def test_routes_and_manifest_through_the_loader(monkeypatch):
     finally:
         plugins_ext.stop_all()
         plugins_ext._registry = None
+
+
+def test_one_shots_carry_the_internal_tag_so_the_scanner_skips_them(monkeypatch):
+    m = _mod()
+    from bridge import native, runner
+    seen = {}
+    monkeypatch.setattr(runner, "run_blocking", lambda chat, prompt, **kw: seen.update(prompt=prompt, kw=kw) or ("ok", "sid", 0.001, False))
+    p = m.Plugin()
+    out = p._run_once("judge these", "/tmp/w", "haiku", "bypassPermissions", 60)
+    assert out.result == "ok" and seen["prompt"] == f"{native.INTERNAL_ONESHOT_TAG}\njudge these"
+    assert seen["kw"]["skip_pack"] is True and seen["kw"]["cwd"] == "/tmp/w"
+    assert native._is_internal_oneshot(seen["prompt"])
