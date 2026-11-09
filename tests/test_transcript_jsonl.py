@@ -526,3 +526,13 @@ def test_sources_are_capped():
     many = [{"title": f"t{i}", "url": f"https://e.com/{i}"} for i in range(40)]
     got = T.web_sources("WebSearch", {"results": [{"content": many}]})
     assert len(got) == T._SOURCES_MAX
+
+
+def test_latest_ai_title_is_the_newest_one_or_none():
+    recs = [{"type": "user", "uuid": "u0", "message": {"role": "user", "content": "first words"}},
+            {"type": "ai-title", "aiTitle": "Early  name", "sessionId": "s"},
+            {"type": "assistant", "uuid": "a0", "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+            {"type": "ai-title", "aiTitle": "Pixie Telegram assistant", "sessionId": "s"}]
+    assert T.latest_ai_title(_write(recs)) == "Pixie Telegram assistant"
+    assert T.latest_ai_title(_write(recs[:1])) is None
+    assert T.latest_ai_title("/nowhere/none.jsonl") is None

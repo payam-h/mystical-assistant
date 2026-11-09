@@ -434,6 +434,39 @@ def first_user_text(path: str) -> str | None:
     return None
 
 
+
+# --- fork: ai titles --- Claude Code names a session itself and appends the name to the
+# transcript as {"type":"ai-title","aiTitle":"…"} lines, again whenever it changes; the terminal
+# tab and `claude --resume` show the latest. The Cockpit read these; so does the scanner now.
+_AI_TITLE_TAIL = 64 * 1024     # the freshest ai-title sits in the tail; 64 KB covered every transcript measured
+
+
+def latest_ai_title(path: str) -> str | None:
+    """The newest ai-title in a transcript's tail, or None when Claude has not named it yet."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - _AI_TITLE_TAIL))
+            chunk = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    if '"ai-title"' not in chunk:
+        return None
+    for line in reversed(chunk.splitlines()):
+        if '"ai-title"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict) and rec.get("type") == "ai-title" and isinstance(rec.get("aiTitle"), str):
+            t = " ".join(rec["aiTitle"].split()).strip()
+            if t:
+                return t[:140]
+    return None
+# --- /fork ---
+
 def recover_cwd(path: str) -> str | None:
     """The session's true working dir, read from the first record carrying `cwd`
     (avoids decoding Claude's lossy projects-dir name)."""
