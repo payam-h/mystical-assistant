@@ -280,6 +280,14 @@ def on_message(msg: dict):
         if said:
             send(chat_id, said, thread=thread)
             return
+        # --- fork: plugins --- a live plugin's command (bridge/plugins_ext.py), owner only
+        if (msg.get("from") or {}).get("id") in config.ALLOWED_CHAT_IDS:
+            from bridge import plugins_ext
+            said = plugins_ext.on_command(chat_id, text)
+            if said:
+                send(chat_id, said, thread=thread)
+                return
+        # --- /fork ---
     replied = msg.get("reply_to_message") or {}
     # A text reply to a question or an approval (bridge/tgask.py) answers it in
     # those words; it is not a prompt.

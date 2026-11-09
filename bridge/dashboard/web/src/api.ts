@@ -1352,6 +1352,14 @@ export interface Integration {
   needs: string;
   installed: boolean;
   summary: string;
+  // fork: plugins — present on an out-of-tree plugin (bridge/plugins_ext.py)
+  ext?: boolean;
+  version?: string;
+  source?: "bundled" | "external";
+  pane?: { title: string; entry: string; css?: string | null; scope?: "project" | "worktree" | null } | null;
+  settings?: { key: string; label: string; secret: boolean; default: string; hint: string; value: string; set: boolean }[];
+  status?: { line: string; ok: boolean };
+  broken?: string | null;
 }
 /** Which of Rivendell's video tools the bridge finds. */
 export interface VideoTools {
@@ -1932,6 +1940,9 @@ export const api = {
   /** The bundled integrations and whether each is installed. A bridge older than
    *  this answers 404 "not found" (see lib/integrations.ts). */
   integrations: () => req<{ plugins: Integration[] }>("/local/integrations"),
+  /** fork: plugins — save an out-of-tree plugin's settings (secrets are sent, never read back). */
+  pluginSettings: (id: string, values: Record<string, string>) =>
+    req<{ ok: boolean; settings: Integration["settings"] }>(`/plugin/${id}/settings`, { method: "POST", body: JSON.stringify({ values }) }),
   /** Removing Rivendell mid-run is a 409 whose message says so. */
   setIntegration: (id: string, action: "install" | "remove") =>
     req<{ ok: boolean; plugins: Integration[] }>("/local/integrations", {

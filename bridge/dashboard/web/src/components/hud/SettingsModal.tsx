@@ -83,6 +83,7 @@ import { notify } from "./Notifications";
 import { NYAN_MODES, nyanLabel, nyanThumb, type NyanSound } from "../../lib/nyan";
 import { useAiFeatures } from "../../lib/ai";
 import { setIntegrations, useIntegrations } from "../../lib/integrations";
+import { ExtPluginCard } from "./ExtPluginCard";   // fork: plugins
 import { askConfirm } from "../ui/Ask";
 import { TONES, chime, pushSupported, requestPush, type ToneKey } from "../../lib/push";
 import { isNativeApp, isWinApp, macRebuild, macSet, useMacSettings, type MacSwitch } from "../../lib/mac";
@@ -2034,7 +2035,11 @@ function IntegrationsPanel() {
   if (!list) return <Placeholder icon={LoaderCircle} spin>Reading the integrations…</Placeholder>;
 
   const installed = list.filter((p) => p.installed);
-  const offers = OFFERS.filter((o) => list.some((p) => p.id === o.id && !p.installed));
+  const offers = [
+    ...OFFERS.filter((o) => list.some((p) => p.id === o.id && !p.installed)),
+    // fork: plugins — discovered plugins offer themselves the same way, chip = first two letters
+    ...list.filter((p) => p.ext && !p.installed).map((p) => ({ id: p.id, chip: p.id.slice(0, 2).toUpperCase(), color: "var(--acc)" })),
+  ];
   const errLine = (id: string) => (err?.id === id ? <div style={{ color: "var(--err)", marginTop: 4 }}>{err.msg}</div> : undefined);
 
   return (
@@ -2050,6 +2055,7 @@ function IntegrationsPanel() {
             </Row>
           </div>
           {p.id === "rivendell" && <div style={{ marginTop: 11 }}><RivendellPanel onChange={recount} /><DeviceRunsPanel /></div>}
+          {p.ext && <ExtPluginCard p={p} onChange={recount} />}  {/* fork: plugins */}
         </Section>
       ))}
       <Section title="AVAILABLE" top={installed.length > 0}

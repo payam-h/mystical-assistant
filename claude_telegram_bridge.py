@@ -120,6 +120,8 @@ def _shutdown():
     # RESTART overlay stops getting answers from this dying process.
     # Unconditional, like start(): PLUGINS-tab instances run without RIVENDELL_ENABLE.
     rivendell.stop()
+    from bridge import plugins_ext   # fork: plugins
+    plugins_ext.stop_all()
     if config.MINIAPP_ENABLE:
         from bridge.miniapp import server as miniapp
         miniapp.stop()
@@ -199,6 +201,10 @@ def main():
         # runs, then dials every enabled instance (none, when nothing is) the
         # moment the bridge is up, without waiting for a settings save.
         rivendell.start()              # rivendell-api agent websocket client(s)
+        # --- fork: plugins --- every installed out-of-tree plugin starts here, after the bundled ones
+        from bridge import integrations, plugins_ext
+        plugins_ext.start_installed(integrations.installed)
+        # --- /fork ---
         # Telegram LAST: the login launcher blocks on the dashboard port above,
         # and a cold boot's not-yet-ready network must not gate the window. A
         # failed getMe is a warning, not an exit — get_updates already retries

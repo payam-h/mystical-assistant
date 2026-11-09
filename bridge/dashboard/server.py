@@ -370,6 +370,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._stream(path[len("/local/stream/"):], qs)
             if path.startswith("/local/"):
                 return self._get_api(path, qs)
+            # --- fork: plugins --- a plugin's pane assets and GET routes (same Sec-Fetch-Site rule as /local/)
+            if path.startswith("/plugin/"):
+                if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
+                    return self._json({"error": "cross-site request"}, 403)
+                from bridge import integrations, plugins_ext
+                if (got := plugins_ext.asset(path)) is not None:
+                    return self._send(got[0], 200, got[1], cache="no-cache")
+                owner = plugins_ext.owner_of(path)
+                if not owner or not integrations.installed(owner):
+                    return self._json({"error": "not installed"}, 404)
+                return self._json(*plugins_ext.dispatch("GET", path, qs, None, _chat()))
+            # --- /fork ---
             if path == "/manifest.webmanifest":
                 return self._manifest()
             return self._static(path)
@@ -407,6 +419,14 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_json()
             if body is None:
                 return self._json({"error": "bad json"}, 400)
+            # --- fork: plugins ---
+            if path.startswith("/plugin/"):
+                from bridge import integrations, plugins_ext
+                owner = plugins_ext.owner_of(path)
+                if not owner or not integrations.installed(owner):
+                    return self._json({"error": "not installed"}, 404)
+                return self._json(*plugins_ext.dispatch("POST", path, {}, body, _chat()))
+            # --- /fork ---
             return self._post_api(path, body)
         except Exception as e:  # noqa: BLE001
             self._safe500(e)

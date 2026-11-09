@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ListChecks, BookOpen, Timer, Palette, Bookmark,
   FolderTree, Gauge, GitBranch, GitFork, GraduationCap, ListOrdered, Users,
+  Puzzle,
 } from "lucide-react";
 import {
   api,
@@ -71,7 +72,8 @@ import { copySelection, cutSelection, editorFor, pasteInto, selectedText } from 
 import { redo, selectAll, undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
 import { useAiFeatures } from "./lib/ai";
-import { useIntegrations } from "./lib/integrations";
+import { useExtPanes, useIntegrations } from "./lib/integrations";
+import { PluginPane } from "./components/hud/PluginPane";   // fork: plugins
 import { useSessionPins, useStickyObj, useStickySet } from "./lib/prefs";
 import { SHOW_ALL, shows } from "./lib/sessionfilter";
 import type { Show } from "./lib/sessionfilter";
@@ -287,6 +289,7 @@ export function App() {
   // Which bundled integrations are installed. A plugin that isn't has its routes
   // 404 and its UI gone, so nothing below polls or draws it.
   const plugins = useIntegrations();
+  const extPanes = useExtPanes();   // fork: plugins — out-of-tree plugins that bring a right-rail pane
   const [statusMap, setStatusMap] = useState<Map<string, SessionStatus>>(new Map());
   const [doneIds, setDoneIds] = useState<Set<string>>(loadDone);
   const [pins, togglePin] = useSessionPins();
@@ -2555,6 +2558,14 @@ export function App() {
           onRead={(k) => setLessonsRead((r) => new Set(r).add(k))} />
       ),
     }] : []),
+    // --- fork: plugins --- one tab per installed plugin with a pane (bridge/plugins_ext.py)
+    ...extPanes.map((p) => ({
+      id: `plugin:${p.id}`, label: p.pane!.title, icon: <Puzzle {...RAIL} />, ownScroll: true,
+      alert: !!p.broken || p.status?.ok === false,
+      ...(p.pane!.scope ? { scope: p.pane!.scope } : {}),
+      render: () => <PluginPane key={p.id} p={p} />,
+    })),
+    // --- /fork ---
     ...(rivendellOn ? [{
       id: "rivendell", label: rivendellDown ? "Rivendell tasks — link broken" : "Rivendell tasks",
       icon: <RivendellIcon {...RAIL} />, ownScroll: true, scope: "project" as const, alert: rivendellDown,

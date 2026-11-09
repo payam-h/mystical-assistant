@@ -37,6 +37,16 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Set by restart(); read by the entry point after its shutdown finishes.
 restart_requested = False
+
+
+def _is_fork() -> bool:
+    """fork: true when `origin` is not the project's own repository."""
+    try:
+        from bridge import git
+        rc, out, _ = git._run(REPO, "remote", "get-url", "origin")
+        return rc == 0 and "ainurdev/mystical-assistant" not in out
+    except Exception:  # noqa: BLE001
+        return False
 # Set by update_claude(); the entry point runs run_claude_update() before re-exec.
 claude_update_requested = False
 
@@ -107,6 +117,12 @@ def update() -> tuple[bool, str, bool]:
     """Pull, rebuild both UIs, then arm the restart (delayed, so the caller's HTTP
     response still gets out). A failed pull or build restarts nothing. The last
     value says whether the pull landed, so a failed build isn't read as a refused pull."""
+    # --- fork: this checkout is a fork --- upstream's commits are shown (the UPDATE rail reads HEAD..@{u},
+    # and `payam` tracks ainurdev/master for exactly that), but they are merged by hand through the weekly
+    # upstream-sync PR after the suite runs. One click must not fast-forward a fork onto upstream.
+    if _is_fork():
+        return False, "This is a fork: upstream's changes are listed here and merged by hand (upstream-sync PR), never pulled over this checkout.", False
+    # --- /fork ---
     ok, output = git.pull(REPO)
     if not ok:
         return False, output, False
