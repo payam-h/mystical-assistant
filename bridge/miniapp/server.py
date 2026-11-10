@@ -19,6 +19,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+from bridge import native_sync                       # fork: native catch-up
 from bridge import (accounts, agent_caps, agents, browser, channel, config, devserver, experimental,
                     git, github, multi_api,
                     httpgz, integrations, models, native, profiles, project_config, projectmarks,
@@ -285,6 +286,9 @@ def transcript_for(session: dict, cursor: int = 0,
         data = (transcript_jsonl.parse_jsonl(path, cursor) if path
                 else {"turns": [], "events": [], "next_cursor": cursor})
         return page({"session": session, **data})
+    # --- fork: native catch-up --- turns this session gained outside the bridge (bridge/native_sync.py)
+    native_sync.catch_up(session)
+    # --- /fork ---
     data = store.transcript(session["id"], cursor)
     # Fallback: a bridge row whose conversation actually lives in the native JSONL
     # (shares a claude_session_id but was never journaled) -> render from JSONL.
@@ -618,6 +622,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             runner._cleanup_uploads(job_id)
             return self._json({"error": str(e)}, 413)
+        native_sync.catch_up_id(session_id, wait=True)       # fork: native catch-up, before our turn lands
         job = runner.start_streaming_job(chat_id, prompt, paths, project_path,
                                          job_id=job_id, model=model, effort=effort,
                                          permission_mode=permission_mode,

@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import html
 import re
 
+from bridge import native_sync                       # fork: native catch-up
 from bridge import (acp_agents, acp_setup, agents, attribution, browser, config, multi_api,
                     device_ask, device_setup, device_share, device_side, device_view,
                     devserver, fmt, git,
@@ -2202,6 +2203,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             runner._cleanup_uploads(job_id)
             return self._json({"error": str(e)}, 413)
+        native_sync.catch_up_id(session_id, wait=True)       # fork: native catch-up, before our turn lands
         job = runner.start_streaming_job(chat, prompt, paths, project_path, job_id=job_id,
                                          model=model, effort=effort,
                                          permission_mode=permission_mode,
