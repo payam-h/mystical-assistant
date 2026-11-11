@@ -170,6 +170,9 @@ def get_usage(creds_path: str | None = None) -> dict:
     if now < next_try:                      # fetched recently and it failed
         return _last_good(data, now - ts)
     token = _token(path)
+    if not token and has_token(path):       # fork: an idle login — the CLI renews it (bridge/login_keepalive.py)
+        from bridge import login_keepalive
+        login_keepalive.kick(path)
     payload = _fetch(token) if token else None
     if isinstance(payload, dict):
         fresh = _normalize(payload)

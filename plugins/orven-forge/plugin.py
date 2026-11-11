@@ -28,6 +28,17 @@ The two rules the Mac app learned the hard way, kept:
 
 Capacity is reserved before the claim call, not after (the original double-claim bug). Stdlib only.
 
+How many slots. FORGE_SLOTS blank (the default) means "whatever the Forge panel says for this
+device": the agent offers MAX_SLOTS in x-agent-slots, and Forge's claim never hands out more than
+the device's own number there, so the panel is the one place to change it. The heartbeat answers
+with that number when the Forge server is new enough (`slots`), and the tab shows it. A number in
+FORGE_SLOTS still caps this Mac below what the panel says.
+
+Out of the way. A heavy task's session is archived the moment it is made, so the slot workspaces
+(anvil, ember, …) never turn up as projects in the sidebar; the tab's "session" link still opens
+it. A one-shot runs with --no-session-persistence: nothing reads its transcript, and they used to
+pile up at ~1,800 a day under ~/.claude/projects, which every session-list poll walked.
+
 Which Claude login a task runs on. FORGE_PROFILE names a Mystical profile (the FORGE tab's ACCOUNT
 picker writes it); blank means the bridge's default profile for the workspace. Both ways of running
 follow it: a session is bound to the profile, a one-shot gets the profile's account slot (it used to
@@ -52,8 +63,9 @@ import urllib.request
 import uuid
 from typing import Callable
 
-SLOT_NAMES = ("anvil", "ember", "bellows", "tongs", "forge", "mandrel", "swage", "chisel")
-MAX_SLOTS = 8
+SLOT_NAMES = ("anvil", "ember", "bellows", "tongs", "forge", "mandrel", "swage", "chisel",
+              "crucible", "hammer", "quench", "rasp", "scale", "flux", "hearth", "billet")
+MAX_SLOTS = 16    # what Forge's own claim accepts in x-agent-slots; the panel's per-device number decides below it
 
 
 def http(url: str, body: dict | None = None, headers: dict | None = None, method: str | None = None, timeout: int = 30, raw: bytes | None = None) -> tuple[int, object]:
@@ -156,6 +168,7 @@ class Plugin:
         self.last_claim_at: float | None = None
         self.last_beat_at: float | None = None
         self.recent: list[dict] = []          # last 20 finished tasks
+        self.device_slots: int | None = None  # the Forge panel's number for this device, from the heartbeat
         self.usage: dict = {}                 # account name -> {day -> {runs, failed, cost, seconds}}
         # injectable for tests
         self.http: Callable = http
@@ -166,11 +179,24 @@ class Plugin:
     # --- lifecycle ---------------------------------------------------------------------------
     def start(self, ctx) -> None:
         self.ctx = ctx
+        self._tidy_sessions()
         self._load_recent()
         self._load_usage()
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="forge-agent", daemon=True)
         self._thread.start()
+
+    def _tidy_sessions(self) -> None:
+        """Archive Forge sessions made before they were archived at birth (once; cheap after)."""
+        try:
+            from bridge import store
+            from contextlib import closing
+            with closing(store._connect()) as c:
+                ids = [r[0] for r in c.execute("SELECT id FROM sessions WHERE archived=0 AND origin LIKE 'forge:%'")]
+            for sid in ids:
+                store.archive(sid)
+        except Exception as e:  # noqa: BLE001
+            self.ctx.log(f"tidy sessions: {e}")
 
     def stop(self) -> None:
         if self.runs:
@@ -191,10 +217,19 @@ class Plugin:
         return (self._s().get("FORGE_URL") or "https://forge.imagelens.xyz").rstrip("/")
 
     def _slots(self) -> int:
+        """Tasks this Mac takes at once: the Forge panel's number for it, under FORGE_SLOTS if set."""
         try:
-            return max(1, min(MAX_SLOTS, int(self._s().get("FORGE_SLOTS") or 1)))
+            local = max(1, min(MAX_SLOTS, int(self._s().get("FORGE_SLOTS") or MAX_SLOTS)))
         except ValueError:
-            return 1
+            local = MAX_SLOTS
+        return min(local, self.device_slots) if self.device_slots else local
+
+    def _offer(self) -> int:
+        """What x-agent-slots says: this Mac's own ceiling, never the panel's number fed back to it."""
+        try:
+            return max(1, min(MAX_SLOTS, int(self._s().get("FORGE_SLOTS") or MAX_SLOTS)))
+        except ValueError:
+            return MAX_SLOTS
 
     def _agent_id(self) -> str:
         p = os.path.join(self.ctx.data_dir, "agent-id")
@@ -208,7 +243,7 @@ class Plugin:
             return aid
 
     def _headers(self) -> dict:
-        return {"x-agent-token": self._s().get("FORGE_AGENT_TOKEN", ""), "x-agent-id": self._agent_id(), "x-agent-slots": str(self._slots())}
+        return {"x-agent-token": self._s().get("FORGE_AGENT_TOKEN", ""), "x-agent-id": self._agent_id(), "x-agent-slots": str(self._offer())}
 
     def _api(self, path: str, body: dict | None = None, raw: bytes | None = None, ctype: str | None = None):
         tok = self._s().get("FORGE_AGENT_TOKEN", "")
@@ -278,8 +313,11 @@ class Plugin:
             self._stop.wait(every)
 
     def beat(self) -> None:
-        code, _ = self._api("/agent/heartbeat", {"name": self._s().get("FORGE_AGENT_NAME") or "Mystical", "version": "mystical-plugin/0.1"})
+        code, data = self._api("/agent/heartbeat", {"name": self._s().get("FORGE_AGENT_NAME") or "Mystical", "version": "mystical-plugin/0.2"})
         self.online = code < 400
+        n = data.get("slots") if isinstance(data, dict) else None
+        if isinstance(n, int) and n > 0:
+            self.device_slots = min(MAX_SLOTS, n)
         self.last_beat_at = time.time()
         if not self.online:
             self.last_error = f"heartbeat {code}"
@@ -413,7 +451,8 @@ class Plugin:
         # Tagged like the bridge's own one-shots: the session scanner (bridge/native.py) would otherwise list
         # every run — comment-moderation alone is ~1,800 a day — as a session in the sidebar.
         text, sid, cost, is_error = runner.run_blocking(config.DASH_CHAT_ID, f"{native.INTERNAL_ONESHOT_TAG}\n{prompt}", cwd=workdir, timeout=hang, model=model,
-                                                        skip_pack=True, permission_mode=permission_mode, account_slot=self._account()["slot"])
+                                                        skip_pack=True, permission_mode=permission_mode, account_slot=self._account()["slot"],
+                                                        extra_args=["--no-session-persistence"])
         return OneShot(text or "", sid, cost, bool(is_error))
 
     def _start_session(self, prompt: str, workdir: str, model: str | None, permission_mode: str, allowed_tools: str, origin: str, hang: int):
@@ -424,6 +463,7 @@ class Plugin:
         if model:
             store.set_run_settings(session["id"], model=model)
         store.rename(session["id"], f"Forge · {origin.split(':', 1)[-1]}")
+        store.archive(session["id"])          # a slot workspace is not a project: keep it out of the sidebar
         extra = ["--allowedTools", allowed_tools] if allowed_tools else None
         return runner.start_streaming_job(config.DASH_CHAT_ID, prompt, [], project=workdir, model=model or None,
                                           permission_mode=permission_mode, session_id=session["id"], origin=origin,

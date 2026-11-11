@@ -268,3 +268,30 @@ def test_scan_skips_a_plugins_scratch_workspace():
     _write_native("uuid-forge-old", cwd, first_user="You are one run of an automated comment-moderation pipeline")
     native.scan(chat_id=OWNER)
     assert store.get_by_claude_session_id("uuid-forge-old") is None
+
+
+def test_folders_outside_the_base_or_in_plugin_scratch_are_not_read():
+    base = native._enc(config.BASE_PATH.rstrip(os.sep))
+    assert native._may_hold_base_sessions(base + "-myproj")
+    assert native._may_hold_base_sessions(base)
+    assert not native._may_hold_base_sessions(base + "--forge-anvil")
+    assert not native._may_hold_base_sessions("-Users-someone-Library-Application-Support-Orven-forge-anvil")
+    assert native._may_hold_base_sessions("p-not-an-encoded-path")      # nothing to go on: read it
+
+
+def test_refresh_scans_off_the_request_thread(monkeypatch):
+    import threading as _t
+    started, release = _t.Event(), _t.Event()
+    monkeypatch.setattr(native, "scan", lambda chat_id=None: (started.set(), release.wait(5), 1)[-1])
+    monkeypatch.setattr(native, "_last_scan", 0.0)
+    assert native.refresh(OWNER) == 0                 # returned while the scan still runs
+    assert started.wait(5)
+    monkeypatch.setattr(native, "_last_scan", 0.0)
+    assert native.refresh(OWNER) == 0                 # a second one does not pile on
+    release.set()
+    for _ in range(100):
+        if not native._scan_running.is_set():
+            break
+        _t.Event().wait(0.01)
+    assert not native._scan_running.is_set()
+    assert native.refresh(OWNER, force=True) == 1     # force still answers inline

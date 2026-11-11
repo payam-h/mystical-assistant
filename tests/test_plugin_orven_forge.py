@@ -222,7 +222,7 @@ def test_routes_and_manifest_through_the_loader(monkeypatch):
         assert man and man["origins"] == ("forge",) and man["pane"]["title"] == "FORGE"
         assert plugins_ext.start("orven-forge"), plugins_ext.broken("orven-forge")
         body, code = plugins_ext.dispatch("GET", "/plugin/orven-forge/state", {}, None, 555)
-        assert code == 200 and body["configured"] is False and body["slots"] == 1
+        assert code == 200 and body["configured"] is False and body["slots"] == 16
         assert "no agent token" in plugins_ext.on_command(555, "/forge")
     finally:
         plugins_ext.stop_all()
@@ -331,3 +331,48 @@ def test_the_account_route_saves_the_pick_and_refuses_unknown_profiles(monkeypat
     body, code = post({"body": {"profile": ""}})
     assert code == 200 and saved == {"FORGE_PROFILE": ""}
     assert "FORGE_PROFILE" in {s["key"] for s in json.load(open(os.path.join(HERE, "plugins", "orven-forge", "plugin.json")))["settings"]}
+
+
+def test_slots_follow_the_forge_panel_under_the_local_cap():
+    m = _mod()
+    calls = []
+    p = _plugin(m, calls, [], settings={"FORGE_URL": "https://forge.test", "FORGE_AGENT_TOKEN": "tok"})
+    assert p._slots() == m.MAX_SLOTS == 16 and p._headers()["x-agent-slots"] == "16"   # blank: offer the ceiling
+    p.http = lambda *a, **k: (200, {"ok": True, "queued": 0, "slots": 6})
+    p.beat()
+    assert p.device_slots == 6 and p._slots() == 6 and p._headers()["x-agent-slots"] == "16"
+    p.ctx._s["FORGE_SLOTS"] = "3"                                                         # a local cap still wins
+    assert p._slots() == 3 and p._headers()["x-agent-slots"] == "3"
+    p.http = lambda *a, **k: (200, {"ok": True, "queued": 0})                             # an older Forge says nothing
+    p.device_slots = None
+    p.ctx._s["FORGE_SLOTS"] = ""
+    p.beat()
+    assert p._slots() == 16
+    assert len(m.SLOT_NAMES) == m.MAX_SLOTS
+
+
+def test_one_shots_leave_no_transcript_and_sessions_are_archived(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config, runner, store
+    monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
+    p = _plugin(m, [], [])
+    seen = {}
+    monkeypatch.setattr(runner, "run_blocking", lambda chat, prompt, **kw: seen.update(kw) or ("ok", "sid", 0.0, False))
+    p._run_once("judge", str(tmp_path), "haiku", "bypassPermissions", 60)
+    assert seen["extra_args"] == ["--no-session-persistence"]
+    monkeypatch.setattr(runner, "start_streaming_job", lambda *a, **kw: "job")
+    p._start_session("translate", str(tmp_path), None, "bypassPermissions", "", "forge:srt", 60)
+    made = [s for s in store.list_sessions_all(config.DASH_CHAT_ID, include_archived=True, max_age_secs=None)
+            if s.get("origin") == "forge:srt"]
+    assert made and all(s["archived"] for s in made)
+
+
+def test_old_forge_sessions_are_archived_at_start(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config, store
+    s = store.create_session(config.DASH_CHAT_ID, "/.forge/anvil", origin="forge:news-article", cwd=str(tmp_path))
+    other = store.create_session(config.DASH_CHAT_ID, "/proj", origin="dashboard", cwd=str(tmp_path))
+    p = m.Plugin()
+    p.ctx = FakeCtx({})
+    p._tidy_sessions()
+    assert store.get_session(s["id"])["archived"] == 1 and store.get_session(other["id"])["archived"] == 0

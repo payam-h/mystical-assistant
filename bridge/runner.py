@@ -725,11 +725,12 @@ def run_blocking(chat_id: int, prompt: str, resume_id: str | None = None,
                  model: str | None = None, skip_pack: bool = False,
                  permission_mode: str | None = None,
                  ponytail: str | None = None, new_session: bool = False,
-                 fork: bool = False, account_slot: "int | None" = None):
+                 fork: bool = False, account_slot: "int | None" = None,
+                 extra_args: "list[str] | None" = None):    # fork: a caller's own flags (Forge one-shots)
     cmd = _base_cmd(prompt, chat_id, stream=False, claude_session_id=resume_id,
                     cwd=cwd, model=model, skip_pack=skip_pack,
                     permission_mode=permission_mode, new_session=new_session,
-                    fork=fork)
+                    fork=fork) + list(extra_args or [])
     timeout = timeout or config.RUN_TIMEOUT
     try:
         proc = subprocess.run(cmd, cwd=cwd or state.project_dir(chat_id), capture_output=True,

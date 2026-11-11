@@ -96,5 +96,13 @@ the weekly upstream-sync PR, run the suite, then ⟳. `remote.pushDefault=origin
 in a terminal or Cockpit tab; upstream only imports a transcript once, at adoption. Its seams: one fenced block in
 `miniapp/server.py transcript_for` and one line before `start_streaming_job` in each server's send path.
 
+**Idle logins.** `bridge/login_keepalive.py` (ours): when the usage poll finds an account's access token
+expired beside a live refresh token, it runs `claude -p /cost --no-session-persistence` on that account, which
+renews it at no quota cost. Without it an idle account's meter reads blank and looks signed out.
+
+**Scanner.** `native.scan` skips ~/.claude/projects folders that cannot hold a listed session (outside BASE_PATH,
+or a plugin scratch dir such as `.forge`), and `native.refresh` runs it on a thread. Forge one-shots run with
+`--no-session-persistence` and Forge sessions are archived at birth.
+
 **Workspace.** `BASE_PATH` is `~/Desktop`; the owner's umbrella folders (`flixdrama`, `Orven`, `pixie`) are
 projects here, and dev-team sessions start in those folders, not in a single repo.
