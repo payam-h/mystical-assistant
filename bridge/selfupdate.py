@@ -184,7 +184,8 @@ def exec_self() -> None:
 BOOT = ""          # the tree this process launched with (snapshot()); "" until boot()
 BOOT_HEAD = ""     # the commit under it, which is what the card names
 STARTED = 0.0
-_PY = ["bridge/*.py", "claude_telegram_bridge.py"]   # what a restart loads; a pathspec's * spans dirs
+_PY = ["bridge/*.py", "claude_telegram_bridge.py",   # what a restart loads; a pathspec's * spans dirs
+       "plugins/*.py", "plugins/*.json"]              # fork: a plugin's code and manifest load at boot too
 _APPS = [("miniapp", "Mini App", "bridge/miniapp/web"), ("dashboard", "Dashboard", "bridge/dashboard/web")]
 _AFTER_EVERY = 3.0                                    # seconds between looks at the turns a wait is on
 _live_lock = threading.Lock()
