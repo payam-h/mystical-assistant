@@ -50,6 +50,11 @@
       "default": "0"
     },
     {
+      "key": "FORGE_PROFILE",
+      "label": "Claude profile (id)",
+      "hint": "which login runs Forge tasks; pick it in the FORGE tab. Blank = the default profile"
+    },
+    {
       "key": "FORGE_SESSION_TEMPLATES",
       "label": "Templates run as sessions",
       "default": "actor-bio,caption-translate,srt-translate,trailer-subtitle,episode-translate",
