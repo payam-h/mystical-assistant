@@ -8,9 +8,18 @@ import tempfile
 import threading
 import time
 
+import pytest
+
 from bridge import plugins_ext
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+@pytest.fixture(autouse=True)
+def _tables():
+    """The session tests need the store's tables, whatever ran before this file."""
+    from bridge import store
+    store.init()
 
 
 def _mod():
@@ -376,3 +385,24 @@ def test_old_forge_sessions_are_archived_at_start(monkeypatch, tmp_path):
     p.ctx = FakeCtx({})
     p._tidy_sessions()
     assert store.get_session(s["id"])["archived"] == 1 and store.get_session(other["id"])["archived"] == 0
+
+
+def test_claim_all_fills_every_free_slot_in_one_tick(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config
+    monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
+    gate = threading.Event()
+    answers = [{"task": {"id": f"t{i}"}, "job": {"templateKey": "comment-moderation", "slot": i}} for i in range(5)]
+    calls = []
+    p = _plugin(m, calls, answers, settings={"FORGE_URL": "https://forge.test", "FORGE_AGENT_TOKEN": "tok", "FORGE_SLOTS": "3"})
+    p.run_once = lambda *a: (gate.wait(5), m.OneShot("done", "sid", 0.0, False))[1]
+    assert p.claim_all() == 3                                   # stops at full, not after one
+    assert sum(c[0].endswith("/agent/claim") for c in calls) == 3
+    gate.set()
+    for _ in range(100):
+        if not p.runs:
+            break
+        time.sleep(0.02)
+    assert p._wake.is_set()                                     # a finished task wakes the loop
+    assert p.claim_all() == 2                                   # the last two, then the queue is empty
+    assert p.claim_all() == 0

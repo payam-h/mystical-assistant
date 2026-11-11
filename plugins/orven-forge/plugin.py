@@ -159,6 +159,7 @@ class Plugin:
     def __init__(self):
         self.ctx = None
         self._stop = threading.Event()
+        self._wake = threading.Event()        # set by a finished task, or by stop()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self.runs: dict[int, Run] = {}
@@ -203,6 +204,7 @@ class Plugin:
             from bridge import plugins_ext
             raise plugins_ext.PluginError(f"{len(self.runs)} Forge task(s) still running — let them finish, then remove Forge.")
         self._stop.set()
+        self._wake.set()
         if self._thread:
             self._thread.join(timeout=5)
 
@@ -306,11 +308,23 @@ class Plugin:
                         self.beat()
                         last_beat = time.time()
                     if not paused:
-                        self.claim_once()
+                        self.claim_all()
                 except Exception as e:  # noqa: BLE001
                     self.last_error = str(e)[:200]
                     self.online = False
-            self._stop.wait(every)
+            self._wake.wait(every)          # a finished task wakes it early: its slot is free now
+            self._wake.clear()
+
+    def claim_all(self) -> int:
+        """Claim until the slots are full or Forge has nothing more for us. One claim per tick
+        capped a 12-slot Mac at about one task every 10 s, so with 20–40 s tasks only ~4 ever ran
+        while the queue grew (2026-11-11). Returns how many were claimed."""
+        n = 0
+        for _ in range(MAX_SLOTS):
+            if self._stop.is_set() or self.claim_once() != "claimed":
+                break
+            n += 1
+        return n
 
     def beat(self) -> None:
         code, data = self._api("/agent/heartbeat", {"name": self._s().get("FORGE_AGENT_NAME") or "Mystical", "version": "mystical-plugin/0.2"})
@@ -444,6 +458,7 @@ class Plugin:
             with self._lock:
                 self.runs.pop(run.slot, None)
             shutil.rmtree(work, ignore_errors=True)
+            self._wake.set()                  # claim the next one now, not at the next tick
 
     def _run_once(self, prompt: str, workdir: str, model: str | None, permission_mode: str, hang: int) -> OneShot:
         """One claude -p in the workspace: tools on, no context pack, no MCP (skip_pack with a permission mode)."""
