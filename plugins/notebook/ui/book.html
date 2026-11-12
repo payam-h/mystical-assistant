@@ -510,7 +510,7 @@ function endPull() {
   document.body.classList.remove("dragging"); justDragged = true; setTimeout(() => { justDragged = false; }, 60);
   const now = performance.now(), first = p.trail[0], last = p.trail[p.trail.length - 1];       // a flick: how fast the page was going over its last moments
   const vel = first && last && last !== first && now - last[0] < 90 ? (last[1] - first[1]) / Math.max(16, last[0] - first[0]) : 0;
-  const over = Math.abs(vel) > .15 ? vel > 0 : p.a > 90, was = S.flipped;      // a flick decides; otherwise whichever side it is nearer
+  const over = Math.abs(vel) > .1 ? vel > 0 : p.a > 90, was = S.flipped;      // a flick decides; otherwise whichever side it is nearer
   p.l.getBoundingClientRect(); p.l.classList.remove("pulled"); p.l.style.removeProperty("--a"); p.l.classList.toggle("flipped", over);
   S.flipped = over ? p.i + 1 : p.i; S.at = S.flipped; if (S.flipped !== was) { sfx.flip(); if (loaded) save(); }
   setTimeout(() => { busy--; p.l.classList.remove("turning"); p.l.style.removeProperty("--sh");
