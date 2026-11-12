@@ -17,9 +17,11 @@ import re
 import shutil
 import threading
 import time
+import urllib.request
 
 MAX_BYTES = 40 * 1024 * 1024
 KEEP_DAYS = 14
+PROJECTS_TTL = 3600        # how long the Orven projects list is good for
 LINES_A_PAGE = 12          # /note stops adding to a page here; the book reflows what still overflows
 # A page is a grid of rows. A line has `gap` (empty rows above it) and `ind` (indent steps); the book owns both.
 _TAG = re.compile(r"(?:^|\s)#([^\W\d][\w-]{1,})(?=\s|$)", re.UNICODE)
@@ -43,12 +45,22 @@ def counts(state: dict | None) -> tuple[int, int]:
     return todo, done
 
 
+def fetch_orven_projects(url: str, token: str) -> list:
+    """The panel's projects (name, group, icon) through the device's gate token. Raises on any failure."""
+    req = urllib.request.Request(f"{url.rstrip('/')}/api/claude-jobs/agent/projects", data=b"{}", method="POST",
+                                 headers={"Content-Type": "application/json", "x-gate-token": token, "Cookie": f"orven_gate={token}"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.load(r).get("projects") or []
+
+
 class Plugin:
     def __init__(self):
         self.ctx = None
         self.path = ""
         self._lock = threading.RLock()
         self.now = time.time          # injectable
+        self.fetch_projects = fetch_orven_projects   # injectable
+        self.gate_token = None        # injectable: () -> token
 
     def start(self, ctx) -> None:
         self.ctx = ctx
@@ -96,6 +108,49 @@ class Plugin:
             except OSError:
                 pass
 
+    # --- Orven's projects, to label a line with --------------------------------------------
+    def _gate(self) -> str | None:
+        """This machine's Orven gate token, kept by the Orven plugin. None when it is not enrolled."""
+        if self.gate_token:
+            return self.gate_token()
+        try:
+            from bridge import plugins_ext
+            with open(os.path.join(plugins_ext.data_dir("orven"), "gate.json"), encoding="utf-8") as f:
+                return json.load(f).get("token") or None
+        except (OSError, ValueError, ImportError):
+            return None
+
+    def orven_projects(self) -> list:
+        """[{name, group, logo}] from the Orven panel, kept for an hour; the last good list when the
+        panel cannot be reached; [] when this machine is not enrolled. Only icons leave the panel."""
+        cache = os.path.join(self.ctx.data_dir, "orven-projects.json")
+        old = None
+        try:
+            with open(cache, encoding="utf-8") as f:
+                old = json.load(f)
+            if self.now() - os.path.getmtime(cache) < PROJECTS_TTL:
+                return old
+        except (OSError, ValueError):
+            pass
+        tok = self._gate()
+        if not tok:
+            return old or []
+        url = (self.ctx.settings().get("NOTEBOOK_ORVEN_URL") if hasattr(self.ctx, "settings") else "") or "https://console.orven.am"
+        try:
+            rows = self.fetch_projects(url, tok)
+        except Exception as e:  # noqa: BLE001 - a panel that is down never breaks the notebook
+            if hasattr(self.ctx, "log"):
+                self.ctx.log(f"orven projects: {e}")
+            return old or []
+        out = [{"name": str(p.get("name") or ""), "group": str(p.get("group") or ""),
+                "logo": p["imageUrl"] if str(p.get("imageUrl") or "").startswith(("data:image/", "https://")) else ""}
+               for p in rows if isinstance(p, dict) and p.get("name")]
+        tmp = cache + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f)
+        os.replace(tmp, cache)
+        return out
+
     # --- a line from outside the book ------------------------------------------------------
     def add_line(self, text: str) -> dict:
         text = " ".join(str(text or "").split())
@@ -134,6 +189,7 @@ class Plugin:
             ("GET", "/state"): lambda req: ({"state": self.read()}, 200),
             ("POST", "/state"): self._r_save,
             ("POST", "/line"): self._r_line,
+            ("GET", "/projects"): lambda req: ({"projects": self.orven_projects()}, 200),
         }
 
     def _r_save(self, req):

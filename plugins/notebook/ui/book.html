@@ -72,7 +72,7 @@ body { background: transparent; overflow: hidden; font-family: var(--ui); color:
 .nomotion .leaf, .nomotion .book { transition: none !important; }
 .face { position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; overflow: hidden; pointer-events: none; }
 .face.live { pointer-events: auto; }
-.face *, .face *::before, .face *::after { backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+/* which side of a leaf shows is set by .away (stack, watchTurn): hiding by backface on every child made rotated lines unclickable */
 .face.away { visibility: hidden; }
 .face.back { transform: rotateY(180deg); }
 .face.front { border-radius: 0 var(--round) var(--round) 0; }
@@ -120,12 +120,11 @@ body.dragging, body.dragging * { cursor: grabbing !important; }
 .entry.fa .txt { font: var(--fa-w) var(--fa-size)/var(--L) var(--fa), var(--en), cursive; }
 .entry.done .txt { opacity: .58; }
 .entry.dim { opacity: .16; }
-.entry:nth-child(3n) .txt { transform: rotate(-.35deg); } .entry:nth-child(3n+1) .txt { transform: rotate(.25deg) translateX(1px); }
 .dash { position: absolute; top: 3px; left: -24px; width: 22px; height: 24px; padding: 0; border: 0; background: none; cursor: grab; touch-action: none; color: inherit; opacity: .55; }
 .dash::before { content: ""; position: absolute; left: 6px; top: 12px; width: 9px; height: 2px; border-radius: 2px; background: currentColor; transform: rotate(-6deg); }
 .dash:hover { opacity: 1; } .dash:hover::before { width: 12px; left: 4px; }
 .entry.fa .dash { left: auto; right: -24px; }
-.tag { position: absolute; top: 2px; left: calc(-68px - var(--ind, 0) * 22px); width: 36px; text-align: right; font: 700 12.5px/26px 'Caveat', var(--fa), cursive; color: var(--c); transform: rotate(-4deg); white-space: nowrap; overflow: hidden; text-overflow: clip; cursor: pointer; }
+.tag { position: absolute; top: 2px; left: calc(-68px - var(--ind, 0) * 22px); width: 36px; text-align: right; font: 700 12.5px/26px 'Caveat', var(--fa), cursive; color: var(--c); white-space: nowrap; overflow: hidden; text-overflow: clip; cursor: pointer; }
 .entry.fa .tag { left: -68px; }
 .tag.none { opacity: 0; font-size: 17px; transition: opacity .15s; pointer-events: none; } .entries:hover .tag.none { opacity: .2; } .entry:hover .tag.none { opacity: .55; }
 .tag.logo { overflow: visible; }
@@ -409,7 +408,7 @@ function addLeaf(i) {
   const leaf = document.createElement("div"); leaf.className = "leaf" + (i ? "" : " cv"); leaf.dataset.i = i;
   leaf.innerHTML = i
     ? `<div class="face front page" data-p="${2 * i - 1}"></div><div class="face back page" data-p="${2 * i}"></div>`
-    : `<div class="face front cover"></div><div class="face back inside"><div class="own"><small>This notebook belongs to</small><span id="owner" contenteditable="plaintext-only" dir="auto" spellcheck="false"></span><i></i></div><div class="hint">write anything. <br>draw a line through it when it is done.<br><span class="beit" id="beit" dir="rtl" title="Another verse"></span></div></div>`;
+    : `<div class="face front cover"></div><div class="face back inside"><div class="own"><small>This notebook belongs to</small><span id="owner" contenteditable="plaintext-only" dir="auto" spellcheck="false"></span><i></i></div><div class="hint">double-click a line to write. <br>draw a line through it when it is done.<br><span class="beit" id="beit" dir="rtl" title="Another verse"></span></div></div>`;
   leavesEl.appendChild(leaf); leaves.push(leaf);
 }
 /* the notebook never runs out: two blank sheets always wait past the last written page */
@@ -434,6 +433,12 @@ function placeAt(p, e, row, h = 1) {
   e.gap = Math.max(0, row - prevEnd); pg.entries.splice(i, 0, e);
   if (i < rs.length) rs[i].e.gap = Math.max(0, rs[i].start - (row + h));
   if (!pg.date) pg.date = today();
+}
+/* take a line off its page; what was below keeps its row */
+function removeEntry(hit) {
+  const el = $(`.entry[data-id="${hit.e.id}"]`), h = el ? Math.max(1, Math.round(el.offsetHeight / LH)) : 1;
+  hit.pg.entries.splice(hit.i, 1); const nxt = hit.pg.entries[hit.i]; if (nxt) nxt.gap = (nxt.gap | 0) + (hit.e.gap | 0) + (hit.e.pushed ? 0 : h);
+  delete hit.e.pushed;
 }
 /* a page that no longer fits hands its last lines to the next one */
 function settle(p) {
@@ -560,8 +565,12 @@ async function loadProjects() {
       if (!PROJ.has(k) || (logo && !PROJ.get(k).logo)) PROJ.set(k, { name, logo, color: /^#[0-9a-f]{3,8}$/i.test(m.color || "") ? m.color : "" });
     }
   } catch {}
+  try {                                                   // the Orven panel's projects win a shared name: they are the product, a folder is a checkout
+    const r = await fetch("/plugin/notebook/projects", { headers: { "X-Dash-Token": token() } }); if (!r.ok) return;
+    for (const p of (await r.json()).projects || []) { const name = String(p.name || "").trim(); if (name) PROJ.set(name.toLowerCase(), { name, logo: /^(data:image\/|https:\/\/)/.test(p.logo || "") ? p.logo : "", color: "", orven: true, group: p.group || "" }); }
+  } catch {}
 }
-const mark = (name) => { const p = PROJ.get(String(name || "").toLowerCase()); return p && p.logo ? `<img src="${p.logo}" alt="" draggable="false">` : ""; };
+const mark = (name) => { const p = PROJ.get(String(name || "").toLowerCase()); return p && p.logo ? `<img src="${esc(p.logo)}" alt="" draggable="false">` : ""; };
 function entryHTML(e) {
   const dim = S.filter && e.project !== S.filter;
   return `<div class="entry${e.done ? " done" : ""}${FA.test(e.text) ? " fa" : ""}${dim ? " dim" : ""}" data-id="${e.id}" style="color:${INKS[e.ink] || INKS[0]};--gap:${e.gap | 0};--ind:${e.ind | 0}">`
@@ -604,8 +613,9 @@ const overflows = (p) => { const el = $(".entries", faceOf(p)); return el.scroll
 function addEntry(p, at, text = "", row = null) {
   snap();
   const pg = S.pages[p - 1], e = { id: id(), text, done: false, project: S.filter || "", ink: S.ink, gap: 0, ind: 0 }; seen.add(e.id);
-  if (row != null) placeAt(p, e, row, 1);
-  else { const prev = pg.entries[at - 1], nxt = pg.entries[at]; if (prev) e.ind = prev.ind | 0; if (nxt && nxt.gap > 0) nxt.gap--; pg.entries.splice(at, 0, e); }
+  // `pushed`: this line made room by moving the ones below it down; if it is thrown away empty they move back
+  if (row != null) { e.pushed = rowsOf(p).some((r) => r.start <= row && row < r.start + r.h) ? 1 : 0; placeAt(p, e, row, 1); }
+  else { const prev = pg.entries[at - 1], nxt = pg.entries[at]; if (prev) e.ind = prev.ind | 0; if (nxt && nxt.gap > 0) nxt.gap--; else if (nxt) e.pushed = 1; pg.entries.splice(at, 0, e); }
   if (!pg.date) pg.date = today(); renderPage(p); drawStrikes();
   if (overflows(p) && p < PAGES) { pg.entries.splice(pg.entries.indexOf(e), 1); renderPage(p); drawStrikes(); const q = S.pages[p]; e.gap = 0; q.entries.unshift(e); if (!q.date) q.date = today(); renderPage(p + 1); p++; }
   save(); refreshTabs(); ensureRoom();
@@ -627,15 +637,15 @@ leavesEl.addEventListener("input", (ev) => {
   if (m) { hit.e.project = m[1].toLowerCase(); hit.e.text = text.replace(m[0], m[0].startsWith("#") ? "" : " ").trimStart(); renderPage(hit.p); drawStrikes(); refreshTabs(); focusEntry(hit.e.id); save(); return; }
   if (pendingSnap) { undoS.push(pendingSnap); if (undoS.length > 40) undoS.shift(); redoS.length = 0; pendingSnap = null; undoBtns(); }
   clearTimeout(typeT); typeT = setTimeout(() => { pendingSnap = JSON.stringify(S.pages); }, 1200);     // a pause in typing starts a new undo step
-  hit.e.text = text; en.classList.toggle("fa", FA.test(text)); if (hit.e.done) drawStrike(en); save();
+  hit.e.text = text; if (text.trim()) delete hit.e.pushed; en.classList.toggle("fa", FA.test(text)); if (hit.e.done) drawStrike(en); save();
 });
 leavesEl.addEventListener("focusin", (ev) => { if (ev.target.matches && ev.target.matches(".txt")) pendingSnap = JSON.stringify(S.pages); });
 leavesEl.addEventListener("keydown", (ev) => {
   const t = ev.target; if (!t.matches(".txt")) return; const hit = find(t.closest(".entry").dataset.id); if (!hit) return;
   if (ev.key === "Enter") { ev.preventDefault(); if (hit.e.text.trim()) addEntry(hit.p, hit.i + 1); }
-  else if (ev.key === "Backspace" && !t.textContent) { ev.preventDefault(); snap(); hit.pg.entries.splice(hit.i, 1); renderPage(hit.p); drawStrikes(); const prev = hit.pg.entries[hit.i - 1]; if (prev) focusEntry(prev.id); save(); refreshTabs(); }
+  else if (ev.key === "Backspace" && !t.textContent) { ev.preventDefault(); snap(); removeEntry(hit); renderPage(hit.p); drawStrikes(); const prev = hit.pg.entries[hit.i - 1]; if (prev) focusEntry(prev.id); save(); refreshTabs(); }
 });
-leavesEl.addEventListener("focusout", (ev) => { const t = ev.target; if (!t.matches || !t.matches(".txt")) return; const hit = find(t.closest(".entry").dataset.id); if (hit && !hit.e.text.trim() && hit.pg.entries.length > 1) setTimeout(() => { if (document.activeElement === t) return; const h = find(hit.e.id); if (h && !h.e.text.trim()) { h.pg.entries.splice(h.i, 1); renderPage(h.p); drawStrikes(); save(); } }, 150); });
+leavesEl.addEventListener("focusout", (ev) => { const t = ev.target; if (!t.matches || !t.matches(".txt")) return; const hit = find(t.closest(".entry").dataset.id); if (hit && !hit.e.text.trim()) setTimeout(() => { if (document.activeElement === t) return; const h = find(hit.e.id); if (h && !h.e.text.trim()) { removeEntry(h); renderPage(h.p); drawStrikes(); save(); } }, 150); });
 
 leavesEl.addEventListener("click", (ev) => {
   const t = ev.target;
@@ -651,11 +661,13 @@ leavesEl.addEventListener("click", (ev) => {
     if (box && !t.closest(".txt") && !t.closest(".sticker")) { const r = box.getBoundingClientRect(), k = r.width / box.offsetWidth || 1;
       if ((ev.clientX - r.left) / k < 46) { const en = $$(".entry", box).find((e) => { const b = e.getBoundingClientRect(); return ev.clientY >= b.top && ev.clientY <= b.bottom; }); if (en) { openPicker(en.dataset.id, $(".tag", en)); return; } } } }
   if (S.tool === "erase") { const st = t.closest(".sticker"); if (st) { const p = pageOf(st); snap(); S.pages[p - 1].stickers.splice(+st.dataset.i, 1); renderPage(p); drawStrikes(); sfx.stick(); save(); } return; }
-  if (S.tool !== "write") return;
-  const p = pageOf(t); if (!p || t.closest(".entry") || t.closest(".sticker")) return;
-  const pg = S.pages[p - 1], empty = pg.entries.find((e) => !e.text.trim());
-  if (empty) { focusEntry(empty.id); return; }
-  const box = $(".entries", faceOf(p)), r = box.getBoundingClientRect(), k = r.width / box.offsetWidth || 1;      // the row that was clicked
+});
+/* a new line starts where the page is double-clicked: a single click on paper does nothing */
+leavesEl.addEventListener("dblclick", (ev) => {
+  const t = ev.target; if (S.flipped === 0 || placing || justDragged || S.tool !== "write") return;
+  const p = pageOf(t); if (!p || t.closest(".entry, .sticker, .corner, .grip")) return;
+  const box = $(".entries", faceOf(p)), r = box.getBoundingClientRect(), k = r.width / box.offsetWidth || 1;
+  if ((ev.clientX - r.left) / k < 46) return;                                                                  // the margin sets projects
   addEntry(p, 0, "", Math.max(0, Math.min(ROWS - 1, Math.floor((ev.clientY - r.top) / (LH * k)))));
 });
 
@@ -689,7 +701,7 @@ function endDrag() {
   if (d.target.p === p && me && d.target.row === me.start && d.target.ind === (e.ind | 0)) return;
   snap();
   if (e.by) { pg.strokes = pg.strokes.filter((s) => s.id !== e.by); e.by = ""; }      // a hand-drawn strike stays behind: the line keeps a fresh one
-  pg.entries.splice(hit.i, 1); const nxt = pg.entries[hit.i]; if (nxt) nxt.gap = (nxt.gap | 0) + (e.gap | 0) + h;   // what was below stays where it is
+  removeEntry(hit);                                                                   // what was below stays where it is
   renderPage(p); e.ind = d.target.ind; placeAt(d.target.p, e, d.target.row, h);
   renderPage(d.target.p); settle(d.target.p); drawStrikes(); refreshCard(); ensureRoom(); save(); sfx.stick();
 }
@@ -786,15 +798,17 @@ $("#card").addEventListener("click", (ev) => { const a = ev.target.closest("a");
 
 /* ── the project picker: click the margin beside a line ── */
 let pickFor = null;
-const tile = (name, p) => p && p.logo ? `<img src="${p.logo}" alt="">` : `<i style="--c:${(p && p.color) || pcol(name)}">${esc(name.replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(" ").slice(0, 2).map((w) => w[0] || "").join("").toUpperCase() || "?")}</i>`;
+const tile = (name, p) => p && p.logo ? `<img src="${esc(p.logo)}" alt="">` : `<i style="--c:${(p && p.color) || pcol(name)}">${esc(name.replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(" ").slice(0, 2).map((w) => w[0] || "").join("").toUpperCase() || "?")}</i>`;
 function pickerList(q) {
   q = q.trim().toLowerCase(); const cur = pickFor && find(pickFor), has = cur && cur.e.project;
   const mine = projects().filter((n) => !q || n.includes(q)), seen = new Set(mine);
-  const theirs = [...PROJ.values()].filter((p) => !seen.has(p.name.toLowerCase()) && (!q || p.name.toLowerCase().includes(q))).sort((a, b) => !!b.logo - !!a.logo || a.name.localeCompare(b.name)).slice(0, 60);
+  const rest = [...PROJ.values()].filter((p) => !seen.has(p.name.toLowerCase()) && (!q || p.name.toLowerCase().includes(q))).sort((a, b) => !!b.logo - !!a.logo || a.name.localeCompare(b.name));
+  const orven = rest.filter((p) => p.orven), theirs = rest.filter((p) => !p.orven).slice(0, 60);
   const row = (name, p, label) => `<button data-n="${esc(name)}"${has === name ? ' class="on"' : ""}>${tile(name, p)}<span>${esc(label || (p && p.name) || name)}</span></button>`;
   let html = has && !q ? `<button data-n=""><i style="--c:#b9b2a2">×</i><span>No project</span></button>` : "";
   if (mine.length) html += `<h6>In this notebook</h6>` + mine.map((n) => row(n, PROJ.get(n))).join("");
-  if (theirs.length) html += `<h6>Projects</h6>` + theirs.map((p) => row(p.name.toLowerCase(), p)).join("");
+  if (orven.length) html += `<h6>Orven</h6>` + orven.map((p) => row(p.name.toLowerCase(), p)).join("");
+  if (theirs.length) html += `<h6>Folders</h6>` + theirs.map((p) => row(p.name.toLowerCase(), p)).join("");
   if (q && !seen.has(q) && !PROJ.has(q)) html += `<button data-n="${esc(q)}"><i style="--c:#8a8478">+</i><span>New: ${esc(q)}</span></button>`;
   $("#pickl").innerHTML = html || `<h6>Type a name to start a project</h6>`;
 }

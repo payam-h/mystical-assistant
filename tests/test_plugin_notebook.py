@@ -16,6 +16,10 @@ def _plugin():
 
     class Ctx:
         data_dir = tempfile.mkdtemp()
+        def settings(self):
+            return {}
+        def log(self, m):
+            pass
     p = m.Plugin()
     p.start(Ctx())
     return m, p
@@ -97,3 +101,27 @@ def test_a_window_that_is_behind_gets_the_file_back_instead_of_overwriting_it():
     merged = {"pages": [{"entries": [{"id": "a", "text": "mine, edited"}, body["state"]["pages"][0]["entries"][1]]}]}
     assert save({"body": {"state": merged, "rev": 2}}) == ({"ok": True, "rev": 3}, 200)
     assert save({"body": {"state": merged}})[1] == 200               # no rev: an older window still saves
+
+
+def test_orven_projects_are_fetched_once_an_hour_and_survive_a_panel_that_is_down():
+    _, p = _plugin()
+    calls = []
+    def fetch(url, tok):
+        calls.append((url, tok))
+        return [{"id": "1", "name": "FlixDrama", "slug": "flixdrama", "group": "Streaming", "imageUrl": "data:image/png;base64,AAAA"},
+                {"id": "2", "name": "Odd", "group": "", "imageUrl": "javascript:alert(1)"}, {"name": ""}]
+    p.fetch_projects = fetch
+    p.gate_token = lambda: None
+    assert p.orven_projects() == [] and calls == []                       # not enrolled: nothing asked
+    p.gate_token = lambda: "tok"
+    p.now = lambda: 1_000_000_000_000                                     # far ahead of the cache file's mtime
+    want = [{"name": "FlixDrama", "group": "Streaming", "logo": "data:image/png;base64,AAAA"}, {"name": "Odd", "group": "", "logo": ""}]
+    assert p.routes()[("GET", "/projects")]({}) == ({"projects": want}, 200)
+    assert calls == [("https://console.orven.am", "tok")]
+    p.now = __import__("time").time
+    assert p.orven_projects() == want and len(calls) == 1                 # fresh: served from the file
+    p.now = lambda: 1_000_000_000_000
+    def down(url, tok):
+        raise OSError("panel is down")
+    p.fetch_projects = down
+    assert p.orven_projects() == want                                     # stale and unreachable: the last good list
