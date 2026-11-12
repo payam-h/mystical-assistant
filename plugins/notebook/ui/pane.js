@@ -18,7 +18,7 @@ const watchers = new Set();
 export function openBook(goto) {
   if (ov) { if (goto) ov.firstChild.contentWindow?.postMessage({ nb: "goto", ...goto }, location.origin); return; }
   ov = h("div", { class: "nbk-ov", role: "dialog", "aria-label": "Notebook" });
-  const frame = h("iframe", { src: "/plugin/notebook/ui/book.html", title: "Notebook", allowtransparency: "true" });
+  const frame = h("iframe", { src: "/plugin/notebook/ui/book.html", "aria-label": "Notebook", allowtransparency: "true" });
   frame.addEventListener("load", () => { frame.focus(); if (goto) setTimeout(() => frame.contentWindow?.postMessage({ nb: "goto", ...goto }, location.origin), 1500); });
   ov.append(frame); document.body.append(ov);
   requestAnimationFrame(() => ov && ov.classList.add("on"));

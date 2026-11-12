@@ -21,6 +21,7 @@ import time
 MAX_BYTES = 40 * 1024 * 1024
 KEEP_DAYS = 14
 LINES_A_PAGE = 12          # /note stops adding to a page here; the book reflows what still overflows
+# A page is a grid of rows. A line has `gap` (empty rows above it) and `ind` (indent steps); the book owns both.
 _TAG = re.compile(r"(?:^|\s)#([^\W\d][\w-]{1,})(?=\s|$)", re.UNICODE)
 
 
@@ -46,7 +47,7 @@ class Plugin:
     def __init__(self):
         self.ctx = None
         self.path = ""
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.now = time.time          # injectable
 
     def start(self, ctx) -> None:
@@ -105,6 +106,10 @@ class Plugin:
         if m:
             project = m.group(1).lower()
             text = (text[:m.start()] + " " + text[m.end():]).strip()
+        with self._lock:
+            return self._add_line(text, project)
+
+    def _add_line(self, text: str, project: str) -> dict:
         state = self.read() or {"v": 1, "skin": "noir", "pages": [blank_page() for _ in range(24)]}
         pages = state["pages"]
         last = max((i for i, p in enumerate(pages) if p.get("entries")), default=0)
@@ -118,7 +123,9 @@ class Plugin:
             pg["date"] = time.strftime("%a %-d %b", time.localtime(self.now()))
         entry = {"id": f"t{int(self.now() * 1000):x}", "text": text, "done": False, "project": project, "ink": 0}
         pg["entries"].append(entry)
-        self.write(state)
+        with self._lock:
+            state["rev"] = int(state.get("rev") or 0) + 1
+            self.write(state)
         return {"page": last + 1, "entry": entry}
 
     # --- the plugin contract ---------------------------------------------------------------
@@ -130,11 +137,22 @@ class Plugin:
         }
 
     def _r_save(self, req):
-        try:
-            self.write(req["body"].get("state"))
-        except ValueError as e:
-            return {"error": str(e)}, 400
-        return {"ok": True}, 200
+        """Whole-state save. `rev` is the revision the window loaded; when the file has moved on since
+        (a /note, the side pane, another window) nothing is written and the window gets the file back to
+        merge. A save without `rev` always wins (an older window)."""
+        state, base = req["body"].get("state"), req["body"].get("rev")
+        with self._lock:
+            cur = self.read()
+            rev = int((cur or {}).get("rev") or 0)
+            if base is not None and cur is not None and int(base) != rev:
+                return {"error": "the notebook changed elsewhere", "state": cur, "rev": rev}, 409
+            try:
+                if isinstance(state, dict):
+                    state["rev"] = rev + 1
+                self.write(state)
+            except ValueError as e:
+                return {"error": str(e)}, 400
+            return {"ok": True, "rev": rev + 1}, 200
 
     def _r_line(self, req):
         try:

@@ -26,8 +26,8 @@ def test_empty_then_saved_and_read_back():
     assert p.read() is None
     assert p.routes()[("GET", "/state")]({}) == ({"state": None}, 200)
     state = {"v": 1, "skin": "spiral", "pages": [{"date": "Mon", "entries": [{"id": "a", "text": "نان بخر", "done": False}], "strokes": [], "stickers": []}]}
-    assert p.routes()[("POST", "/state")]({"body": {"state": state}}) == ({"ok": True}, 200)
-    assert p.read() == state
+    assert p.routes()[("POST", "/state")]({"body": {"state": state}}) == ({"ok": True, "rev": 1}, 200)
+    assert p.read() == {**state, "rev": 1}
     assert oct(os.stat(p.path).st_mode & 0o777) == "0o600"
     assert "نان بخر" in open(p.path, encoding="utf-8").read()          # kept readable, not \\u-escaped
 
@@ -82,3 +82,18 @@ def test_the_first_write_of_a_day_keeps_the_file_as_it_stood():
         p.now = lambda d=d: 1_800_000_000 + d * 86400
         p.write({"pages": [{"entries": [{"id": "a", "text": f"day {d}"}]}]})
     assert len(os.listdir(kept)) == m.KEEP_DAYS
+
+
+def test_a_window_that_is_behind_gets_the_file_back_instead_of_overwriting_it():
+    _, p = _plugin()
+    save = p.routes()[("POST", "/state")]
+    mine = {"pages": [{"entries": [{"id": "a", "text": "mine"}]}]}
+    assert save({"body": {"state": mine, "rev": 0}}) == ({"ok": True, "rev": 1}, 200)
+    p.add_line("from telegram")                                     # the file moves on: rev 2
+    body, code = save({"body": {"state": {"pages": [{"entries": [{"id": "a", "text": "mine, edited"}]}]}, "rev": 1}})
+    assert code == 409 and body["rev"] == 2
+    assert [e["text"] for e in body["state"]["pages"][0]["entries"]] == ["mine", "from telegram"]
+    assert [e["text"] for e in p.read()["pages"][0]["entries"]] == ["mine", "from telegram"]     # nothing was written
+    merged = {"pages": [{"entries": [{"id": "a", "text": "mine, edited"}, body["state"]["pages"][0]["entries"][1]]}]}
+    assert save({"body": {"state": merged, "rev": 2}}) == ({"ok": True, "rev": 3}, 200)
+    assert save({"body": {"state": merged}})[1] == 200               # no rev: an older window still saves

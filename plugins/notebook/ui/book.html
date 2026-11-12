@@ -85,31 +85,38 @@ body { background: transparent; overflow: hidden; font-family: var(--ui); color:
 [data-skin="noir"] .face.page, [data-skin="spiral"] .face.page {
   background-image: repeating-linear-gradient(180deg, transparent 0, transparent calc(var(--L) - 1px), var(--rule) calc(var(--L) - 1px), var(--rule) var(--L));
   background-position: 0 calc(var(--top) + 0px); background-size: 100% calc(100% - var(--top) - 40px); background-repeat: no-repeat; }
-[data-skin="spiral"] .face.page > .mline { position: absolute; top: 0; bottom: 0; left: 58px; width: 1.5px; background: var(--margin); pointer-events: none; }
+[data-skin="spiral"] .face.front > .mline { left: 76px !important; }
+[data-skin="spiral"] .face.page > .mline { position: absolute; top: 0; bottom: 0; left: 64px; width: 1.5px; background: var(--margin); pointer-events: none; }
 [data-skin="atelier"] .face.page { background-image: radial-gradient(circle, var(--rule) 1px, transparent 1.4px); background-size: 15px 15px; background-position: 9px calc(var(--top) + 5px); }
 /* spiral: punched holes at the gutter */
 [data-skin="spiral"] .face.page > .holes { position: absolute; top: 0; bottom: 0; width: 26px; pointer-events: none;
   background-image: radial-gradient(circle at 50% 50%, #20262d 0, #20262d 4.6px, rgba(0,0,0,.25) 5.4px, transparent 6px); background-size: 26px 30.5px; }
 [data-skin="spiral"] .face.front > .holes { left: 0; } [data-skin="spiral"] .face.back > .holes { right: 0; }
-[data-skin="spiral"] .face.front .entries { padding-left: 66px; }
+[data-skin="spiral"] .face.front .entries { padding-left: 80px; }
 
 .hdr { position: absolute; top: 26px; right: 30px; left: 66px; height: 34px; font: var(--en-w) calc(var(--en-size) * .82) var(--en), var(--fa), cursive; opacity: .62; text-align: right; white-space: nowrap; }
 .back .hdr { right: 44px; }
 .pgno { position: absolute; bottom: 12px; font: var(--en-w) calc(var(--en-size) * .7) var(--en), cursive; opacity: .5; }
 .front .pgno { right: 26px; } .back .pgno { left: 26px; }
-.entries { position: absolute; top: var(--top); bottom: 44px; left: 0; right: 0; padding: 0 30px 0 60px; overflow: hidden; }
+.entries { position: absolute; top: var(--top); bottom: 44px; left: 0; right: 0; padding: 0 30px 0 68px; overflow: hidden; }
 .back .entries { padding-right: 42px; }
-.entry { position: relative; min-height: var(--L); }
+.entry { position: relative; min-height: var(--L); margin-top: calc(var(--gap, 0) * var(--L)); margin-left: calc(var(--ind, 0) * 22px); }
+.entry.fa { margin-left: 0; margin-right: calc(var(--ind, 0) * 22px); }
+.entry.drag { z-index: 8; opacity: .9; filter: drop-shadow(0 7px 7px rgba(0,0,0,.28)); }
+.entry.drag, .entry.drag * { pointer-events: none !important; }
+body.dragging, body.dragging * { cursor: grabbing !important; }
+.dropline { position: absolute; right: 22px; height: var(--L); border-radius: 7px; background: rgba(70, 130, 220, .12); outline: 1.5px dashed rgba(70, 130, 220, .6); outline-offset: -2px; pointer-events: none; z-index: 5; }
 .txt { min-height: var(--L); line-height: var(--L); font: var(--en-w) var(--en-size)/var(--L) var(--en), var(--fa), cursive; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; cursor: text; user-select: text; -webkit-user-select: text; caret-color: currentColor; transition: opacity .4s; }
 .entry.fa .txt { font: var(--fa-w) var(--fa-size)/var(--L) var(--fa), var(--en), cursive; }
 .entry.done .txt { opacity: .58; }
 .entry.dim { opacity: .16; }
 .entry:nth-child(3n) .txt { transform: rotate(-.35deg); } .entry:nth-child(3n+1) .txt { transform: rotate(.25deg) translateX(1px); }
-.dash { position: absolute; top: 3px; left: -22px; width: 22px; height: 24px; padding: 0; border: 0; background: none; cursor: pointer; color: inherit; opacity: .55; }
+.dash { position: absolute; top: 3px; left: -24px; width: 22px; height: 24px; padding: 0; border: 0; background: none; cursor: grab; touch-action: none; color: inherit; opacity: .55; }
 .dash::before { content: ""; position: absolute; left: 6px; top: 12px; width: 9px; height: 2px; border-radius: 2px; background: currentColor; transform: rotate(-6deg); }
 .dash:hover { opacity: 1; } .dash:hover::before { width: 12px; left: 4px; }
-.entry.fa .dash { left: auto; right: -22px; }
-.tag { position: absolute; top: 2px; left: -60px; width: 42px; text-align: right; font: 700 12.5px/26px 'Caveat', var(--fa), cursive; color: var(--c); transform: rotate(-4deg); white-space: nowrap; overflow: hidden; text-overflow: clip; cursor: pointer; }
+.entry.fa .dash { left: auto; right: -24px; }
+.tag { position: absolute; top: 2px; left: calc(-68px - var(--ind, 0) * 22px); width: 36px; text-align: right; font: 700 12.5px/26px 'Caveat', var(--fa), cursive; color: var(--c); transform: rotate(-4deg); white-space: nowrap; overflow: hidden; text-overflow: clip; cursor: pointer; }
+.entry.fa .tag { left: -68px; }
 .tag.none { opacity: 0; font-size: 17px; transition: opacity .15s; pointer-events: none; } .entries:hover .tag.none { opacity: .2; } .entry:hover .tag.none { opacity: .55; }
 .tag.logo { overflow: visible; }
 .tag img { width: 21px; height: 21px; border-radius: 6px; object-fit: cover; vertical-align: -5px; background: #fff; box-shadow: 0 0 0 1.5px #fff, 0 1px 2px rgba(0,0,0,.4); }
@@ -206,6 +213,9 @@ body { background: transparent; overflow: hidden; font-family: var(--ui); color:
   box-shadow: 0 1px 1px rgba(0,0,0,.2), 0 22px 40px -14px rgba(0,0,0,.7); transform: rotate(-2.2deg) translateY(130%); opacity: 0; transition: transform .5s cubic-bezier(.3,1.2,.4,1), opacity .3s; font: 500 19px/24px 'Caveat', 'Mikhak', cursive; }
 .card[data-on="1"] { transform: rotate(-2.2deg); opacity: 1; }
 .card h4 { position: absolute; top: 2px; left: 20px; margin: 0; font: 700 21px/26px 'Caveat', 'Mikhak', cursive; }
+.card input { position: absolute; top: 3px; right: 14px; width: 112px; height: 22px; padding: 0 2px; border: 0; border-bottom: 1px dashed rgba(38,50,79,.45); background: transparent; color: inherit; font: 500 18px/22px 'Caveat', 'Mikhak', cursive; outline: none; user-select: text; -webkit-user-select: text; }
+.card input::placeholder { color: rgba(38,50,79,.4); }
+.inside .beit { cursor: pointer; }
 .card h5 { margin: 0; font: 700 19px/24px 'Caveat', 'Mikhak', cursive; color: var(--c); }
 .card a { display: flex; gap: 8px; color: inherit; text-decoration: none; cursor: pointer; }
 .card a span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -219,6 +229,7 @@ body { background: transparent; overflow: hidden; font-family: var(--ui); color:
 .tray button:hover { background: rgba(255,255,255,.08); color: #fff; }
 .tray button[aria-pressed="true"] { background: #efe7d2; color: #1d1b17; transform: translateY(-3px); }
 .tray svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.tray button:disabled { opacity: .3; pointer-events: none; }
 .tray .sep { flex: none; width: 1px; height: 22px; margin: 0 5px; background: rgba(255,255,255,.12); }
 .tray .inks { display: flex; gap: 6px; padding: 0 4px; }
 .tray .inks button { min-width: 0; width: 22px; height: 22px; padding: 0; background: var(--c); box-shadow: inset 0 0 0 2px rgba(255,255,255,.18); }
@@ -273,7 +284,7 @@ body { background: transparent; overflow: hidden; font-family: var(--ui); color:
   </div>
 </div></div>
 
-<div class="card" id="card"></div>
+<div class="card" id="card"><h4 id="cardt"></h4><input id="cardq" placeholder="search…" dir="auto" spellcheck="false" autocomplete="off"><div id="cardb"></div></div>
 <div class="sheet" id="sheet"></div>
 <div class="covers" id="covers"><button data-skin="noir"><i class="noir"></i>Black hardcover</button><button data-skin="spiral"><i class="spiral"></i>Spiral</button><button data-skin="atelier"><i class="atelier"></i>Cloth-bound</button></div>
 <div class="ghost" id="ghost" hidden></div>
@@ -294,6 +305,8 @@ body { background: transparent; overflow: hidden; font-family: var(--ui); color:
   <button id="bPrev" title="Previous page"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
   <span class="pg" id="pg">cover</span>
   <button id="bNext" title="Next page"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
+  <button id="bUndo" title="Undo (Ctrl/⌘ Z)" disabled><svg viewBox="0 0 24 24"><path d="M9 7L4 12l5 5"/><path d="M4 12h10a6 6 0 0 1 0 12"/></svg></button>
+  <button id="bRedo" title="Redo (Shift Ctrl/⌘ Z)" disabled><svg viewBox="0 0 24 24"><path d="M15 7l5 5-5 5"/><path d="M20 12H10a6 6 0 0 0 0 12"/></svg></button>
   <button id="bSound" title="Paper sounds" aria-pressed="true"><svg viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 18V6L7.5 9.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg></button>
 </div>
 
@@ -332,16 +345,35 @@ async function load() {
   if (API) { try { const r = await fetch(API, { headers: { "X-Dash-Token": token() } }); if (r.ok) got = (await r.json()).state; } catch {} }
   else { try { got = JSON.parse(localStorage.getItem(KEY) || "null"); } catch {} }
   if (got && Array.isArray(got.pages) && got.pages.length) { S = { ...seed(), ...got }; S.pages = got.pages.map((p) => ({ ...blank(), ...p })); }
+  for (const pg of S.pages) for (const e of pg.entries) seen.add(e.id);
   if (S.pages.length % 2) S.pages.push(blank());
   S.filter = null; S.tool = "write"; LEAVES = Math.max(13, S.pages.length / 2 + 1); PAGES = (LEAVES - 1) * 2;
   while (S.pages.length < PAGES) S.pages.push(blank());
   S.flipped = 0; loaded = true;
 }
+const seen = new Set();            // every line id this window has met: one it has not is somebody else's new line
 function flush() {
   clearTimeout(saveT); if (!dirty || !loaded) return; dirty = false;
-  const { flipped, filter, tool, ...keep } = S; keep.at = flipped || S.at || 0; const body = JSON.stringify({ state: keep });
-  if (API) fetch(API, { method: "POST", keepalive: body.length < 60000, headers: { "Content-Type": "application/json", "X-Dash-Token": token() }, body }).then(() => { try { parent.postMessage({ nb: "saved" }, location.origin); } catch {} }).catch(() => { dirty = true; });
-  else { try { localStorage.setItem(KEY, body.slice(9, -1)); } catch {} }
+  const { flipped, filter, tool, ...keep } = S; keep.at = flipped || S.at || 0; const stateJson = JSON.stringify(keep), body = `{"state":${stateJson},"rev":${S.rev | 0}}`;
+  if (API) fetch(API, { method: "POST", keepalive: body.length < 60000, headers: { "Content-Type": "application/json", "X-Dash-Token": token() }, body })
+    .then((r) => r.json().then((j) => {
+      if (r.status === 409 && j.state) return merge(j.state);
+      if (!r.ok) { dirty = true; return; }
+      if (j.rev != null) S.rev = j.rev; try { parent.postMessage({ nb: "saved" }, location.origin); } catch {}
+    })).catch(() => { dirty = true; });
+  else { try { localStorage.setItem(KEY, stateJson); } catch {} }
+}
+/* the file moved on while this window was open (a /note, the side pane, another window): take the lines we have never seen, keep ours */
+function merge(theirs) {
+  const touched = new Set();
+  (theirs.pages || []).forEach((pg, i) => (pg.entries || []).forEach((e) => {
+    if (seen.has(e.id) || find(e.id)) return; seen.add(e.id);
+    const p = Math.min(i, PAGES - 1), mine = S.pages[p]; mine.entries.push({ ...e, gap: 0 }); if (!mine.date) mine.date = pg.date || ""; touched.add(p + 1);
+  }));
+  S.rev = theirs.rev | 0;
+  for (const p of touched) { renderPage(p); settle(p); }
+  if (touched.size) { drawStrikes(true); refreshTabs(); ensureRoom(); }
+  save();
 }
 const save = () => { dirty = true; clearTimeout(saveT); saveT = setTimeout(flush, 500); };
 addEventListener("pagehide", flush);
@@ -366,7 +398,7 @@ function addLeaf(i) {
   const leaf = document.createElement("div"); leaf.className = "leaf" + (i ? "" : " cv"); leaf.dataset.i = i;
   leaf.innerHTML = i
     ? `<div class="face front page" data-p="${2 * i - 1}"></div><div class="face back page" data-p="${2 * i}"></div>`
-    : `<div class="face front cover"></div><div class="face back inside"><div class="own"><small>This notebook belongs to</small><span id="owner" contenteditable="plaintext-only" dir="auto" spellcheck="false"></span><i></i></div><div class="hint">write anything. <br>draw a line through it when it is done.<br><span class="beit" dir="rtl">از صدای سخن عشق ندیدم خوش‌تر<br>یادگاری که در این گنبد دوّار بماند<small>حافظ</small></span></div></div>`;
+    : `<div class="face front cover"></div><div class="face back inside"><div class="own"><small>This notebook belongs to</small><span id="owner" contenteditable="plaintext-only" dir="auto" spellcheck="false"></span><i></i></div><div class="hint">write anything. <br>draw a line through it when it is done.<br><span class="beit" id="beit" dir="rtl" title="Another verse"></span></div></div>`;
   leavesEl.appendChild(leaf); leaves.push(leaf);
 }
 /* the notebook never runs out: two blank sheets always wait past the last written page */
@@ -377,18 +409,48 @@ function ensureRoom() {
   if (grew && !busy) stack();
 }
 /* a line written from outside (the pane, /note) may land on a full page: carry it over */
+const LH = 30, ROWS = 16;
+/* where each line of a page sits: its first row and how many rows it takes */
+function rowsOf(p) {
+  let cum = 0; const es = S.pages[p - 1].entries;
+  return $$(".entry", faceOf(p)).map((el, i) => { const e = es[i], h = Math.max(1, Math.round(el.offsetHeight / LH)), start = cum + (e.gap | 0); cum = start + h; return { e, el, start, h }; });
+}
+/* put a line (not on any page right now) on a row: an empty row takes it and nothing else moves; an occupied one gives way */
+function placeAt(p, e, row, h = 1) {
+  const pg = S.pages[p - 1], rs = rowsOf(p); let i = rs.findIndex((r) => r.start + r.h > row); if (i < 0) i = rs.length;
+  if (i < rs.length && rs[i].start <= row) row = rs[i].start;
+  const prevEnd = i ? rs[i - 1].start + rs[i - 1].h : 0;
+  e.gap = Math.max(0, row - prevEnd); pg.entries.splice(i, 0, e);
+  if (i < rs.length) rs[i].e.gap = Math.max(0, rs[i].start - (row + h));
+  if (!pg.date) pg.date = today();
+}
+/* a page that no longer fits hands its last lines to the next one */
+function settle(p) {
+  let moved = false, guard = 0;
+  while (p < PAGES && S.pages[p - 1].entries.length > 1 && overflows(p) && guard++ < 40) {
+    const pg = S.pages[p - 1], q = S.pages[p], x = pg.entries.pop(); x.gap = 0; if (q.entries[0]) q.entries[0].gap = 0; q.entries.unshift(x); if (!q.date) q.date = pg.date; renderPage(p); renderPage(p + 1); moved = true; }
+  return moved;
+}
 function reflow() {
-  let moved = false;
-  for (let p = 1; p < PAGES; p++) { const pg = S.pages[p - 1]; let guard = 0;
-    while (pg.entries.length > 1 && overflows(p) && guard++ < 40) { const q = S.pages[p]; q.entries.unshift(pg.entries.pop()); if (!q.date) q.date = pg.date; renderPage(p); renderPage(p + 1); moved = true; } }
+  let moved = false; for (let p = 1; p < PAGES; p++) moved = settle(p) || moved;
   if (moved) { ensureRoom(); refreshTabs(); save(); }
 }
+/* ── undo ── */
+const undoS = [], redoS = []; let pendingSnap = null;
+const undoBtns = () => { $("#bUndo").disabled = !undoS.length; $("#bRedo").disabled = !redoS.length; };
+function snap() { undoS.push(JSON.stringify(S.pages)); if (undoS.length > 40) undoS.shift(); redoS.length = 0; pendingSnap = null; undoBtns(); }
+function restore(json) {
+  const pages = JSON.parse(json); while (pages.length < PAGES) pages.push(blank()); S.pages = pages;
+  for (let p = 1; p <= PAGES; p++) renderPage(p); drawStrikes(true); refreshTabs(); ensureRoom(); save(); undoBtns();
+}
+function undo() { if (!undoS.length) return; redoS.push(JSON.stringify(S.pages)); restore(undoS.pop()); }
+function redo() { if (!redoS.length) return; undoS.push(JSON.stringify(S.pages)); restore(redoS.pop()); }
 function setSkin(name) {
   if (!INKSETS[name]) name = "noir"; SKIN = S.skin = name; INKS = INKSETS[name]; document.documentElement.dataset.skin = name;
   $(".face.cover").innerHTML = COVERS[name];
   $$("#covers button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.skin === name));
     for (let p = 1; p <= PAGES; p++) renderPage(p);
-  (document.fonts?.ready || Promise.resolve()).then(() => setTimeout(() => drawStrikes(true), 60));
+  (document.fonts?.ready || Promise.resolve()).then(() => setTimeout(() => { fitVerse(); drawStrikes(true); }, 60));
 }
 const faceOf = (p) => $(`.face[data-p="${p}"]`);
 const pageOf = (el) => { const f = el.closest(".face.page"); return f ? +f.dataset.p : 0; };
@@ -448,9 +510,9 @@ async function loadProjects() {
 const mark = (name) => { const p = PROJ.get(String(name || "").toLowerCase()); return p && p.logo ? `<img src="${p.logo}" alt="" draggable="false">` : ""; };
 function entryHTML(e) {
   const dim = S.filter && e.project !== S.filter;
-  return `<div class="entry${e.done ? " done" : ""}${FA.test(e.text) ? " fa" : ""}${dim ? " dim" : ""}" data-id="${e.id}" style="color:${INKS[e.ink] || INKS[0]}">`
+  return `<div class="entry${e.done ? " done" : ""}${FA.test(e.text) ? " fa" : ""}${dim ? " dim" : ""}" data-id="${e.id}" style="color:${INKS[e.ink] || INKS[0]};--gap:${e.gap | 0};--ind:${e.ind | 0}">`
     + (e.project ? `<span class="tag${mark(e.project) ? " logo" : ""}" style="--c:${pcol(e.project)}" title="${esc(e.project)}">${mark(e.project) || esc(e.project)}</span>` : `<span class="tag none" title="Set a project">+</span>`)
-    + `<button class="dash" tabindex="-1" title="Cross it out"></button><div class="txt" contenteditable="plaintext-only" dir="auto" spellcheck="false">${esc(e.text)}</div><svg class="strike"></svg></div>`;
+    + `<button class="dash" tabindex="-1" title="Click to cross out. Drag to move"></button><div class="txt" contenteditable="plaintext-only" dir="auto" spellcheck="false">${esc(e.text)}</div><svg class="strike"></svg></div>`;
 }
 const strokeHTML = (s) => `<path data-id="${s.id}" data-t="${s.t}" d="${s.d}" stroke="${s.i != null ? INKS[s.i] || INKS[0] : s.c}" stroke-width="${s.w}"/>`;
 function renderPage(p) {
@@ -485,16 +547,19 @@ const drawStrikes = (all) => (all ? $$(".entry.done") : visible().filter(Boolean
 function focusEntry(eid) { const t = $(`.entry[data-id="${eid}"] .txt`); if (!t) return; t.focus({ preventScroll: true }); const r = document.createRange(); r.selectNodeContents(t); r.collapse(false); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
 const today = () => new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
 const overflows = (p) => { const el = $(".entries", faceOf(p)); return el.scrollHeight > el.clientHeight + 3; };
-function addEntry(p, at, text = "") {
-  const pg = S.pages[p - 1], e = { id: id(), text, done: false, project: S.filter || "", ink: S.ink };
-  pg.entries.splice(at, 0, e); if (!pg.date) pg.date = today(); renderPage(p); drawStrikes();
-  if (overflows(p) && p < PAGES) { pg.entries.splice(pg.entries.indexOf(e), 1); renderPage(p); drawStrikes(); const q = S.pages[p]; q.entries.unshift(e); if (!q.date) q.date = today(); renderPage(p + 1); p++; }
+function addEntry(p, at, text = "", row = null) {
+  snap();
+  const pg = S.pages[p - 1], e = { id: id(), text, done: false, project: S.filter || "", ink: S.ink, gap: 0, ind: 0 }; seen.add(e.id);
+  if (row != null) placeAt(p, e, row, 1);
+  else { const prev = pg.entries[at - 1], nxt = pg.entries[at]; if (prev) e.ind = prev.ind | 0; if (nxt && nxt.gap > 0) nxt.gap--; pg.entries.splice(at, 0, e); }
+  if (!pg.date) pg.date = today(); renderPage(p); drawStrikes();
+  if (overflows(p) && p < PAGES) { pg.entries.splice(pg.entries.indexOf(e), 1); renderPage(p); drawStrikes(); const q = S.pages[p]; e.gap = 0; q.entries.unshift(e); if (!q.date) q.date = today(); renderPage(p + 1); p++; }
   save(); refreshTabs(); ensureRoom();
   focusEntry(e.id); if (!visible().includes(p)) goPage(p, () => focusEntry(e.id));   // focus first: nothing typed while the page turns is lost
   return e;
 }
 function toggleDone(eid, on) {
-  const hit = find(eid); if (!hit) return; const { e, p, pg } = hit; e.done = on ?? !e.done;
+  const hit = find(eid); if (!hit) return; snap(); const { e, p, pg } = hit; e.done = on ?? !e.done;
   if (!e.done && e.by) { pg.strokes = pg.strokes.filter((s) => s.id !== e.by); e.by = ""; const path = $(`.ink path[data-id="${e.by}"]`); renderInk(p); }
   const en = $(`.entry[data-id="${eid}"]`); en.classList.toggle("done", e.done); drawStrike(en, true); if (e.done) sfx.scratch(); save(); refreshCard();
 }
@@ -506,17 +571,21 @@ leavesEl.addEventListener("input", (ev) => {
   if (!t.matches(".txt")) return; const en = t.closest(".entry"), hit = find(en.dataset.id); if (!hit) return;
   let text = t.textContent.replace(/\n/g, " "); const m = text.match(/(?:^|\s)#([\p{L}\p{N}_-]{2,})\s/u);
   if (m) { hit.e.project = m[1].toLowerCase(); hit.e.text = text.replace(m[0], m[0].startsWith("#") ? "" : " ").trimStart(); renderPage(hit.p); drawStrikes(); refreshTabs(); focusEntry(hit.e.id); save(); return; }
+  if (pendingSnap) { undoS.push(pendingSnap); if (undoS.length > 40) undoS.shift(); redoS.length = 0; pendingSnap = null; undoBtns(); }
   hit.e.text = text; en.classList.toggle("fa", FA.test(text)); if (hit.e.done) drawStrike(en); save();
 });
+leavesEl.addEventListener("focusin", (ev) => { if (ev.target.matches && ev.target.matches(".txt")) pendingSnap = JSON.stringify(S.pages); });
 leavesEl.addEventListener("keydown", (ev) => {
   const t = ev.target; if (!t.matches(".txt")) return; const hit = find(t.closest(".entry").dataset.id); if (!hit) return;
   if (ev.key === "Enter") { ev.preventDefault(); if (hit.e.text.trim()) addEntry(hit.p, hit.i + 1); }
-  else if (ev.key === "Backspace" && !t.textContent) { ev.preventDefault(); hit.pg.entries.splice(hit.i, 1); renderPage(hit.p); drawStrikes(); const prev = hit.pg.entries[hit.i - 1]; if (prev) focusEntry(prev.id); save(); refreshTabs(); }
+  else if (ev.key === "Backspace" && !t.textContent) { ev.preventDefault(); snap(); hit.pg.entries.splice(hit.i, 1); renderPage(hit.p); drawStrikes(); const prev = hit.pg.entries[hit.i - 1]; if (prev) focusEntry(prev.id); save(); refreshTabs(); }
 });
 leavesEl.addEventListener("focusout", (ev) => { const t = ev.target; if (!t.matches || !t.matches(".txt")) return; const hit = find(t.closest(".entry").dataset.id); if (hit && !hit.e.text.trim() && hit.pg.entries.length > 1) setTimeout(() => { if (document.activeElement === t) return; const h = find(hit.e.id); if (h && !h.e.text.trim()) { h.pg.entries.splice(h.i, 1); renderPage(h.p); drawStrikes(); save(); } }, 150); });
 
 leavesEl.addEventListener("click", (ev) => {
   const t = ev.target;
+  if (justDragged) return;
+  if (t.closest(".beit")) { verse(); return; }
   if (S.flipped === 0) return;
   if (placing) return;
   if (t.closest(".corner")) { flipTo(S.flipped + (t.closest(".front") ? 1 : -1)); return; }
@@ -525,13 +594,50 @@ leavesEl.addEventListener("click", (ev) => {
   if (t.closest(".tag")) { openPicker(t.closest(".entry").dataset.id, t.closest(".tag")); return; }
   { const box = t.closest(".entries");                      // the margin beside a line sets its project
     if (box && !t.closest(".txt") && !t.closest(".sticker")) { const r = box.getBoundingClientRect(), k = r.width / box.offsetWidth || 1;
-      if ((ev.clientX - r.left) / k < 56) { const en = $$(".entry", box).find((e) => { const b = e.getBoundingClientRect(); return ev.clientY >= b.top && ev.clientY <= b.bottom; }); if (en) { openPicker(en.dataset.id, $(".tag", en)); return; } } } }
-  if (S.tool === "erase") { const st = t.closest(".sticker"); if (st) { const p = pageOf(st); S.pages[p - 1].stickers.splice(+st.dataset.i, 1); renderPage(p); drawStrikes(); sfx.stick(); save(); } return; }
+      if ((ev.clientX - r.left) / k < 46) { const en = $$(".entry", box).find((e) => { const b = e.getBoundingClientRect(); return ev.clientY >= b.top && ev.clientY <= b.bottom; }); if (en) { openPicker(en.dataset.id, $(".tag", en)); return; } } } }
+  if (S.tool === "erase") { const st = t.closest(".sticker"); if (st) { const p = pageOf(st); snap(); S.pages[p - 1].stickers.splice(+st.dataset.i, 1); renderPage(p); drawStrikes(); sfx.stick(); save(); } return; }
   if (S.tool !== "write") return;
   const p = pageOf(t); if (!p || t.closest(".entry") || t.closest(".sticker")) return;
-  const pg = S.pages[p - 1], last = pg.entries[pg.entries.length - 1];
-  if (last && !last.text.trim()) focusEntry(last.id); else addEntry(p, pg.entries.length);
+  const pg = S.pages[p - 1], empty = pg.entries.find((e) => !e.text.trim());
+  if (empty) { focusEntry(empty.id); return; }
+  const box = $(".entries", faceOf(p)), r = box.getBoundingClientRect(), k = r.width / box.offsetWidth || 1;      // the row that was clicked
+  addEntry(p, 0, "", Math.max(0, Math.min(ROWS - 1, Math.floor((ev.clientY - r.top) / (LH * k)))));
 });
+
+/* ── dragging a line by its dash: any row, either page; sideways indents it ── */
+let drag = null, justDragged = false;
+function startDrag(en, ev) {
+  const hit = find(en.dataset.id); if (!hit) return;
+  drag = { en, id: hit.e.id, x: ev.clientX, y: ev.clientY, on: false, ind: hit.e.ind | 0, from: +en.closest(".face").dataset.p, rtl: en.classList.contains("fa"), target: null };
+  addEventListener("pointermove", moveDrag); addEventListener("pointerup", endDrag, { once: true }); addEventListener("pointercancel", endDrag, { once: true });
+}
+function moveDrag(ev) {
+  if (!drag) return; const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+  if (!drag.on) { if (Math.hypot(dx, dy) < 6) return; drag.on = true; document.activeElement?.blur?.(); drag.en.classList.add("drag"); document.body.classList.add("dragging"); }
+  drag.en.style.transform = `translate(${dx / scale}px, ${dy / scale}px)`;
+  $$(".dropline").forEach((d) => d.remove()); drag.target = null;
+  const el = document.elementFromPoint(ev.clientX, ev.clientY), face = el && el.closest(".face.page.live"); if (!face) return;
+  const box = $(".entries", face), r = box.getBoundingClientRect(), k = r.width / box.offsetWidth || 1, p = +face.dataset.p;
+  const row = Math.max(0, Math.min(ROWS - 1, Math.floor((ev.clientY - r.top) / (LH * k))));
+  const ind = p === drag.from ? Math.max(0, Math.min(4, drag.ind + Math.round((drag.rtl ? -dx : dx) / (22 * k)))) : drag.ind;
+  drag.target = { p, row, ind };
+  const d = document.createElement("div"); d.className = "dropline"; d.style.top = (66 + row * LH) + "px"; d.style.left = (parseFloat(getComputedStyle(box).paddingLeft) - 26 + (drag.rtl ? 0 : ind * 22)) + "px"; if (drag.rtl) d.style.right = (22 + ind * 22) + "px"; face.appendChild(d);
+}
+function endDrag() {
+  removeEventListener("pointermove", moveDrag); removeEventListener("pointerup", endDrag); removeEventListener("pointercancel", endDrag);
+  $$(".dropline").forEach((d) => d.remove()); document.body.classList.remove("dragging");
+  const d = drag; drag = null; if (!d) return; d.en.classList.remove("drag"); d.en.style.transform = "";
+  if (!d.on) return;                                   // it was a click: the click handler crosses the line out
+  justDragged = true; setTimeout(() => { justDragged = false; }, 60);
+  const hit = find(d.id); if (!d.target || !hit) return;
+  const { e, p, pg } = hit, h = Math.max(1, Math.round(d.en.offsetHeight / LH)), me = rowsOf(p).find((r) => r.e === e);
+  if (d.target.p === p && me && d.target.row === me.start && d.target.ind === (e.ind | 0)) return;
+  snap();
+  if (e.by) { pg.strokes = pg.strokes.filter((s) => s.id !== e.by); e.by = ""; }      // a hand-drawn strike stays behind: the line keeps a fresh one
+  pg.entries.splice(hit.i, 1); const nxt = pg.entries[hit.i]; if (nxt) nxt.gap = (nxt.gap | 0) + (e.gap | 0) + h;   // what was below stays where it is
+  renderPage(p); e.ind = d.target.ind; placeAt(d.target.p, e, d.target.row, h);
+  renderPage(d.target.p); settle(d.target.p); drawStrikes(); refreshCard(); ensureRoom(); save(); sfx.stick();
+}
 book.addEventListener("click", () => { if (S.flipped === 0 && !busy) flipTo(Math.max(1, Math.min(S.at || 1, LEAVES - 1))); });
 leavesEl.addEventListener("input", (ev) => { if (ev.target.id === "owner") { S.owner = ev.target.textContent; save(); } });
 $("#ribbon").addEventListener("click", (ev) => { ev.stopPropagation(); let p = 1; S.pages.forEach((pg, i) => { if (pg.entries.length) p = i + 1; }); goPage(p); });
@@ -542,6 +648,7 @@ const local = (face, ev) => { const r = face.getBoundingClientRect(); return [(e
 leavesEl.addEventListener("pointerdown", (ev) => {
   if (placing || S.flipped === 0) return;
   const face = ev.target.closest(".face.page.live"); if (!face) return;
+  if (ev.target.closest(".dash")) { startDrag(ev.target.closest(".entry"), ev); return; }
   if (S.tool === "erase") { eraseAt(ev); erasing = true; return; }
   if (S.tool === "write") { const st = ev.target.closest(".sticker"); if (st && !ev.target.isContentEditable) dragSticker(st, face, ev); return; }
   if (ev.target.closest(".corner")) return;
@@ -550,15 +657,17 @@ leavesEl.addEventListener("pointerdown", (ev) => {
   $(".ink", face).appendChild(path); stroke = { face, path, pts: [local(face, ev)], s: t === "pen" ? { id: sid, t, i: S.ink, w, d: "" } : { id: sid, t, c, w, d: "" } }; leavesEl.setPointerCapture(ev.pointerId); if (t !== "hl") noise(.12, 3000, 4200, 2, .035);
 });
 let erasing = false;
-function eraseAt(ev) { const el = document.elementFromPoint(ev.clientX, ev.clientY); if (el && el.matches(".ink path")) { const p = pageOf(el), pg = S.pages[p - 1], sid = el.dataset.id; pg.strokes = pg.strokes.filter((s) => s.id !== sid); const e = pg.entries.find((x) => x.by === sid); if (e) { e.by = ""; e.done = false; renderPage(p); drawStrikes(); } else el.remove(); save(); refreshCard(); } }
+function eraseAt(ev) { const el = document.elementFromPoint(ev.clientX, ev.clientY); if (el && el.matches(".ink path")) { const p = pageOf(el), pg = S.pages[p - 1], sid = el.dataset.id; snap(); pg.strokes = pg.strokes.filter((s) => s.id !== sid); const e = pg.entries.find((x) => x.by === sid); if (e) { e.by = ""; e.done = false; renderPage(p); drawStrikes(); } else el.remove(); save(); refreshCard(); } }
 leavesEl.addEventListener("pointermove", (ev) => {
   if (erasing) return eraseAt(ev); if (!stroke) return;
   const pt = local(stroke.face, ev), l = stroke.pts[stroke.pts.length - 1]; if (Math.hypot(pt[0] - l[0], pt[1] - l[1]) < 2.2) return;
   stroke.pts.push(pt); stroke.path.setAttribute("d", smooth(stroke.pts));
 });
 const endStroke = () => {
-  erasing = false; if (!stroke) return; const { face, pts, s, path } = stroke; stroke = null; s.d = smooth(pts); path.setAttribute("d", s.d);
-  const p = +face.dataset.p, pg = S.pages[p - 1]; pg.strokes.push(s);
+  erasing = false; if (!stroke) return; const { face, pts, s, path } = stroke; stroke = null;
+  if (s.t !== "hl" && pts.length < 3) { path.remove(); return; }           // a tap is not a drawing: no stray dots
+  s.d = smooth(pts); path.setAttribute("d", s.d);
+  const p = +face.dataset.p, pg = S.pages[p - 1]; snap(); pg.strokes.push(s);
   if (s.t !== "hl" && pts.length > 2) {                       // a line drawn through a sentence crosses it out
     const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]), x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), cy = (y0 + y1) / 2;
     if (x1 - x0 > 46 && y1 - y0 < 24) for (const en of $$(".entry", face)) {
@@ -582,12 +691,12 @@ $("#sheet").addEventListener("click", (ev) => { const b = ev.target.closest("but
 addEventListener("pointermove", (ev) => { if (placing) ghost.style.transform = `translate(${ev.clientX}px, ${ev.clientY}px)`; });
 addEventListener("pointerdown", (ev) => {
   if (!placing) return; const face = ev.target.closest && ev.target.closest(".face.page.live"); ghost.hidden = true; const s = placing; placing = null; if (!face) return;
-  ev.preventDefault(); ev.stopPropagation(); const [x, y] = local(face, ev), p = +face.dataset.p; S.pages[p - 1].stickers.push({ k: s.k, v: s.v, c: s.c, x: Math.round(x), y: Math.round(y), r: s.r });
+  ev.preventDefault(); ev.stopPropagation(); const [x, y] = local(face, ev), p = +face.dataset.p; snap(); S.pages[p - 1].stickers.push({ k: s.k, v: s.v, c: s.c, x: Math.round(x), y: Math.round(y), r: s.r });
   renderPage(p); drawStrikes(); sfx.stick(); save(); ensureRoom(); if (s.k === "n") setTimeout(() => $(".stk .sticker.n:last-child div", face)?.focus(), 50);
 }, true);
 function dragSticker(el, face, ev) {
   const p = +face.dataset.p, s = S.pages[p - 1].stickers[+el.dataset.i], [sx, sy] = local(face, ev), ox = s.x - sx, oy = s.y - sy; let moved = false; ev.preventDefault();
-  const mv = (e) => { const [x, y] = local(face, e); s.x = Math.round(x + ox); s.y = Math.round(y + oy); el.style.left = s.x + "px"; el.style.top = s.y + "px"; moved = true; };
+  const mv = (e) => { if (!moved) snap(); const [x, y] = local(face, e); s.x = Math.round(x + ox); s.y = Math.round(y + oy); el.style.left = s.x + "px"; el.style.top = s.y + "px"; moved = true; };
   const up = () => { removeEventListener("pointermove", mv); removeEventListener("pointerup", up); if (moved) { sfx.stick(); save(); } };
   addEventListener("pointermove", mv); addEventListener("pointerup", up);
 }
@@ -608,12 +717,14 @@ function setFilter(name) {
   if (name) { const p = S.pages.findIndex((pg) => pg.entries.some((e) => e.project === name && !e.done)); if (p >= 0 && !visible().includes(p + 1)) goPage(p + 1); }
 }
 function refreshCard() {
-  const groups = new Map(); S.pages.forEach((pg, pi) => pg.entries.forEach((e) => { if (!e.text.trim()) return; const k = e.project || ""; if (S.filter && k !== S.filter) return; if (!groups.has(k)) groups.set(k, []); groups.get(k).push({ e, p: pi + 1 }); }));
+  const q = $("#cardq").value.trim().toLowerCase();
+  const groups = new Map(); S.pages.forEach((pg, pi) => pg.entries.forEach((e) => { if (!e.text.trim()) return; const k = e.project || ""; if (S.filter && k !== S.filter) return; if (q && !e.text.toLowerCase().includes(q) && !k.includes(q)) return; if (!groups.has(k)) groups.set(k, []); groups.get(k).push({ e, p: pi + 1 }); }));
   const keys = [...groups.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b)); let open = 0;
   const body = keys.map((k) => { const rows = groups.get(k).sort((a, b) => a.e.done - b.e.done); open += rows.filter((r) => !r.e.done).length;
     return `<h5 style="--c:${k ? pcol(k) : "#26324f"}">${k ? mark(k) : ""}${esc(k || "everything else")}</h5>` + rows.map((r) => `<a data-p="${r.p}" data-id="${r.e.id}" class="${r.e.done ? "d" : ""}"><span dir="auto">${esc(r.e.text)}</span><em>p${r.p}</em></a>`).join(""); }).join("");
-  $("#card").innerHTML = `<h4>${S.filter ? esc(S.filter) : "index"} · ${open} open</h4>` + (body || `<div class="none">nothing written yet</div>`);
+  $("#cardt").textContent = `${S.filter || "index"} · ${open} open`; $("#cardb").innerHTML = body || `<div class="none">${q ? "nothing matches" : "nothing written yet"}</div>`;
 }
+$("#cardq").addEventListener("input", refreshCard);
 $("#tabs").addEventListener("click", (ev) => { ev.stopPropagation(); const b = ev.target.closest("button"); if (b) setFilter(S.filter === b.dataset.p ? null : b.dataset.p); });
 $("#card").addEventListener("click", (ev) => { const a = ev.target.closest("a"); if (!a) return; goPage(+a.dataset.p, () => { const en = $(`.entry[data-id="${a.dataset.id}"]`); if (en) en.animate([{ background: "rgba(255,226,74,.7)" }, { background: "transparent" }], { duration: 1100 }); }); });
 
@@ -638,13 +749,22 @@ function openPicker(eid, anchor) {
 }
 function closePicker() { pickFor = null; $("#picker").dataset.on = 0; }
 function pick(name) {
-  const hit = pickFor && find(pickFor); closePicker(); if (!hit) return;
+  const hit = pickFor && find(pickFor); closePicker(); if (!hit) return; snap();
   hit.e.project = String(name || "").trim().toLowerCase(); renderPage(hit.p); drawStrikes(); refreshTabs(); save();
 }
 $("#pickq").addEventListener("input", (ev) => pickerList(ev.target.value));
 $("#pickq").addEventListener("keydown", (ev) => { if (ev.key === "Enter") { const b = $("#pickl button:not([data-n=''])") || $("#pickl button"); if (b) pick(b.dataset.n); } else if (ev.key === "Escape") { ev.stopPropagation(); closePicker(); } });
 $("#pickl").addEventListener("click", (ev) => { const b = ev.target.closest("button"); if (b) pick(b.dataset.n); });
 addEventListener("pointerdown", (ev) => { if (pickFor && !ev.target.closest("#picker") && !ev.target.closest(".tag")) closePicker(); }, true);
+
+/* ── a verse inside the cover: another one every time the notebook opens ── */
+const POEMS = [["از صدای سخن عشق ندیدم خوش‌تر", "یادگاری که در این گنبد دوّار بماند", "حافظ"], ["هرگز نمیرد آن که دلش زنده شد به عشق", "ثبت است بر جریدهٔ عالم دوام ما", "حافظ"], ["در اندرون من خسته‌دل ندانم کیست", "که من خموشم و او در فغان و در غوغاست", "حافظ"], ["یوسف گم‌گشته بازآید به کنعان غم مخور", "کلبهٔ احزان شود روزی گلستان غم مخور", "حافظ"], ["درخت دوستی بنشان که کام دل به بار آرد", "نهال دشمنی برکن که رنج بی‌شمار آرد", "حافظ"], ["سال‌ها دل طلب جام جم از ما می‌کرد", "وآنچه خود داشت ز بیگانه تمنا می‌کرد", "حافظ"], ["دوش دیدم که ملائک در میخانه زدند", "گل آدم بسرشتند و به پیمانه زدند", "حافظ"], ["مزرع سبز فلک دیدم و داس مه نو", "یادم از کشتهٔ خویش آمد و هنگام درو", "حافظ"], ["بر سر آنم که گر ز دست برآید", "دست به کاری زنم که غصه سر آید", "حافظ"], ["عیب رندان مکن ای زاهد پاکیزه‌سرشت", "که گناه دگران بر تو نخواهند نوشت", "حافظ"], ["ما بدین در نه پی حشمت و جاه آمده‌ایم", "از بد حادثه این‌جا به پناه آمده‌ایم", "حافظ"], ["الا یا ایها الساقی ادر کأساً و ناولها", "که عشق آسان نمود اول ولی افتاد مشکل‌ها", "حافظ"], ["صبا به لطف بگو آن غزال رعنا را", "که سر به کوه و بیابان تو داده‌ای ما را", "حافظ"], ["برگ درختان سبز در نظر هوشیار", "هر ورقش دفتری‌ست معرفت کردگار", "سعدی"], ["بنی‌آدم اعضای یکدیگرند", "که در آفرینش ز یک گوهرند", "سعدی"], ["به جهان خرّم از آنم که جهان خرّم از اوست", "عاشقم بر همه عالم که همه عالم از اوست", "سعدی"], ["ای ساربان آهسته ران کآرام جانم می‌رود", "وآن دل که با خود داشتم با دلستانم می‌رود", "سعدی"], ["سعدیا مرد نکونام نمیرد هرگز", "مرده آن است که نامش به نکویی نبرند", "سعدی"], ["تو نیکی می‌کن و در دجله انداز", "که ایزد در بیابانت دهد باز", "سعدی"], ["هر که آمد عمارتی نو ساخت", "رفت و منزل به دیگری پرداخت", "سعدی"], ["بشنو این نی چون شکایت می‌کند", "از جدایی‌ها حکایت می‌کند", "مولانا"], ["هر کسی کو دور ماند از اصل خویش", "باز جوید روزگار وصل خویش", "مولانا"], ["مرده بدم زنده شدم گریه بدم خنده شدم", "دولت عشق آمد و من دولت پاینده شدم", "مولانا"], ["ای قوم به حج رفته کجایید کجایید", "معشوق همین‌جاست بیایید بیایید", "مولانا"], ["این جهان کوه است و فعل ما ندا", "سوی ما آید نداها را صدا", "مولانا"], ["دی شیخ با چراغ همی‌گشت گرد شهر", "کز دیو و دد ملولم و انسانم آرزوست", "مولانا"], ["ما ز بالاییم و بالا می‌رویم", "ما ز دریاییم و دریا می‌رویم", "مولانا"], ["تو مگو ما را بدان شه بار نیست", "با کریمان کارها دشوار نیست", "مولانا"], ["این قافلهٔ عمر عجب می‌گذرد", "دریاب دمی که با طرب می‌گذرد", "خیام"], ["از دی که گذشت هیچ از او یاد مکن", "فردا که نیامده‌ست فریاد مکن", "خیام"], ["ای دوست بیا تا غم فردا نخوریم", "وین یک‌دم عمر را غنیمت شمریم", "خیام"], ["توانا بود هر که دانا بود", "ز دانش دل پیر برنا بود", "فردوسی"], ["به نام خداوند جان و خرد", "کزین برتر اندیشه برنگذرد", "فردوسی"], ["میازار موری که دانه‌کش است", "که جان دارد و جان شیرین خوش است", "فردوسی"], ["بسی رنج بردم در این سال سی", "عجم زنده کردم بدین پارسی", "فردوسی"], ["ای نام تو بهترین سرآغاز", "بی نام تو نامه کی کنم باز", "نظامی"], ["بوی جوی مولیان آید همی", "یاد یار مهربان آید همی", "رودکی"], ["هر که نامخت از گذشت روزگار", "نیز ناموزد ز هیچ آموزگار", "رودکی"], ["درخت تو گر بار دانش بگیرد", "به زیر آوری چرخ نیلوفری را", "ناصرخسرو"], ["ز دست دیده و دل هر دو فریاد", "که هر چه دیده بیند دل کند یاد", "باباطاهر"], ["آمدی جانم به قربانت ولی حالا چرا", "بی‌وفا حالا که من افتاده‌ام از پا چرا", "شهریار"], ["چشم‌ها را باید شست", "جور دیگر باید دید", "سهراب سپهری"], ["تا شقایق هست", "زندگی باید کرد", "سهراب سپهری"], ["پرواز را به خاطر بسپار", "پرنده مردنی‌ست", "فروغ فرخزاد"]];
+function verse() {
+  const el = $("#beit"); if (!el) return; let last = -1; try { last = +localStorage.getItem("nb-verse"); } catch {}
+  let i = Math.floor(Math.random() * POEMS.length); if (i === last) i = (i + 1) % POEMS.length; try { localStorage.setItem("nb-verse", i); } catch {}
+  const [a, b, who] = POEMS[i]; el.innerHTML = `${a}<br>${b}<small>${who}</small>`; fitVerse();
+}
+function fitVerse() { const el = $("#beit"); if (!el) return; let f = 100; el.style.fontSize = ""; while (el.scrollWidth > el.clientWidth + 1 && f > 60) { f -= 4; el.style.fontSize = f + "%"; } }
 
 /* ── the tray ── */
 $("#inks").innerHTML = INKS.map((c, i) => `<button data-ink="${i}" style="--c:${c}" aria-pressed="${i === S.ink}" title="Ink"></button>`).join("");
@@ -657,10 +777,15 @@ $("#tray").addEventListener("click", (ev) => {
   else if (b.id === "bCover") { toggleSheet(false); toggleCovers(); }
   else if (b.id === "bIndex") { const c = $("#card"); c.dataset.on = c.dataset.on === "1" ? 0 : 1; b.setAttribute("aria-pressed", c.dataset.on === "1"); if (c.dataset.on !== "1" && S.filter) setFilter(null); }
   else if (b.id === "bPrev") flipTo(S.flipped - 1); else if (b.id === "bNext") flipTo(S.flipped + 1);
+  else if (b.id === "bUndo") undo(); else if (b.id === "bRedo") redo();
   else if (b.id === "bSound") { S.sound = !S.sound; b.setAttribute("aria-pressed", S.sound); save(); }
 });
 $("#tray").addEventListener("mousedown", (ev) => { if (ev.target.closest("[data-ink]")) ev.preventDefault(); });
 addEventListener("keydown", (ev) => {
+  const mod = ev.metaKey || ev.ctrlKey, k = ev.key.toLowerCase();
+  if (mod && k === "f") { ev.preventDefault(); $("#card").dataset.on = 1; $("#bIndex").setAttribute("aria-pressed", true); $("#cardq").focus(); $("#cardq").select(); return; }
+  if (mod && k === "z" && !ev.target.isContentEditable && ev.target.tagName !== "INPUT") { ev.preventDefault(); ev.shiftKey ? redo() : undo(); return; }
+  if (ev.target.id === "cardq" && ev.key === "Escape") { ev.target.value = ""; refreshCard(); ev.target.blur(); return; }
   if (ev.target.isContentEditable) { if (ev.key === "Escape") ev.target.blur(); return; }
   if (ev.target.tagName === "INPUT") return;
   if (ev.key === "ArrowRight" || ev.key === "PageDown") flipTo(S.flipped + 1); else if (ev.key === "ArrowLeft" || ev.key === "PageUp") flipTo(S.flipped - 1);
@@ -676,12 +801,12 @@ document.body.classList.add("nomotion");
 load().then(loadProjects).then(() => {
   for (let i = 0; i < LEAVES; i++) addLeaf(i);
   $("#rings").innerHTML = Array.from({ length: 20 }, (_, i) => `<i style="top:${10 + i * 30.5}px"></i>`).join("");
-  setSkin(S.skin); $("#owner").textContent = S.owner || ""; $("#bSound").setAttribute("aria-pressed", !!S.sound);
+  setSkin(S.skin); $("#owner").textContent = S.owner || ""; verse(); $("#bSound").setAttribute("aria-pressed", !!S.sound);
   stack(); refreshTabs(); setTool("write");
-  (document.fonts?.ready || Promise.resolve()).then(() => { reflow(); drawStrikes(true); requestAnimationFrame(() => { document.body.classList.remove("nomotion");
+  (document.fonts?.ready || Promise.resolve()).then(() => { fitVerse(); reflow(); drawStrikes(true); requestAnimationFrame(() => { document.body.classList.remove("nomotion");
     const at = Math.max(0, Math.min(S.at || 0, LEAVES - 1)); if (at > 0) setTimeout(() => flipTo(at, true), 260); }); });
 });
-window.NB = { flipTo, S: () => S, goPage, setSkin, flush };
+window.NB = { flipTo, S: () => S, goPage, setSkin, flush, undo, redo, rowsOf, verse };
 })();
 </script>
 </body>
