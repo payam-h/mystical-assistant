@@ -1,0 +1,27 @@
+/* the popup: Mystical dimmed and out of focus behind the book */
+.nbk-ov { position: fixed; inset: 0; z-index: 2147483000; background: radial-gradient(120% 90% at 50% 35%, rgba(18, 18, 22, .5), rgba(6, 6, 8, .82)); backdrop-filter: blur(14px) saturate(.85); -webkit-backdrop-filter: blur(14px) saturate(.85); opacity: 0; transition: opacity .22s ease; }
+.nbk-ov.on { opacity: 1; }
+.nbk-ov iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; color-scheme: dark; }
+
+.nbk { padding: 14px 14px 18px; display: flex; flex-direction: column; gap: 14px; font-family: var(--ui-font, inherit); font-size: var(--t11, 11px); color: var(--txm); }
+.nbk-open { appearance: none; display: flex; align-items: center; gap: 14px; width: 100%; padding: 12px; border: 1px solid var(--line, rgba(255,255,255,.1)); border-radius: var(--f-rad, 10px); background: var(--panel, transparent); color: inherit; font: inherit; text-align: left; cursor: pointer; transition: transform .18s ease, border-color .18s ease; }
+.nbk-open:hover { transform: translateY(-1px); border-color: var(--acc); }
+.nbk-mini { flex: none; width: 46px; height: 62px; border-radius: 2px 7px 7px 2px; transform: rotate(-4deg); box-shadow: inset 4px 0 5px -2px rgba(0,0,0,.5), 0 8px 14px -7px rgba(0,0,0,.7); }
+.nbk-mini[data-skin="noir"] { background: #1b1b1e; border-right: 4px solid #0b0b0c; outline: 1px solid rgba(255,255,255,.1); }
+.nbk-mini[data-skin="spiral"] { background: #c9a36b; border-left: 3px dotted #d9dde2; }
+.nbk-mini[data-skin="atelier"] { background: #25483f; outline: 1px solid rgba(217,184,103,.5); outline-offset: -5px; }
+.nbk-open b { display: block; font-size: var(--t13, 13px); font-weight: 700; color: var(--txb); margin-bottom: 3px; }
+.nbk-open small { display: block; color: var(--txd); font-size: var(--t10, 10.5px); line-height: 1.45; }
+.nbk-add { display: flex; gap: 6px; }
+.nbk-add input { flex: 1; min-width: 0; height: 32px; padding: 0 12px; border: 1px solid var(--line, rgba(255,255,255,.1)); border-radius: var(--f-rad-s, 8px); background: var(--canvas, transparent); color: var(--txb); font: inherit; outline: none; }
+.nbk-add input:focus { border-color: var(--acc); }
+.nbk-add button { appearance: none; height: 32px; padding: 0 12px; border: 0; border-radius: var(--f-rad-s, 8px); background: var(--acc); color: var(--canvas, #000); font: inherit; font-weight: 700; cursor: pointer; }
+.nbk-add button:disabled { opacity: .45; cursor: default; }
+.nbk h4 { margin: 0 0 4px; font-size: var(--t10, 10.5px); font-weight: 700; color: var(--c, var(--txd)); }
+.nbk-grp { display: flex; flex-direction: column; gap: 1px; }
+.nbk-line { appearance: none; display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 5px 8px; border: 0; border-radius: var(--f-rad-s, 8px); background: none; color: var(--txb); font: inherit; text-align: start; cursor: pointer; }
+.nbk-line:hover { background: var(--ac-06, rgba(255,255,255,.06)); }
+.nbk-line span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nbk-line em { flex: none; font-style: normal; color: var(--txd); font-size: var(--t95, 9.5px); }
+.nbk-dim { color: var(--txd); line-height: 1.5; }
+.nbk-err { color: var(--err); }

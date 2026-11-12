@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="en" data-skin="noir">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Notebook</title>
+<link rel="stylesheet" href="faces.css">
+<style>
+
+:root {
+  --W: 450px; --H: 610px; --L: 30px; --top: 66px;
+  --ui: 'Nunito', system-ui, sans-serif;
+}
+/* ── three notebooks ── */
+[data-skin="noir"] {
+  --desk: radial-gradient(120% 90% at 50% 30%, #2b2a2f 0%, #17171a 60%, #0d0d0f 100%);
+  --paper: #f4ecd8; --paper2: #ece2c9; --rule: rgba(88, 104, 138, .34); --margin: transparent;
+  --ink0: #1f2a44; --cover: #18181a; --cover2: #232326; --edge: #e6dcc2;
+  --en: 'Caveat'; --en-size: 25px; --en-w: 500; --fa: 'Playpen Sans Arabic'; --fa-size: 17.5px; --fa-w: 400;
+  --round: 16px;
+}
+[data-skin="spiral"] {
+  --desk: radial-gradient(120% 90% at 50% 30%, #3a4652 0%, #1f262e 60%, #12161b 100%);
+  --paper: #fbfbf7; --paper2: #f1f1ea; --rule: rgba(70, 130, 200, .42); --margin: rgba(226, 84, 84, .6);
+  --ink0: #1c3fa8; --cover: #c9a36b; --cover2: #b98f55; --edge: #efefe8;
+  --en: 'Kalam'; --en-size: 19.5px; --en-w: 300; --fa: 'Mikhak'; --fa-size: 20px; --fa-w: 300;
+  --round: 6px;
+}
+[data-skin="atelier"] {
+  --desk: radial-gradient(120% 90% at 50% 30%, #3b322a 0%, #211c18 60%, #120f0d 100%);
+  --paper: #f7f3e8; --paper2: #eee8d8; --rule: rgba(120, 110, 90, .5); --margin: transparent;
+  --ink0: #3a2d22; --cover: #25483f; --cover2: #1d3a33; --edge: #ebe5d3;
+  --en: 'Reenie Beanie'; --en-size: 28px; --en-w: 400; --fa: 'Mikhak'; --fa-size: 19px; --fa-w: 400;
+  --round: 3px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: transparent; overflow: hidden; font-family: var(--ui); color: #e9e6df; -webkit-font-smoothing: antialiased; user-select: none; -webkit-user-select: none; }
+
+.desk { position: fixed; inset: 0; display: grid; place-items: center; padding-bottom: 84px; }
+.scene { width: 1040px; height: 660px; position: relative; perspective: 2600px; perspective-origin: 50% 40%; flex: none; }
+.book { position: absolute; left: 70px; top: 25px; width: calc(var(--W) * 2); height: var(--H); transform-style: preserve-3d;
+  transition: transform .95s cubic-bezier(.5, .05, .2, 1); }
+.book[data-open="0"] { transform: translateX(calc(var(--W) * -.5)) rotateX(14deg) rotateZ(-3deg); cursor: pointer; }
+.book[data-open="0"]:hover { transform: translateX(calc(var(--W) * -.5)) rotateX(11deg) rotateZ(-2deg) translateY(-4px); }
+
+/* what the book lies on */
+.shadow { position: absolute; inset: 14px -10px -22px 50%; border-radius: 20px; background: rgba(0,0,0,.55); filter: blur(26px); transform: translateZ(-2px); transition: inset .95s cubic-bezier(.5,.05,.2,1); }
+.book[data-open="1"] .shadow { inset: 14px -10px -22px -10px; }
+.board { position: absolute; top: -7px; bottom: -7px; left: 50%; right: -7px; background: linear-gradient(90deg, var(--cover2), var(--cover)); border-radius: 0 calc(var(--round) + 4px) calc(var(--round) + 4px) 0; transform: translateZ(-1px); }
+.board::after { content: ""; position: absolute; inset: 7px 9px 7px 0; background: var(--paper2); border-radius: 0 var(--round) var(--round) 0; }
+.pile { position: absolute; top: 0; bottom: 0; width: 50%; background: var(--edge); transform: translateZ(-.5px); }
+.pile.r { left: 50%; border-radius: 0 var(--round) var(--round) 0; box-shadow: 1px 1px 0 #cfc8b6, 2px 1px 0 var(--edge), 3px 2px 0 #cfc8b6, 4px 2px 0 var(--edge), 5px 3px 0 #c6bfad, 6px 3px 0 var(--edge); }
+.pile.l { left: 0; border-radius: var(--round) 0 0 var(--round); box-shadow: -1px 1px 0 #cfc8b6, -2px 1px 0 var(--edge), -3px 2px 0 #c6bfad; opacity: 0; transition: opacity .3s .5s; }
+.book[data-open="1"] .pile.l { opacity: 1; }
+
+.leaves { position: absolute; inset: 0; transform-style: preserve-3d; }
+.leaf { position: absolute; top: 0; left: 50%; width: 50%; height: 100%; transform-origin: left center; transform-style: preserve-3d;
+  transform: translateZ(calc(var(--z, 0) * .35px)) rotateY(var(--a, 0deg)); transition: transform .9s cubic-bezier(.45, .05, .25, 1); }
+.leaf.flipped { --a: -180deg; }
+.leaf.cv { top: -7px; height: calc(100% + 14px); width: calc(50% + 7px); }
+.nomotion .leaf, .nomotion .book { transition: none !important; }
+.face { position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; overflow: hidden; pointer-events: none; }
+.face.live { pointer-events: auto; }
+.face.back { transform: rotateY(180deg); }
+.face.front { border-radius: 0 var(--round) var(--round) 0; }
+.face.back { border-radius: var(--round) 0 0 var(--round); }
+
+/* paper */
+.face.page { background-color: var(--paper); color: var(--ink0); }
+.face.page::before { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .55; mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.035 .6' numOctaves='3' seed='4'/%3E%3CfeColorMatrix values='0 0 0 0 .45 0 0 0 0 .4 0 0 0 0 .3 0 0 0 .22 0'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23p)'/%3E%3C/svg%3E"); }
+/* the gutter's shade, and the light that crosses a turning page */
+.face.page::after, .face.inside::after { content: ""; position: absolute; inset: 0; pointer-events: none; }
+.face.front.page::after { background: linear-gradient(90deg, rgba(40,30,10,.3) 0, rgba(40,30,10,.1) 3.5%, transparent 13%, transparent 92%, rgba(40,30,10,.05) 100%); }
+.face.back.page::after, .face.inside::after { background: linear-gradient(270deg, rgba(40,30,10,.3) 0, rgba(40,30,10,.1) 3.5%, transparent 13%, transparent 92%, rgba(40,30,10,.05) 100%); }
+.sheen { position: absolute; inset: 0; pointer-events: none; opacity: 0; z-index: 9; }
+.front > .sheen { background: linear-gradient(90deg, rgba(0,0,0,.34), rgba(255,255,255,.3) 38%, rgba(0,0,0,.12) 100%); }
+.back > .sheen { background: linear-gradient(270deg, rgba(0,0,0,.34), rgba(255,255,255,.3) 38%, rgba(0,0,0,.12) 100%); }
+.leaf.turning .sheen { animation: sheen .9s ease-in-out; }
+@keyframes sheen { 0%, 100% { opacity: 0; } 45% { opacity: .75; } }
+
+[data-skin="noir"] .face.page, [data-skin="spiral"] .face.page {
+  background-image: repeating-linear-gradient(180deg, transparent 0, transparent calc(var(--L) - 1px), var(--rule) calc(var(--L) - 1px), var(--rule) var(--L));
+  background-position: 0 calc(var(--top) + 0px); background-size: 100% calc(100% - var(--top) - 40px); background-repeat: no-repeat; }
+[data-skin="spiral"] .face.page > .mline { position: absolute; top: 0; bottom: 0; left: 58px; width: 1.5px; background: var(--margin); pointer-events: none; }
+[data-skin="atelier"] .face.page { background-image: radial-gradient(circle, var(--rule) 1px, transparent 1.4px); background-size: 15px 15px; background-position: 9px calc(var(--top) + 5px); }
+/* spiral: punched holes at the gutter */
+[data-skin="spiral"] .face.page > .holes { position: absolute; top: 0; bottom: 0; width: 26px; pointer-events: none;
+  background-image: radial-gradient(circle at 50% 50%, #20262d 0, #20262d 4.6px, rgba(0,0,0,.25) 5.4px, transparent 6px); background-size: 26px 30.5px; }
+[data-skin="spiral"] .face.front > .holes { left: 0; } [data-skin="spiral"] .face.back > .holes { right: 0; }
+[data-skin="spiral"] .face.front .entries { padding-left: 66px; }
+
+.hdr { position: absolute; top: 26px; right: 30px; left: 66px; height: 34px; font: var(--en-w) calc(var(--en-size) * .82) var(--en), var(--fa), cursive; opacity: .62; text-align: right; white-space: nowrap; }
+.back .hdr { right: 44px; }
+.pgno { position: absolute; bottom: 12px; font: var(--en-w) calc(var(--en-size) * .7) var(--en), cursive; opacity: .5; }
+.front .pgno { right: 26px; } .back .pgno { left: 26px; }
+.entries { position: absolute; top: var(--top); bottom: 44px; left: 0; right: 0; padding: 0 30px 0 60px; overflow: hidden; }
+.back .entries { padding-right: 42px; }
+.entry { position: relative; min-height: var(--L); }
+.txt { min-height: var(--L); line-height: var(--L); font: var(--en-w) var(--en-size)/var(--L) var(--en), var(--fa), cursive; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; cursor: text; user-select: text; -webkit-user-select: text; caret-color: currentColor; transition: opacity .4s; }
+.entry.fa .txt { font: var(--fa-w) var(--fa-size)/var(--L) var(--fa), var(--en), cursive; }
+.entry.done .txt { opacity: .58; }
+.entry.dim { opacity: .16; }
+.entry:nth-child(3n) .txt { transform: rotate(-.35deg); } .entry:nth-child(3n+1) .txt { transform: rotate(.25deg) translateX(1px); }
+.dash { position: absolute; top: 3px; left: -22px; width: 22px; height: 24px; padding: 0; border: 0; background: none; cursor: pointer; color: inherit; opacity: .55; }
+.dash::before { content: ""; position: absolute; left: 6px; top: 12px; width: 9px; height: 2px; border-radius: 2px; background: currentColor; transform: rotate(-6deg); }
+.dash:hover { opacity: 1; } .dash:hover::before { width: 12px; left: 4px; }
+.entry.fa .dash { left: auto; right: -22px; }
+.tag { position: absolute; top: 2px; left: -60px; width: 42px; text-align: right; font: 700 12.5px/26px 'Caveat', var(--fa), cursive; color: var(--c); transform: rotate(-4deg); white-space: nowrap; overflow: hidden; text-overflow: clip; cursor: pointer; }
+.strike { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.strike path { fill: none; stroke: currentColor; stroke-width: 2.1; stroke-linecap: round; opacity: .9; }
+.ink { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; }
+.ink path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.ink path[data-t="pencil"] { filter: url(#pencil); opacity: .82; }
+.ink path[data-t="hl"] { mix-blend-mode: multiply; opacity: .42; stroke-linecap: square; }
+.stk { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
+.corner { position: absolute; bottom: 0; width: 54px; height: 54px; cursor: pointer; z-index: 6; }
+.front .corner { right: 0; } .back .corner { left: 0; }
+.corner::after { content: ""; position: absolute; bottom: 0; width: 0; height: 0; transition: width .22s, height .22s; box-shadow: -3px -3px 8px rgba(0,0,0,.18); }
+.front .corner::after { right: 0; background: linear-gradient(135deg, var(--paper2) 46%, #cfc6ad 50%, rgba(0,0,0,.28) 52%, transparent 60%); }
+.back .corner::after { left: 0; background: linear-gradient(225deg, var(--paper2) 46%, #cfc6ad 50%, rgba(0,0,0,.28) 52%, transparent 60%); }
+.corner:hover::after { width: 34px; height: 34px; }
+
+/* tools change what the page listens to */
+.book[data-tool="pen"] .face.page, .book[data-tool="pencil"] .face.page, .book[data-tool="hl"] .face.page { cursor: crosshair; }
+.book:not([data-tool="write"]) .txt { pointer-events: none; }
+.book[data-tool="erase"] .ink path { pointer-events: stroke; cursor: pointer; }
+.book[data-tool="erase"] .ink { pointer-events: none; }
+.book[data-tool="erase"] .sticker { cursor: pointer; }
+
+/* stickers */
+.sticker { position: absolute; pointer-events: auto; transform: translate(-50%, -50%) rotate(var(--r, 0deg)); cursor: grab; animation: stick .28s cubic-bezier(.3, 1.6, .5, 1); }
+@keyframes stick { from { transform: translate(-50%, -50%) rotate(var(--r, 0deg)) scale(1.5); opacity: 0; } }
+.sticker.e { font-size: 34px; line-height: 1; text-shadow: 2.5px 0 #fff, -2.5px 0 #fff, 0 2.5px #fff, 0 -2.5px #fff, 2px 2px #fff, -2px 2px #fff, 2px -2px #fff, -2px -2px #fff; filter: drop-shadow(0 1.5px 1.5px rgba(0,0,0,.35)); }
+.sticker.w { width: 124px; height: 24px; opacity: .88; box-shadow: 0 1px 2px rgba(0,0,0,.18);
+  clip-path: polygon(0 0, 3% 12%, 0 25%, 3% 38%, 0 50%, 3% 62%, 0 75%, 3% 88%, 0 100%, 100% 100%, 97% 88%, 100% 75%, 97% 62%, 100% 50%, 97% 38%, 100% 25%, 97% 12%, 100% 0); }
+.w0 { background: repeating-linear-gradient(45deg, #f2b8a0 0 8px, #f7d9c9 8px 16px); }
+.w1 { background: radial-gradient(circle, #fff 2.6px, transparent 3px) 0 0/14px 12px, #8fb9a8; }
+.w2 { background: repeating-linear-gradient(90deg, #e9c46a 0 10px, #f4e3ae 10px 13px); }
+.sticker.n { width: 132px; min-height: 104px; padding: 12px 10px 10px; background: linear-gradient(175deg, #ffe873, #fbd94f); color: #3b3520; box-shadow: 0 1px 1px rgba(0,0,0,.15), 0 10px 14px -8px rgba(0,0,0,.45); border-radius: 1px 1px 14px 2px / 1px 1px 60px 2px; }
+.sticker.n::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 18px; background: rgba(0,0,0,.05); }
+.sticker.n div { font: var(--en-w) calc(var(--en-size) * .82)/1.15 var(--en), var(--fa), cursive; outline: none; min-height: 60px; user-select: text; -webkit-user-select: text; cursor: text; white-space: pre-wrap; }
+.sticker.s { padding: 1px 9px; border: 3px double currentColor; border-radius: 5px; font: 400 17px/1.5 'Special Elite', 'Mikhak', monospace; letter-spacing: .14em; text-transform: uppercase; mix-blend-mode: multiply; opacity: .74; filter: url(#rough); white-space: nowrap; }
+.ghost { position: fixed; z-index: 99; pointer-events: none; left: 0; top: 0; }
+.ghost .sticker { pointer-events: none; animation: none; position: static; display: inline-block; transform: translate(-50%, -50%) rotate(var(--r, 0deg)) scale(var(--s, 1)); opacity: .9; }
+
+/* covers */
+.face.cover { background: linear-gradient(100deg, var(--cover2) 0, var(--cover) 9%, var(--cover) 100%); border-radius: 0 calc(var(--round) + 4px) calc(var(--round) + 4px) 0; box-shadow: inset 0 0 0 1px rgba(255,255,255,.05), inset 12px 0 14px -8px rgba(0,0,0,.5); }
+.face.inside { background: var(--paper2); border-radius: calc(var(--round) + 4px) 0 0 calc(var(--round) + 4px); border: 7px solid var(--cover); border-right: 0; color: var(--ink0); }
+.inside .own { position: absolute; left: 54px; right: 60px; top: 96px; font: var(--en-w) var(--en-size)/1.5 var(--en), var(--fa), cursive; opacity: .78; }
+.inside .own small { display: block; font: 600 10px var(--ui); letter-spacing: .16em; text-transform: uppercase; opacity: .55; margin-bottom: 4px; }
+.inside .own i { display: block; border-bottom: 1px solid currentColor; opacity: .3; height: 34px; }
+.inside .hint { position: absolute; left: 54px; right: 60px; bottom: 60px; font: var(--en-w) calc(var(--en-size) * .8)/1.35 var(--en), var(--fa), cursive; opacity: .6; transform: rotate(-1.2deg); }
+[data-skin="noir"] .cover::before { content: ""; position: absolute; inset: 0; opacity: .5; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='l'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.1' numOctaves='3'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .16 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23l)'/%3E%3C/svg%3E"); }
+[data-skin="noir"] .cover .band { position: absolute; top: -2px; bottom: -2px; right: 44px; width: 13px; background: linear-gradient(90deg, #0b0b0c, #2a2a2e 45%, #0b0b0c); box-shadow: 2px 0 5px rgba(0,0,0,.55); }
+[data-skin="noir"] .cover .title { position: absolute; left: 62px; bottom: 60px; font: 600 11px var(--ui); letter-spacing: .32em; text-transform: uppercase; color: rgba(255,255,255,.2); text-shadow: 0 1px 0 rgba(0,0,0,.7); }
+[data-skin="spiral"] .cover { background: linear-gradient(100deg, var(--cover2), var(--cover) 12%); }
+[data-skin="spiral"] .cover::before { content: ""; position: absolute; inset: 0; opacity: .6; mix-blend-mode: multiply; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='k'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.7 .12' numOctaves='3'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .25 0 0 0 0 .1 0 0 0 .35 0'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23k)'/%3E%3C/svg%3E"); }
+[data-skin="spiral"] .cover .title { position: absolute; left: 84px; right: 56px; top: 150px; padding: 16px 18px 14px; background: #fbfbf7; border: 1.5px solid #20262d; border-radius: 4px; color: #1c3fa8; font: 400 30px/1.15 'Kalam', 'Mikhak', cursive; transform: rotate(-1deg); box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+[data-skin="spiral"] .cover .title small { display: block; margin-bottom: 6px; font: 700 9px var(--ui); letter-spacing: .2em; color: #20262d; opacity: .6; }
+[data-skin="atelier"] .cover { background-image: repeating-linear-gradient(0deg, rgba(255,255,255,.035) 0 1px, transparent 1px 3px), repeating-linear-gradient(90deg, rgba(0,0,0,.09) 0 1px, transparent 1px 3px), linear-gradient(100deg, var(--cover2), var(--cover) 10%); }
+[data-skin="atelier"] .cover .title { position: absolute; left: 0; right: 0; top: 37%; text-align: center; font: 500 34px 'Caveat', cursive; color: #d9b867; text-shadow: 0 1px 0 rgba(0,0,0,.4), 0 0 14px rgba(217,184,103,.25); }
+[data-skin="atelier"] .cover .title small { display: block; margin-top: 10px; font: 600 10px var(--ui); letter-spacing: .4em; text-transform: uppercase; opacity: .75; }
+[data-skin="atelier"] .cover .frame { position: absolute; inset: 26px 26px 26px 40px; border: 1px solid rgba(217,184,103,.5); border-radius: 2px; }
+
+/* bindings */
+.rings { position: absolute; left: 50%; top: 0; bottom: 0; width: 0; transform: translateZ(14px); pointer-events: none; display: none; }
+[data-skin="spiral"] .rings { display: block; }
+.rings i { position: absolute; left: -17px; width: 34px; height: 11px; border-radius: 50%; border: 3px solid #b9bec6; border-bottom-color: transparent; box-shadow: 0 -1px 0 rgba(255,255,255,.5) inset, 0 2px 2px rgba(0,0,0,.4); }
+.book[data-open="0"] .rings i { left: -8px; width: 22px; }
+.stitch { position: absolute; left: 50%; top: 22px; bottom: 22px; width: 0; border-left: 2px dashed rgba(240,230,200,.75); transform: translateX(-1px) translateZ(13px); pointer-events: none; display: none; filter: drop-shadow(0 1px 0 rgba(0,0,0,.4)); }
+[data-skin="atelier"] .book[data-open="1"] .stitch { display: block; }
+.ribbon { position: absolute; left: calc(50% + 40px); top: -9px; width: 13px; height: calc(100% + 46px); background: linear-gradient(90deg, #a3202b, #d23a44 50%, #a3202b); transform: translateZ(-.2px); clip-path: polygon(0 0, 100% 0, 100% 100%, 50% calc(100% - 8px), 0 100%); cursor: pointer; pointer-events: auto; }
+[data-skin="spiral"] .ribbon { display: none; }
+[data-skin="atelier"] .ribbon { background: linear-gradient(90deg, #b08d3e, #e0c276 50%, #b08d3e); }
+
+/* index tabs down the fore-edge */
+.tabs { position: absolute; left: 100%; top: 36px; display: flex; flex-direction: column; gap: 5px; transform: translateZ(-.3px); transition: opacity .3s; }
+.book[data-open="0"] .tabs { opacity: 0; pointer-events: none; }
+.tabs button { appearance: none; border: 0; height: 30px; min-width: 62px; max-width: 110px; padding: 0 12px 0 14px; margin-left: 3px; background: var(--c, #e9e2cf); color: #2b261c; font: 700 15px/30px 'Caveat', 'Mikhak', cursive; text-align: left; border-radius: 0 9px 9px 0; cursor: pointer; white-space: nowrap; overflow: hidden; box-shadow: inset 6px 0 6px -5px rgba(0,0,0,.4), 0 2px 4px rgba(0,0,0,.3); transition: transform .18s; }
+.tabs button:hover, .tabs button[aria-pressed="true"] { transform: translateX(7px); }
+
+/* the index card */
+.card { position: fixed; z-index: 30; left: 26px; bottom: 100px; width: 300px; max-height: min(62vh, 440px); padding: 34px 18px 14px 20px; overflow: auto; color: #26324f; background: #fdfcf6; border-radius: 3px;
+  background-image: linear-gradient(180deg, transparent 27px, #e88 27px, #e88 28.5px, transparent 28.5px), repeating-linear-gradient(180deg, transparent 0 23px, rgba(70,130,200,.35) 23px 24px); background-position: 0 0, 0 8px;
+  box-shadow: 0 1px 1px rgba(0,0,0,.2), 0 22px 40px -14px rgba(0,0,0,.7); transform: rotate(-2.2deg) translateY(130%); opacity: 0; transition: transform .5s cubic-bezier(.3,1.2,.4,1), opacity .3s; font: 500 19px/24px 'Caveat', 'Mikhak', cursive; }
+.card[data-on="1"] { transform: rotate(-2.2deg); opacity: 1; }
+.card h4 { position: absolute; top: 2px; left: 20px; margin: 0; font: 700 21px/26px 'Caveat', 'Mikhak', cursive; }
+.card h5 { margin: 0; font: 700 19px/24px 'Caveat', 'Mikhak', cursive; color: var(--c); }
+.card a { display: flex; gap: 8px; color: inherit; text-decoration: none; cursor: pointer; }
+.card a span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card a.d span { text-decoration: line-through; opacity: .5; }
+.card a em { font-style: normal; opacity: .5; }
+.card .none { opacity: .5; }
+
+/* the tray */
+.tray { position: fixed; z-index: 40; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; padding: 7px 10px; border-radius: 999px; background: rgba(28, 28, 32, .72); border: 1px solid rgba(255,255,255,.09); box-shadow: 0 14px 40px -12px rgba(0,0,0,.8), inset 0 1px 0 rgba(255,255,255,.07); backdrop-filter: blur(18px) saturate(1.3); -webkit-backdrop-filter: blur(18px) saturate(1.3); max-width: calc(100vw - 16px); overflow-x: auto; }
+.tray button { appearance: none; flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 40px; min-width: 40px; padding: 0 10px; border: 0; border-radius: 999px; background: none; color: #cfcbc2; font: 700 13px var(--ui); cursor: pointer; transition: background .15s, color .15s, transform .15s; }
+.tray button:hover { background: rgba(255,255,255,.08); color: #fff; }
+.tray button[aria-pressed="true"] { background: #efe7d2; color: #1d1b17; transform: translateY(-3px); }
+.tray svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.tray .sep { flex: none; width: 1px; height: 22px; margin: 0 5px; background: rgba(255,255,255,.12); }
+.tray .inks { display: flex; gap: 6px; padding: 0 4px; }
+.tray .inks button { min-width: 0; width: 22px; height: 22px; padding: 0; background: var(--c); box-shadow: inset 0 0 0 2px rgba(255,255,255,.18); }
+.tray .inks button[aria-pressed="true"] { transform: scale(1.22); box-shadow: 0 0 0 2px #1c1c20, 0 0 0 4px #efe7d2; background: var(--c); }
+.tray .pg { min-width: 62px; text-align: center; font: 700 12px var(--ui); color: #9d998f; font-variant-numeric: tabular-nums; }
+
+.sheet { position: fixed; z-index: 39; left: 50%; bottom: 84px; width: min(430px, calc(100vw - 20px)); padding: 16px 16px 12px; border-radius: 22px; background: linear-gradient(170deg, #fbfaf5, #eeeade); color: #2b261c; box-shadow: 0 24px 60px -18px rgba(0,0,0,.85); transform: translate(-50%, 20px) scale(.96); opacity: 0; pointer-events: none; transition: transform .25s cubic-bezier(.3,1.3,.5,1), opacity .2s; }
+.sheet[data-on="1"] { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }
+.sheet h6 { margin: 0 0 8px; font: 700 11px var(--ui); letter-spacing: .12em; text-transform: uppercase; opacity: .5; }
+.sheet .grid { display: flex; flex-wrap: wrap; gap: 6px 4px; align-items: center; margin-bottom: 12px; }
+.sheet .grid button { appearance: none; border: 0; background: none; padding: 5px 7px; border-radius: 14px; cursor: pointer; display: grid; place-items: center; min-height: 48px; }
+.sheet .grid button:hover { background: rgba(0,0,0,.06); }
+.sheet .sticker { position: static; transform: rotate(var(--r, 0deg)); animation: none; cursor: pointer; pointer-events: none; }
+.sheet .sticker.n { width: 66px; min-height: 52px; padding: 0; } .sheet .sticker.n div { display: none; }
+.sheet .sticker.w { width: 84px; height: 18px; }
+
+.x { position: fixed; z-index: 50; top: 16px; right: 18px; width: 40px; height: 40px; border-radius: 999px; border: 1px solid rgba(255,255,255,.1); background: rgba(28,28,32,.7); color: #cfcbc2; font: 600 20px/1 var(--ui); cursor: pointer; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.x:hover { color: #fff; background: rgba(60,60,66,.8); }
+.covers { position: fixed; z-index: 39; left: 50%; bottom: 84px; display: flex; gap: 10px; padding: 12px; border-radius: 22px; background: rgba(28,28,32,.86); border: 1px solid rgba(255,255,255,.09); box-shadow: 0 24px 60px -18px rgba(0,0,0,.85); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); transform: translate(-50%, 20px) scale(.96); opacity: 0; pointer-events: none; transition: transform .25s cubic-bezier(.3,1.3,.5,1), opacity .2s; }
+.covers[data-on="1"] { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }
+.covers button { appearance: none; border: 0; background: none; color: #cfcbc2; font: 700 12px var(--ui); cursor: pointer; display: grid; gap: 7px; justify-items: center; padding: 8px 10px; border-radius: 16px; }
+.covers button:hover, .covers button[aria-pressed="true"] { background: rgba(255,255,255,.09); color: #fff; }
+.covers i { display: block; width: 58px; height: 78px; border-radius: 3px 8px 8px 3px; box-shadow: inset 5px 0 6px -3px rgba(0,0,0,.5), 0 6px 12px -6px rgba(0,0,0,.8); }
+.covers i.noir { background: #18181a; border-right: 5px solid #0b0b0c; outline: 1px solid rgba(255,255,255,.08); }
+.covers i.spiral { background: #c9a36b; border-left: 4px dotted #d9dde2; }
+.covers i.atelier { background: #25483f; outline: 1px solid rgba(217,184,103,.5); outline-offset: -6px; }
+.inside .own [contenteditable] { display: block; min-height: 34px; outline: none; border-bottom: 1px solid color-mix(in srgb, currentColor 30%, transparent); user-select: text; -webkit-user-select: text; cursor: text; }
+.tip { position: fixed; z-index: 20; top: 16px; left: 50%; transform: translateX(-50%); padding: 7px 16px; border-radius: 999px; background: rgba(28,28,32,.6); border: 1px solid rgba(255,255,255,.08); font: 600 12px var(--ui); color: #b9b5ab; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); white-space: nowrap; max-width: calc(100vw - 16px); overflow: hidden; text-overflow: ellipsis; transition: opacity .4s; }
+@media (prefers-reduced-motion: reduce) { .leaf, .book { transition-duration: .01s !important; } .leaf.turning .sheen { animation: none; } }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <filter id="pencil" x="-5%" y="-5%" width="110%" height="110%"><feTurbulence type="fractalNoise" baseFrequency="1.2" numOctaves="2" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="1.6"/></filter>
+  <filter id="rough" x="-5%" y="-10%" width="110%" height="120%"><feTurbulence type="fractalNoise" baseFrequency=".8" numOctaves="2" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="1.8" result="d"/><feTurbulence type="fractalNoise" baseFrequency=".5" numOctaves="1" result="m"/><feColorMatrix in="m" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -2.2 1.75" result="mask"/><feComposite in="d" in2="mask" operator="in"/></filter>
+</svg>
+
+<button class="x" id="bClose" title="Close (Esc)" aria-label="Close the notebook">×</button>
+<div class="tip" id="tip">Click the notebook to open it</div>
+<div class="desk"><div class="scene" id="scene">
+  <div class="book" id="book" data-open="0" data-tool="write">
+    <div class="shadow"></div>
+    <div class="board"></div>
+    <div class="pile l"></div><div class="pile r"></div>
+    <div class="ribbon" id="ribbon" title="Go to where you left off"></div>
+    <div class="leaves" id="leaves"></div>
+    <div class="rings" id="rings"></div>
+    <div class="stitch"></div>
+    <div class="tabs" id="tabs"></div>
+  </div>
+</div></div>
+
+<div class="card" id="card"></div>
+<div class="sheet" id="sheet"></div>
+<div class="covers" id="covers"><button data-skin="noir"><i class="noir"></i>Black hardcover</button><button data-skin="spiral"><i class="spiral"></i>Spiral</button><button data-skin="atelier"><i class="atelier"></i>Cloth-bound</button></div>
+<div class="ghost" id="ghost" hidden></div>
+
+<div class="tray" id="tray">
+  <button data-tool="write" title="Write" aria-pressed="true"><svg viewBox="0 0 24 24"><path d="M4 20l1-4.5L16.5 4a2 2 0 0 1 3 0l.5.5a2 2 0 0 1 0 3L8.5 19 4 20z"/><path d="M14.5 6l3.5 3.5"/></svg>Write</button>
+  <button data-tool="pen" title="Draw with the pen. A line drawn through a sentence crosses it out"><svg viewBox="0 0 24 24"><path d="M3 17c3-6 5-8 7-6s-2 7 1 7 4-9 7-9 2 5 3 6"/></svg>Pen</button>
+  <button data-tool="pencil" title="Sketch in pencil"><svg viewBox="0 0 24 24"><path d="M5 19l1.2-5L15 5.2a1.7 1.7 0 0 1 2.4 0l1.4 1.4a1.7 1.7 0 0 1 0 2.4L10 17.8 5 19z"/><path d="M6.2 14l3.8 3.8M13 7.2l3.8 3.8"/></svg></button>
+  <button data-tool="hl" title="Highlighter"><svg viewBox="0 0 24 24"><path d="M9 14l-2 2 3 3 2-2M9 14l7.5-9 4.5 4.5-9 7.5M4 21h6"/></svg></button>
+  <button data-tool="erase" title="Eraser: click a line or a sticker to take it off"><svg viewBox="0 0 24 24"><path d="M8.5 19L4 14.5a1.5 1.5 0 0 1 0-2.1l8.4-8.4a1.5 1.5 0 0 1 2.1 0l5.5 5.5a1.5 1.5 0 0 1 0 2.1L12.6 19H8.5zM9 9.5l6.5 6.5M12 19h8"/></svg></button>
+  <span class="inks" id="inks"></span>
+  <span class="sep"></span>
+  <button id="bStick" title="Stickers, tape, sticky notes and stamps"><svg viewBox="0 0 24 24"><path d="M14 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3v-8l-7-7z"/><path d="M14 3v4a3 3 0 0 0 3 3h4M8.5 14.5c1 1.6 2.2 2.3 3.5 2.3s2.5-.7 3.5-2.3"/></svg>Stickers</button>
+  <button id="bCover" title="Change the notebook"><svg viewBox="0 0 24 24"><path d="M6 3h11a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6V3zM6 3v18M10 8h5"/></svg></button>
+  <button id="bIndex" title="Index card: everything open, by project"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9.5h18M7 13h6M7 16h9"/></svg>Index</button>
+  <span class="sep"></span>
+  <button id="bPrev" title="Previous page"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+  <span class="pg" id="pg">cover</span>
+  <button id="bNext" title="Next page"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
+  <button id="bSound" title="Paper sounds" aria-pressed="true"><svg viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 18V6L7.5 9.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg></button>
+</div>
+
+<script>
+(() => {
+let SKIN = "noir";
+const W = 450, H = 610; let LEAVES = 13, PAGES = (LEAVES - 1) * 2;
+const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const INKSETS = { noir: ["#1f2a44", "#b3261e", "#1d6b45", "#141414"], spiral: ["#1c3fa8", "#c62828", "#1b7a3e", "#1a1a1a"], atelier: ["#3a2d22", "#a8321f", "#2f5d50", "#1b3a6b"] };
+let INKS = INKSETS[SKIN];
+const PCOL = ["#c2452d", "#2f6fb5", "#2f8a57", "#b3791a", "#7b4bb0", "#c0407e", "#3c8b99"];
+const TABC = ["#f2c9b8", "#bcd6f0", "#c2e3c8", "#f1dfa6", "#d8c7ee", "#f3c3d9", "#bfe0e4"];
+const FA = /[؀-ۿ]/;
+let uid = Date.now();
+const id = () => (uid++).toString(36);
+const rng = (seed) => { let s = 0; for (const c of String(seed)) s = (s * 31 + c.charCodeAt(0)) >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); };
+
+/* ── the notebook's contents ── */
+const wob = (pts, seed, j = 1.2) => { const r = rng(seed); return smooth(pts.map(([x, y]) => [x + (r() - .5) * 2 * j, y + (r() - .5) * 2 * j])); };
+function smooth(p) {
+  if (p.length < 2) return p.length ? `M${p[0][0].toFixed(1)} ${p[0][1].toFixed(1)}l.1 .1` : "";
+  let d = `M${p[0][0].toFixed(1)} ${p[0][1].toFixed(1)}`;
+  for (let i = 1; i < p.length - 1; i++) { const mx = (p[i][0] + p[i + 1][0]) / 2, my = (p[i][1] + p[i + 1][1]) / 2; d += `Q${p[i][0].toFixed(1)} ${p[i][1].toFixed(1)} ${mx.toFixed(1)} ${my.toFixed(1)}`; }
+  const l = p[p.length - 1]; return d + `L${l[0].toFixed(1)} ${l[1].toFixed(1)}`;
+}
+const oval = (cx, cy, rx, ry, seed) => { const pts = []; for (let i = -2; i <= 34; i++) { const a = i / 32 * Math.PI * 2 - 2.2; pts.push([cx + Math.cos(a) * rx * (1 + i * .0022), cy + Math.sin(a) * ry * (1 + i * .004)]); } return wob(pts, seed, 1.1); };
+const blank = () => ({ date: "", entries: [], strokes: [], stickers: [] });
+function seed() { return { v: 1, skin: "noir", owner: "", pages: Array.from({ length: PAGES }, blank), at: 0, tool: "write", ink: 0, filter: null, sound: true }; }
+/* ── kept by the bridge (plugins/notebook/plugin.py); a browser on its own keeps it locally ── */
+const KEY = "mystical-notebook";
+const token = () => { try { return new URLSearchParams(parent.location.search).get("token") || localStorage.getItem("dash-token") || ""; } catch { return ""; } };
+const API = location.pathname.startsWith("/plugin/") ? "/plugin/notebook/state" : "";
+let S = seed(), saveT = 0, dirty = false, loaded = false;
+async function load() {
+  let got = null;
+  if (API) { try { const r = await fetch(API, { headers: { "X-Dash-Token": token() } }); if (r.ok) got = (await r.json()).state; } catch {} }
+  else { try { got = JSON.parse(localStorage.getItem(KEY) || "null"); } catch {} }
+  if (got && Array.isArray(got.pages) && got.pages.length) { S = { ...seed(), ...got }; S.pages = got.pages.map((p) => ({ ...blank(), ...p })); }
+  if (S.pages.length % 2) S.pages.push(blank());
+  S.filter = null; S.tool = "write"; LEAVES = Math.max(13, S.pages.length / 2 + 1); PAGES = (LEAVES - 1) * 2;
+  while (S.pages.length < PAGES) S.pages.push(blank());
+  S.flipped = 0; loaded = true;
+}
+function flush() {
+  clearTimeout(saveT); if (!dirty || !loaded) return; dirty = false;
+  const { flipped, filter, tool, ...keep } = S; keep.at = flipped || S.at || 0; const body = JSON.stringify({ state: keep });
+  if (API) fetch(API, { method: "POST", keepalive: body.length < 60000, headers: { "Content-Type": "application/json", "X-Dash-Token": token() }, body }).then(() => { try { parent.postMessage({ nb: "saved" }, location.origin); } catch {} }).catch(() => { dirty = true; });
+  else { try { localStorage.setItem(KEY, body.slice(9, -1)); } catch {} }
+}
+const save = () => { dirty = true; clearTimeout(saveT); saveT = setTimeout(flush, 500); };
+addEventListener("pagehide", flush);
+
+/* ── sound: paper and pen, made from noise ── */
+let AC; function noise(dur, f0, f1, q, gain, type = "bandpass") {
+  if (!S.sound) return; try {
+    AC = AC || new (window.AudioContext || window.webkitAudioContext)(); const n = AC.sampleRate * dur | 0, b = AC.createBuffer(1, n, AC.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (.55 + .45 * Math.random());
+    const s = AC.createBufferSource(); s.buffer = b; const f = AC.createBiquadFilter(); f.type = type; f.Q.value = q; f.frequency.setValueAtTime(f0, AC.currentTime); f.frequency.exponentialRampToValueAtTime(f1, AC.currentTime + dur);
+    const g = AC.createGain(); g.gain.setValueAtTime(0, AC.currentTime); g.gain.linearRampToValueAtTime(gain, AC.currentTime + dur * .25); g.gain.exponentialRampToValueAtTime(.0008, AC.currentTime + dur);
+    s.connect(f).connect(g).connect(AC.destination); s.start();
+  } catch {} }
+const sfx = { flip: () => { noise(.42, 900, 3800, .7, .16); setTimeout(() => noise(.09, 2400, 1200, 1.2, .1), 330); }, scratch: () => noise(.2, 3200, 5200, 2.2, .1), stick: () => noise(.06, 500, 220, 1, .22, "lowpass"), open: () => { noise(.6, 500, 1800, .6, .16); } };
+
+/* ── build the book ── */
+const book = $("#book"), leavesEl = $("#leaves"), leaves = [];
+const COVERS = { noir: `<div class="band"></div><div class="title">notebook</div>`,
+  spiral: `<div class="title"><small>NOTEBOOK · 80 SHEETS</small>todos &amp; everything else<br><span dir="rtl">دفترچه</span></div>`,
+  atelier: `<div class="frame"></div><div class="title">notes<small>دفتر یادداشت</small></div>` };
+function addLeaf(i) {
+  const leaf = document.createElement("div"); leaf.className = "leaf" + (i ? "" : " cv"); leaf.dataset.i = i;
+  leaf.innerHTML = i
+    ? `<div class="face front page" data-p="${2 * i - 1}"></div><div class="face back page" data-p="${2 * i}"></div>`
+    : `<div class="face front cover"></div><div class="face back inside"><div class="own"><small>This notebook belongs to</small><span id="owner" contenteditable="plaintext-only" dir="auto" spellcheck="false"></span><i></i></div><div class="hint">write anything. <br>draw a line through it when it is done.<br><span dir="rtl">هر چه خواستی بنویس.</span></div></div>`;
+  leavesEl.appendChild(leaf); leaves.push(leaf);
+}
+/* the notebook never runs out: two blank sheets always wait past the last written page */
+function ensureRoom() {
+  let last = 0; S.pages.forEach((pg, i) => { if (pg.entries.length || pg.strokes.length || pg.stickers.length) last = i + 1; });
+  let grew = false;
+  while (PAGES - last < 4) { S.pages.push(blank(), blank()); addLeaf(LEAVES); LEAVES++; PAGES += 2; renderPage(PAGES - 1); renderPage(PAGES); grew = true; }
+  if (grew && !busy) stack();
+}
+/* a line written from outside (the pane, /note) may land on a full page: carry it over */
+function reflow() {
+  let moved = false;
+  for (let p = 1; p < PAGES; p++) { const pg = S.pages[p - 1]; let guard = 0;
+    while (pg.entries.length > 1 && overflows(p) && guard++ < 40) { const q = S.pages[p]; q.entries.unshift(pg.entries.pop()); if (!q.date) q.date = pg.date; renderPage(p); renderPage(p + 1); moved = true; } }
+  if (moved) { ensureRoom(); refreshTabs(); save(); }
+}
+function setSkin(name) {
+  if (!INKSETS[name]) name = "noir"; SKIN = S.skin = name; INKS = INKSETS[name]; document.documentElement.dataset.skin = name;
+  $(".face.cover").innerHTML = COVERS[name];
+  $$("#covers button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.skin === name));
+    for (let p = 1; p <= PAGES; p++) renderPage(p);
+  (document.fonts?.ready || Promise.resolve()).then(() => setTimeout(() => drawStrikes(true), 60));
+}
+const faceOf = (p) => $(`.face[data-p="${p}"]`);
+const pageOf = (el) => { const f = el.closest(".face.page"); return f ? +f.dataset.p : 0; };
+const visible = () => { const k = S.flipped; return [k >= 2 ? 2 * (k - 1) : 0, k >= 1 && k < LEAVES ? 2 * k - 1 : 0]; };
+const flipsFor = (p) => p % 2 ? (p + 1) / 2 : p / 2 + 1;
+
+function stack(turning) {
+  leaves.forEach((l, i) => { const f = i < S.flipped; l.classList.toggle("flipped", f); if (!turning || !turning.has(i)) { l.style.zIndex = f ? i + 1 : LEAVES - i; l.style.setProperty("--z", f ? i + 1 : LEAVES - i); } });
+  book.dataset.open = S.flipped > 0 ? 1 : 0;
+  $$(".face").forEach((f) => f.classList.remove("live"));
+  const k = S.flipped; if (k > 0) $(".back", leaves[k - 1]).classList.add("live"); if (k < LEAVES) $(".front", leaves[k]).classList.add("live");
+  const [a, b] = visible(); $("#pg").textContent = k === 0 ? "cover" : [a, b].filter(Boolean).join(" · ") || "end";
+  $("#tip").style.opacity = k ? 0 : 1;
+}
+let busy = 0;
+function flipTo(k, quiet) {
+  k = Math.max(0, Math.min(LEAVES, k)); if (k === S.flipped) return 0;
+  const from = S.flipped, fwd = k > from, n = Math.abs(k - from), gap = n > 3 ? 70 : 130; const set = new Set();
+  for (let j = 0; j < n; j++) set.add(fwd ? from + j : from - 1 - j);
+  [...set].forEach((i, j) => setTimeout(() => {
+    const l = leaves[i]; l.style.zIndex = 100 + (fwd ? i : LEAVES - i); l.style.setProperty("--z", 40 + (fwd ? i : LEAVES - i));
+    l.classList.add("turning"); l.classList.toggle("flipped", fwd); if (!quiet) (i === 0 ? sfx.open : sfx.flip)();
+  }, j * gap));
+  S.flipped = k; S.at = k; busy++; book.dataset.open = k > 0 ? 1 : 0; $("#tip").style.opacity = k ? 0 : 1; if (loaded && !quiet) save();
+  const total = (n - 1) * gap + 930;
+  setTimeout(() => { busy--; leaves.forEach((l) => l.classList.remove("turning")); if (!busy) { document.body.classList.add("nomotion"); stack(); leavesEl.getBoundingClientRect(); requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("nomotion"))); drawStrikes(); } }, total);
+  return total;
+}
+function goPage(p, then) { const t = flipTo(flipsFor(p)); setTimeout(() => then && then(), t ? t + 30 : 0); }
+
+/* ── a page ── */
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const projects = () => { const out = []; for (const pg of S.pages) for (const e of pg.entries) if (e.project && !out.includes(e.project)) out.push(e.project); return out; };
+const pcol = (name) => PCOL[Math.max(0, projects().indexOf(name)) % PCOL.length];
+function stickerHTML(s, i) {
+  const st = `left:${s.x}px;top:${s.y}px;--r:${s.r}deg`;
+  if (s.k === "e") return `<div class="sticker e" data-i="${i}" style="${st}">${s.v}</div>`;
+  if (s.k === "w") return `<div class="sticker w w${s.v}" data-i="${i}" style="${st}"></div>`;
+  if (s.k === "n") return `<div class="sticker n" data-i="${i}" style="${st}"><div contenteditable="plaintext-only" dir="auto" spellcheck="false">${esc(s.v || "")}</div></div>`;
+  return `<div class="sticker s" data-i="${i}" style="${st};color:${s.c}" dir="auto">${esc(s.v)}</div>`;
+}
+function entryHTML(e) {
+  const dim = S.filter && e.project !== S.filter;
+  return `<div class="entry${e.done ? " done" : ""}${FA.test(e.text) ? " fa" : ""}${dim ? " dim" : ""}" data-id="${e.id}" style="color:${INKS[e.ink] || INKS[0]}">`
+    + (e.project ? `<span class="tag" style="--c:${pcol(e.project)}" title="${esc(e.project)}">${esc(e.project)}</span>` : "")
+    + `<button class="dash" tabindex="-1" title="Cross it out"></button><div class="txt" contenteditable="plaintext-only" dir="auto" spellcheck="false">${esc(e.text)}</div><svg class="strike"></svg></div>`;
+}
+const strokeHTML = (s) => `<path data-id="${s.id}" data-t="${s.t}" d="${s.d}" stroke="${s.i != null ? INKS[s.i] || INKS[0] : s.c}" stroke-width="${s.w}"/>`;
+function renderPage(p) {
+  const f = faceOf(p), pg = S.pages[p - 1]; if (!f) return;
+  f.innerHTML = `<div class="mline"></div><div class="holes"></div><div class="hdr">${esc(pg.date || "")}</div><div class="entries">${pg.entries.map(entryHTML).join("")}</div>`
+    + `<svg class="ink" viewBox="0 0 ${W} ${H}">${pg.strokes.map(strokeHTML).join("")}</svg>`
+    + `<div class="stk">${pg.stickers.map(stickerHTML).join("")}</div><div class="pgno">${p}</div><div class="corner"></div><div class="sheen"></div>`;
+}
+const find = (eid) => { for (let p = 0; p < PAGES; p++) { const i = S.pages[p].entries.findIndex((e) => e.id === eid); if (i >= 0) return { p: p + 1, i, e: S.pages[p].entries[i], pg: S.pages[p] }; } return null; };
+
+/* the line a pen leaves through a sentence */
+function lineRects(el, base) {
+  const r = document.createRange(); r.selectNodeContents(el); const br = base.getBoundingClientRect(), k = br.width / base.offsetWidth || 1;
+  const face = base.closest(".face"), mir = face.classList.contains("back") !== face.parentNode.classList.contains("flipped"); const lines = [];
+  for (const c of r.getClientRects()) { if (c.width < 2) continue; const L = lines.find((l) => Math.abs(l.top - c.top) < 9 * k); if (L) { L.left = Math.min(L.left, c.left); L.right = Math.max(L.right, c.right); } else lines.push({ top: c.top, bottom: c.bottom, left: c.left, right: c.right }); }
+  return lines.map((l) => ({ x: (mir ? br.right - l.right : l.left - br.left) / k, y: (l.top - br.top) / k, w: (l.right - l.left) / k, h: (l.bottom - l.top) / k }));
+}
+function drawStrike(en, animate) {
+  const svg = $(".strike", en), hit = find(en.dataset.id); if (!hit) return; const e = hit.e;
+  if (!e.done || e.by) { svg.innerHTML = ""; return; }
+  const r = rng(e.id), rtl = en.classList.contains("fa"); let html = "";
+  lineRects($(".txt", en), en).forEach((l, n) => {
+    const y = l.y + l.h * .57 + (r() - .5) * 3, tilt = (r() - .5) * 5, pts = [], steps = Math.max(3, Math.round(l.w / 16));
+    for (let i = 0; i <= steps; i++) { const t = i / steps; pts.push([l.x - 5 + t * (l.w + 11), y + tilt * (t - .5) + (r() - .5) * 2.4]); }
+    if (rtl) pts.reverse(); html += `<path d="${smooth(pts)}" data-n="${n}"/>`;
+  });
+  svg.innerHTML = html;
+  if (animate) $$("path", svg).forEach((p, n) => { const len = p.getTotalLength(); p.style.strokeDasharray = len; p.style.strokeDashoffset = len; p.getBoundingClientRect(); p.style.transition = `stroke-dashoffset .34s cubic-bezier(.3,.1,.3,1) ${n * .3}s`; p.style.strokeDashoffset = 0; });
+}
+const drawStrikes = (all) => (all ? $$(".entry.done") : visible().filter(Boolean).flatMap((p) => $$(".entry.done", faceOf(p)))).forEach((en) => drawStrike(en));
+
+function focusEntry(eid) { const t = $(`.entry[data-id="${eid}"] .txt`); if (!t) return; t.focus({ preventScroll: true }); const r = document.createRange(); r.selectNodeContents(t); r.collapse(false); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+const today = () => new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+const overflows = (p) => { const el = $(".entries", faceOf(p)); return el.scrollHeight > el.clientHeight + 3; };
+function addEntry(p, at, text = "") {
+  const pg = S.pages[p - 1], e = { id: id(), text, done: false, project: S.filter || "", ink: S.ink };
+  pg.entries.splice(at, 0, e); if (!pg.date) pg.date = today(); renderPage(p); drawStrikes();
+  if (overflows(p) && p < PAGES) { pg.entries.splice(pg.entries.indexOf(e), 1); renderPage(p); drawStrikes(); const q = S.pages[p]; q.entries.unshift(e); if (!q.date) q.date = today(); renderPage(p + 1); p++; }
+  save(); refreshTabs(); ensureRoom();
+  focusEntry(e.id); if (!visible().includes(p)) goPage(p, () => focusEntry(e.id));   // focus first: nothing typed while the page turns is lost
+  return e;
+}
+function toggleDone(eid, on) {
+  const hit = find(eid); if (!hit) return; const { e, p, pg } = hit; e.done = on ?? !e.done;
+  if (!e.done && e.by) { pg.strokes = pg.strokes.filter((s) => s.id !== e.by); e.by = ""; const path = $(`.ink path[data-id="${e.by}"]`); renderInk(p); }
+  const en = $(`.entry[data-id="${eid}"]`); en.classList.toggle("done", e.done); drawStrike(en, true); if (e.done) sfx.scratch(); save(); refreshCard();
+}
+function renderInk(p) { $(".ink", faceOf(p)).innerHTML = S.pages[p - 1].strokes.map(strokeHTML).join(""); }
+
+/* ── writing ── */
+leavesEl.addEventListener("input", (ev) => {
+  const t = ev.target; if (t.matches(".sticker.n div")) { const p = pageOf(t); S.pages[p - 1].stickers[+t.parentNode.dataset.i].v = t.textContent; save(); return; }
+  if (!t.matches(".txt")) return; const en = t.closest(".entry"), hit = find(en.dataset.id); if (!hit) return;
+  let text = t.textContent.replace(/\n/g, " "); const m = text.match(/(?:^|\s)#([\p{L}\p{N}_-]{2,})\s/u);
+  if (m) { hit.e.project = m[1].toLowerCase(); hit.e.text = text.replace(m[0], m[0].startsWith("#") ? "" : " ").trimStart(); renderPage(hit.p); drawStrikes(); refreshTabs(); focusEntry(hit.e.id); save(); return; }
+  hit.e.text = text; en.classList.toggle("fa", FA.test(text)); if (hit.e.done) drawStrike(en); save();
+});
+leavesEl.addEventListener("keydown", (ev) => {
+  const t = ev.target; if (!t.matches(".txt")) return; const hit = find(t.closest(".entry").dataset.id); if (!hit) return;
+  if (ev.key === "Enter") { ev.preventDefault(); if (hit.e.text.trim()) addEntry(hit.p, hit.i + 1); }
+  else if (ev.key === "Backspace" && !t.textContent) { ev.preventDefault(); hit.pg.entries.splice(hit.i, 1); renderPage(hit.p); drawStrikes(); const prev = hit.pg.entries[hit.i - 1]; if (prev) focusEntry(prev.id); save(); refreshTabs(); }
+});
+leavesEl.addEventListener("focusout", (ev) => { const t = ev.target; if (!t.matches || !t.matches(".txt")) return; const hit = find(t.closest(".entry").dataset.id); if (hit && !hit.e.text.trim() && hit.pg.entries.length > 1) setTimeout(() => { if (document.activeElement === t) return; const h = find(hit.e.id); if (h && !h.e.text.trim()) { h.pg.entries.splice(h.i, 1); renderPage(h.p); drawStrikes(); save(); } }, 150); });
+
+leavesEl.addEventListener("click", (ev) => {
+  const t = ev.target;
+  if (S.flipped === 0) return;
+  if (placing) return;
+  if (t.closest(".corner")) { flipTo(S.flipped + (t.closest(".front") ? 1 : -1)); return; }
+  if (t.closest(".face.inside")) return;
+  if (t.matches(".dash")) { toggleDone(t.closest(".entry").dataset.id); return; }
+  if (t.matches(".tag")) { setFilter(t.title === S.filter ? null : t.title); return; }
+  if (S.tool === "erase") { const st = t.closest(".sticker"); if (st) { const p = pageOf(st); S.pages[p - 1].stickers.splice(+st.dataset.i, 1); renderPage(p); drawStrikes(); sfx.stick(); save(); } return; }
+  if (S.tool !== "write") return;
+  const p = pageOf(t); if (!p || t.closest(".entry") || t.closest(".sticker")) return;
+  const pg = S.pages[p - 1], last = pg.entries[pg.entries.length - 1];
+  if (last && !last.text.trim()) focusEntry(last.id); else addEntry(p, pg.entries.length);
+});
+book.addEventListener("click", () => { if (S.flipped === 0 && !busy) flipTo(Math.max(1, Math.min(S.at || 1, LEAVES - 1))); });
+leavesEl.addEventListener("input", (ev) => { if (ev.target.id === "owner") { S.owner = ev.target.textContent; save(); } });
+$("#ribbon").addEventListener("click", (ev) => { ev.stopPropagation(); let p = 1; S.pages.forEach((pg, i) => { if (pg.entries.length) p = i + 1; }); goPage(p); });
+
+/* ── drawing ── */
+let stroke = null;
+const local = (face, ev) => { const r = face.getBoundingClientRect(); return [(ev.clientX - r.left) / r.width * W, (ev.clientY - r.top) / r.height * H]; };
+leavesEl.addEventListener("pointerdown", (ev) => {
+  if (placing || S.flipped === 0) return;
+  const face = ev.target.closest(".face.page.live"); if (!face) return;
+  if (S.tool === "erase") { eraseAt(ev); erasing = true; return; }
+  if (S.tool === "write") { const st = ev.target.closest(".sticker"); if (st && !ev.target.isContentEditable) dragSticker(st, face, ev); return; }
+  if (ev.target.closest(".corner")) return;
+  ev.preventDefault(); const t = S.tool, c = t === "hl" ? "#ffe24a" : t === "pencil" ? "#4a4a4a" : INKS[S.ink], w = t === "hl" ? 15 : t === "pencil" ? 1.8 : 2.1;
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path"); const sid = id(); path.dataset.id = sid; path.dataset.t = t; path.setAttribute("stroke", c); path.setAttribute("stroke-width", w);
+  $(".ink", face).appendChild(path); stroke = { face, path, pts: [local(face, ev)], s: t === "pen" ? { id: sid, t, i: S.ink, w, d: "" } : { id: sid, t, c, w, d: "" } }; leavesEl.setPointerCapture(ev.pointerId); if (t !== "hl") noise(.12, 3000, 4200, 2, .035);
+});
+let erasing = false;
+function eraseAt(ev) { const el = document.elementFromPoint(ev.clientX, ev.clientY); if (el && el.matches(".ink path")) { const p = pageOf(el), pg = S.pages[p - 1], sid = el.dataset.id; pg.strokes = pg.strokes.filter((s) => s.id !== sid); const e = pg.entries.find((x) => x.by === sid); if (e) { e.by = ""; e.done = false; renderPage(p); drawStrikes(); } else el.remove(); save(); refreshCard(); } }
+leavesEl.addEventListener("pointermove", (ev) => {
+  if (erasing) return eraseAt(ev); if (!stroke) return;
+  const pt = local(stroke.face, ev), l = stroke.pts[stroke.pts.length - 1]; if (Math.hypot(pt[0] - l[0], pt[1] - l[1]) < 2.2) return;
+  stroke.pts.push(pt); stroke.path.setAttribute("d", smooth(stroke.pts));
+});
+const endStroke = () => {
+  erasing = false; if (!stroke) return; const { face, pts, s, path } = stroke; stroke = null; s.d = smooth(pts); path.setAttribute("d", s.d);
+  const p = +face.dataset.p, pg = S.pages[p - 1]; pg.strokes.push(s);
+  if (s.t !== "hl" && pts.length > 2) {                       // a line drawn through a sentence crosses it out
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]), x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), cy = (y0 + y1) / 2;
+    if (x1 - x0 > 46 && y1 - y0 < 24) for (const en of $$(".entry", face)) {
+      const e = find(en.dataset.id).e; if (e.done || !e.text.trim()) continue;
+      const ok = lineRects($(".txt", en), face).some((l) => cy > l.y + l.h * .12 && cy < l.y + l.h * .98 && Math.min(x1, l.x + l.w) - Math.max(x0, l.x) > l.w * .5);
+      if (ok) { e.done = true; e.by = s.id; en.classList.add("done"); sfx.scratch(); refreshCard(); break; }
+    }
+  }
+  save(); ensureRoom();
+};
+leavesEl.addEventListener("pointerup", endStroke); leavesEl.addEventListener("pointercancel", endStroke);
+
+/* ── stickers ── */
+let placing = null; const ghost = $("#ghost");
+const SHEET = { e: ["⭐️", "🔥", "✅", "💡", "🚀", "☕️", "🐛", "❤️", "🎯", "📌", "🌱", "🎉", "⚠️", "🌙"], w: [0, 1, 2], s: [["done", "#1d6b45"], ["urgent", "#b3261e"], ["idea", "#1b3a6b"], ["انجام شد", "#1d6b45"], ["فوری", "#b3261e"]] };
+$("#sheet").innerHTML = `<h6>Stickers</h6><div class="grid">${SHEET.e.map((v, i) => `<button data-k="e" data-v="${v}">${stickerHTML({ k: "e", v, x: 0, y: 0, r: (i % 3 - 1) * 6 }, 0)}</button>`).join("")}</div>`
+  + `<h6>Tape and notes</h6><div class="grid">${SHEET.w.map((v) => `<button data-k="w" data-v="${v}">${stickerHTML({ k: "w", v, x: 0, y: 0, r: -2 }, 0)}</button>`).join("")}<button data-k="n" data-v="">${stickerHTML({ k: "n", v: "", x: 0, y: 0, r: -3 }, 0)}</button></div>`
+  + `<h6>Stamps</h6><div class="grid">${SHEET.s.map(([v, c]) => `<button data-k="s" data-v="${v}" data-c="${c}">${stickerHTML({ k: "s", v, c, x: 0, y: 0, r: -4 }, 0)}</button>`).join("")}</div>`;
+$("#sheet").addEventListener("click", (ev) => { const b = ev.target.closest("button"); if (!b) return; const k = b.dataset.k; placing = { k, v: k === "w" ? +b.dataset.v : b.dataset.v, c: b.dataset.c, r: Math.round((Math.random() - .5) * (k === "w" ? 8 : 24)) };
+  ghost.innerHTML = stickerHTML({ ...placing, x: 0, y: 0 }, 0); ghost.hidden = false; ghost.style.transform = `translate(${ev.clientX}px, ${ev.clientY}px)`; ghost.style.setProperty("--s", scale); toggleSheet(false); if (S.flipped === 0) flipTo(2); });
+addEventListener("pointermove", (ev) => { if (placing) ghost.style.transform = `translate(${ev.clientX}px, ${ev.clientY}px)`; });
+addEventListener("pointerdown", (ev) => {
+  if (!placing) return; const face = ev.target.closest && ev.target.closest(".face.page.live"); ghost.hidden = true; const s = placing; placing = null; if (!face) return;
+  ev.preventDefault(); ev.stopPropagation(); const [x, y] = local(face, ev), p = +face.dataset.p; S.pages[p - 1].stickers.push({ k: s.k, v: s.v, c: s.c, x: Math.round(x), y: Math.round(y), r: s.r });
+  renderPage(p); drawStrikes(); sfx.stick(); save(); ensureRoom(); if (s.k === "n") setTimeout(() => $(".stk .sticker.n:last-child div", face)?.focus(), 50);
+}, true);
+function dragSticker(el, face, ev) {
+  const p = +face.dataset.p, s = S.pages[p - 1].stickers[+el.dataset.i], [sx, sy] = local(face, ev), ox = s.x - sx, oy = s.y - sy; let moved = false; ev.preventDefault();
+  const mv = (e) => { const [x, y] = local(face, e); s.x = Math.round(x + ox); s.y = Math.round(y + oy); el.style.left = s.x + "px"; el.style.top = s.y + "px"; moved = true; };
+  const up = () => { removeEventListener("pointermove", mv); removeEventListener("pointerup", up); if (moved) { sfx.stick(); save(); } };
+  addEventListener("pointermove", mv); addEventListener("pointerup", up);
+}
+const toggleCovers = (on) => { const el = $("#covers"); el.dataset.on = (on ?? el.dataset.on !== "1") ? 1 : 0; $("#bCover").setAttribute("aria-pressed", el.dataset.on === "1"); };
+$("#covers").addEventListener("click", (ev) => { const b = ev.target.closest("button"); if (!b) return; setSkin(b.dataset.skin); save(); toggleCovers(false); });
+function closeBook() { flush(); try { if (parent !== window) parent.postMessage({ nb: "close" }, location.origin); } catch {} }
+$("#bClose").addEventListener("click", closeBook);
+addEventListener("message", (ev) => { if (ev.origin !== location.origin || !ev.data) return; if (ev.data.nb === "goto") goPage(+ev.data.p, () => { const en = $(`.entry[data-id="${ev.data.id}"]`); if (en) en.animate([{ background: "rgba(255,226,74,.7)" }, { background: "transparent" }], { duration: 1100 }); }); });
+const toggleSheet = (on) => { const el = $("#sheet"); el.dataset.on = (on ?? el.dataset.on !== "1") ? 1 : 0; $("#bStick").setAttribute("aria-pressed", el.dataset.on === "1"); };
+
+/* ── projects: tabs on the fore-edge, and an index card ── */
+function refreshTabs() {
+  const ps = projects(); $("#tabs").innerHTML = ps.map((n, i) => `<button data-p="${esc(n)}" style="--c:${TABC[i % TABC.length]}" aria-pressed="${S.filter === n}">${esc(n)}</button>`).join(""); refreshCard();
+}
+function setFilter(name) {
+  S.filter = name; $$(".entry").forEach((en) => { const h = find(en.dataset.id); en.classList.toggle("dim", !!name && h.e.project !== name); });
+  refreshTabs(); $("#card").dataset.on = name ? 1 : $("#card").dataset.on; $("#bIndex").setAttribute("aria-pressed", $("#card").dataset.on === "1");
+  if (name) { const p = S.pages.findIndex((pg) => pg.entries.some((e) => e.project === name && !e.done)); if (p >= 0 && !visible().includes(p + 1)) goPage(p + 1); }
+}
+function refreshCard() {
+  const groups = new Map(); S.pages.forEach((pg, pi) => pg.entries.forEach((e) => { if (!e.text.trim()) return; const k = e.project || ""; if (S.filter && k !== S.filter) return; if (!groups.has(k)) groups.set(k, []); groups.get(k).push({ e, p: pi + 1 }); }));
+  const keys = [...groups.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b)); let open = 0;
+  const body = keys.map((k) => { const rows = groups.get(k).sort((a, b) => a.e.done - b.e.done); open += rows.filter((r) => !r.e.done).length;
+    return `<h5 style="--c:${k ? pcol(k) : "#26324f"}">${esc(k || "everything else")}</h5>` + rows.map((r) => `<a data-p="${r.p}" data-id="${r.e.id}" class="${r.e.done ? "d" : ""}"><span dir="auto">${esc(r.e.text)}</span><em>p${r.p}</em></a>`).join(""); }).join("");
+  $("#card").innerHTML = `<h4>${S.filter ? esc(S.filter) : "index"} · ${open} open</h4>` + (body || `<div class="none">nothing written yet</div>`);
+}
+$("#tabs").addEventListener("click", (ev) => { ev.stopPropagation(); const b = ev.target.closest("button"); if (b) setFilter(S.filter === b.dataset.p ? null : b.dataset.p); });
+$("#card").addEventListener("click", (ev) => { const a = ev.target.closest("a"); if (!a) return; goPage(+a.dataset.p, () => { const en = $(`.entry[data-id="${a.dataset.id}"]`); if (en) en.animate([{ background: "rgba(255,226,74,.7)" }, { background: "transparent" }], { duration: 1100 }); }); });
+
+/* ── the tray ── */
+$("#inks").innerHTML = INKS.map((c, i) => `<button data-ink="${i}" style="--c:${c}" aria-pressed="${i === S.ink}" title="Ink"></button>`).join("");
+function setTool(t) { S.tool = t; book.dataset.tool = t; $$("#tray [data-tool]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.tool === t)); if (t !== "write") document.activeElement?.blur?.(); }
+$("#tray").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button"); if (!b) return;
+  if (b.dataset.tool) { setTool(b.dataset.tool); if (S.flipped === 0) flipTo(2); }
+  else if (b.dataset.ink) { S.ink = +b.dataset.ink; $$("#inks button").forEach((x) => x.setAttribute("aria-pressed", x === b)); const en = document.activeElement?.closest?.(".entry"); if (en) { const h = find(en.dataset.id); h.e.ink = S.ink; en.style.color = INKS[S.ink]; save(); } }
+  else if (b.id === "bStick") { toggleCovers(false); toggleSheet(); }
+  else if (b.id === "bCover") { toggleSheet(false); toggleCovers(); }
+  else if (b.id === "bIndex") { const c = $("#card"); c.dataset.on = c.dataset.on === "1" ? 0 : 1; b.setAttribute("aria-pressed", c.dataset.on === "1"); if (c.dataset.on !== "1" && S.filter) setFilter(null); }
+  else if (b.id === "bPrev") flipTo(S.flipped - 1); else if (b.id === "bNext") flipTo(S.flipped + 1);
+  else if (b.id === "bSound") { S.sound = !S.sound; b.setAttribute("aria-pressed", S.sound); save(); }
+});
+$("#tray").addEventListener("mousedown", (ev) => { if (ev.target.closest("[data-ink]")) ev.preventDefault(); });
+addEventListener("keydown", (ev) => {
+  if (ev.target.isContentEditable) { if (ev.key === "Escape") ev.target.blur(); return; }
+  if (ev.key === "ArrowRight" || ev.key === "PageDown") flipTo(S.flipped + 1); else if (ev.key === "ArrowLeft" || ev.key === "PageUp") flipTo(S.flipped - 1);
+  else if (ev.key === "Escape") { if (placing) { placing = null; ghost.hidden = true; } else if ($("#sheet").dataset.on === "1" || $("#covers").dataset.on === "1") { toggleSheet(false); toggleCovers(false); } else closeBook(); }
+});
+
+/* ── fit the desk ── */
+let scale = 1; const scene = $("#scene");
+function fit() { scale = Math.min(innerWidth / 1060, (innerHeight - 96) / 680, 1.3); scene.style.transform = `scale(${scale})`; }
+addEventListener("resize", () => { fit(); drawStrikes(); }); fit();
+
+document.body.classList.add("nomotion");
+load().then(() => {
+  for (let i = 0; i < LEAVES; i++) addLeaf(i);
+  $("#rings").innerHTML = Array.from({ length: 20 }, (_, i) => `<i style="top:${10 + i * 30.5}px"></i>`).join("");
+  setSkin(S.skin); $("#owner").textContent = S.owner || ""; $("#bSound").setAttribute("aria-pressed", !!S.sound);
+  stack(); refreshTabs(); setTool("write");
+  (document.fonts?.ready || Promise.resolve()).then(() => { reflow(); drawStrikes(true); requestAnimationFrame(() => { document.body.classList.remove("nomotion");
+    const at = Math.max(0, Math.min(S.at || 0, LEAVES - 1)); if (at > 0) setTimeout(() => flipTo(at, true), 260); }); });
+});
+window.NB = { flipTo, S: () => S, goPage, setSkin, flush };
+})();
+</script>
+</body>
+</html>
