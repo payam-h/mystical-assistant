@@ -11,9 +11,9 @@
   --dv-grid: color-mix(in srgb, var(--txl) 22%, transparent);
   --dv-zero: color-mix(in srgb, var(--txl) 65%, transparent);
   --dv-hover: color-mix(in srgb, var(--acc) 8%, transparent);
-  --dv-r: var(--prad, 0px);
+  --dv-r: var(--prad, 0px); --dv-rc: min(var(--prad, 0px), 16px);
   --dv-face: var(--ui-font, var(--page-font, var(--font-sans, inherit)));
-  margin: 10px 0; border: 1px solid var(--border); border-radius: var(--dv-r); background: var(--panel);
+  margin: 10px 0; border: 1px solid var(--border); border-radius: var(--dv-rc); background: var(--panel);
   font-family: var(--dv-face); color: var(--tx); min-width: 0; max-width: 100%;
 }
 :root[data-light] .dv {
@@ -85,7 +85,7 @@
 .dv-swatch[data-none] { visibility: hidden; }
 .dv-tip {
   position: absolute; top: 6px; z-index: 4; pointer-events: none; min-width: 130px; max-width: min(260px, 80%); padding: 6px 8px;
-  background: var(--popover, var(--panel)); border: 1px solid var(--border-bright); border-radius: var(--dv-r);
+  background: var(--popover, var(--panel)); border: 1px solid var(--border-bright); border-radius: var(--dv-rc);
   font-size: var(--t105, 10.5px); box-shadow: 0 4px 14px var(--shadow-pop, rgba(0, 0, 0, 0.4));
 }
 .dv-tip-x { color: var(--txb); margin-bottom: 3px; overflow-wrap: anywhere; }
@@ -107,7 +107,7 @@
 /* board: each column scrolls by itself, and on a phone a swipe lands on one */
 .dv-board { display: flex; gap: 8px; padding: 2px 12px 10px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; align-items: flex-start; }
 .dv-board[data-full] { height: 100%; }
-.dv-col { flex: 0 0 min(250px, 78vw); min-width: 0; scroll-snap-align: start; background: color-mix(in srgb, var(--txl) 7%, transparent); border: 1px solid var(--dv-grid); border-radius: var(--dv-r); }
+.dv-col { flex: 0 0 min(250px, 78vw); min-width: 0; scroll-snap-align: start; background: color-mix(in srgb, var(--txl) 7%, transparent); border: 1px solid var(--dv-grid); border-radius: var(--dv-rc); }
 .dv-board[data-full] .dv-col { max-height: 100%; display: flex; flex-direction: column; }
 .dv-col > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 7px 9px 6px; font-size: var(--t10, 10px); letter-spacing: 0.08em; }
 .dv-col-name { color: var(--txb); text-transform: uppercase; overflow-wrap: anywhere; }
@@ -116,7 +116,7 @@
 .dv-col ul { list-style: none; margin: 0; padding: 0 6px 6px; display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; overscroll-behavior-y: contain; }
 .dv-board[data-full] .dv-col ul { max-height: none; flex: 1; }
 .dv-empty { padding: 4px 9px 12px; font-size: var(--t105, 10.5px); color: var(--txd); }
-.dv-card { padding: 7px 8px; background: var(--dv-surface); border: 1px solid var(--border); border-radius: var(--dv-r); font-size: var(--t115, 11.5px); line-height: 1.4; }
+.dv-card { padding: 7px 8px; background: var(--dv-surface); border: 1px solid var(--border); border-radius: var(--dv-rc); font-size: var(--t115, 11.5px); line-height: 1.4; }
 .dv-card-top { display: flex; justify-content: space-between; gap: 8px; font-size: var(--t10, 10px); color: var(--txd); margin-bottom: 3px; }
 .dv-prio { letter-spacing: 0.06em; }
 .dv-card-title { color: var(--txb); overflow-wrap: anywhere; }
@@ -130,7 +130,7 @@
 
 /* figures */
 .dv-tiles { margin: 0; padding: 2px 12px 10px; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
-.dv-tile { padding: 8px 10px; border: 1px solid var(--dv-grid); border-radius: var(--dv-r); min-width: 0; }
+.dv-tile { padding: 8px 10px; border: 1px solid var(--dv-grid); border-radius: var(--dv-rc); min-width: 0; }
 .dv-tile dt { font-size: var(--t10, 10px); letter-spacing: 0.08em; text-transform: uppercase; color: var(--txd); overflow-wrap: anywhere; }
 .dv-tile dd { margin: 3px 0 0; font-size: 19px; line-height: 1.25; color: var(--txb); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .dv-delta { margin-top: 2px; font-size: var(--t105, 10.5px); color: var(--txm); }
