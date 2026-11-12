@@ -36,6 +36,12 @@
       "key": "JOBS_PAUSED",
       "label": "Paused (1 = claim nothing)",
       "default": "0"
+    },
+    {
+      "key": "JOBS_FALLBACK_MODEL",
+      "label": "Fallback model on a usage limit",
+      "default": "opus",
+      "hint": "a run that dies on a usage limit is retried on another login with room, then on this model; off = no model fallback"
     }
   ],
   "pane": {
