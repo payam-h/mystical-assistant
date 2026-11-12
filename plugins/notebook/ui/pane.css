@@ -1,5 +1,5 @@
 /* the popup: Mystical dimmed and out of focus behind the book */
-.nbk-ov { position: fixed; inset: 0; z-index: 2147483000; background: radial-gradient(120% 90% at 50% 35%, rgba(18, 18, 22, .5), rgba(6, 6, 8, .82)); backdrop-filter: blur(14px) saturate(.85); -webkit-backdrop-filter: blur(14px) saturate(.85); opacity: 0; transition: opacity .22s ease; }
+.nbk-ov { position: fixed; inset: 0; z-index: 2147483000; background: radial-gradient(120% 90% at 50% 35%, rgba(20, 20, 24, .9), rgba(6, 6, 8, .96)); opacity: 0; transition: opacity .22s ease; }
 .nbk-ov.on { opacity: 1; }
 .nbk-ov iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; color-scheme: dark; }
 
