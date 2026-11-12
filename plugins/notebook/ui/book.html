@@ -58,8 +58,14 @@ body { background: transparent; overflow: hidden; font-family: var(--ui); color:
 
 .leaves { position: absolute; inset: 0; transform-style: preserve-3d; }
 .leaf { position: absolute; top: 0; left: 50%; width: 50%; height: 100%; transform-origin: left center; transform-style: preserve-3d;
-  transform: translateZ(calc(var(--z, 0) * .35px)) rotateY(var(--a, 0deg)); transition: transform .62s cubic-bezier(.45, .05, .25, 1); }
+  transform: translateZ(calc(var(--z, 0) * .6px)) rotateY(var(--a, 0deg)); transition: transform .62s cubic-bezier(.45, .05, .25, 1); }
 .leaf.turning { will-change: transform; }
+.leaf.pulled { transition: none !important; }
+.leaf.pulled .sheen { animation: none !important; opacity: var(--sh, 0); }
+.grip { position: absolute; top: 0; bottom: 54px; width: 24px; z-index: 6; cursor: grab; touch-action: none; transition: background .2s; }
+.front .grip { right: 0; } .back .grip { left: 0; }
+.front .grip:hover { background: linear-gradient(270deg, rgba(60,45,20,.1), transparent); } .back .grip:hover { background: linear-gradient(90deg, rgba(60,45,20,.1), transparent); }
+.corner { cursor: grab; touch-action: none; }
 .leaf.far { visibility: hidden; }
 .leaf.flipped { --a: -180deg; }
 .leaf.cv { top: -7px; height: calc(100% + 14px); width: calc(50% + 7px); }
@@ -467,7 +473,7 @@ function stack(turning) {
   book.dataset.open = S.flipped > 0 ? 1 : 0;
   $$(".face").forEach((f) => f.classList.remove("live"));
   const k = S.flipped; if (k > 0) $(".back", leaves[k - 1]).classList.add("live"); if (k < LEAVES) $(".front", leaves[k]).classList.add("live");
-  leaves.forEach((l, i) => { const f = i < k; l.firstElementChild.classList.toggle("away", f); l.lastElementChild.classList.toggle("away", !f); l.classList.toggle("far", i < k - 2 || i > k + 1); });
+  leaves.forEach((l, i) => { const f = i < k; l.firstElementChild.classList.toggle("away", f); l.lastElementChild.classList.toggle("away", !f); l.classList.toggle("far", i < k - 1 || i > k); });
   const [a, b] = visible(); $("#pg").textContent = k === 0 ? "cover" : [a, b].filter(Boolean).join(" · ") || "end";
   $("#tip").style.opacity = k ? 0 : 1;
 }
@@ -476,6 +482,39 @@ function watchTurn(l) {
   const tick = () => { if (!l.classList.contains("turning")) return;
     const front = new DOMMatrix(getComputedStyle(l).transform).m11 >= 0; l.firstElementChild.classList.toggle("away", !front); l.lastElementChild.classList.toggle("away", front); requestAnimationFrame(tick); };
   requestAnimationFrame(tick);
+}
+/* ── turning a page by hand: hold its outer edge and carry it across; it follows the pointer ── */
+let pull = null;
+function startPull(face, ev) {
+  if (busy || S.flipped === 0) return; const fwd = face.classList.contains("front"), i = fwd ? S.flipped : S.flipped - 1; if (i < 1 || i >= LEAVES) return;
+  const r = book.getBoundingClientRect(), spine = r.left + r.width / 2;
+  pull = { i, fwd, l: leaves[i], x0: ev.clientX, spine, reach: Math.max(40, Math.abs(ev.clientX - spine)), a: fwd ? 0 : 180, trail: [], on: false };
+  addEventListener("pointermove", movePull); addEventListener("pointerup", endPull); addEventListener("pointercancel", endPull);
+}
+function movePull(ev) {
+  const p = pull; if (!p) return;
+  if (!p.on) {
+    if (Math.abs(ev.clientX - p.x0) < 6) return; p.on = true; busy++; document.activeElement?.blur?.(); document.body.classList.add("dragging");
+    leaves.forEach((l, j) => { if (j >= p.i - 2 && j <= p.i + 2) l.classList.remove("far"); });
+    if (leaves[p.i - 1]) leaves[p.i - 1].lastElementChild.classList.remove("away"); if (leaves[p.i + 1]) leaves[p.i + 1].firstElementChild.classList.remove("away");
+    p.l.style.zIndex = 100; p.l.style.setProperty("--z", 40); p.l.classList.add("turning", "pulled"); watchTurn(p.l);
+  }
+  // the page's edge sits under the pointer: its distance from the spine is the cosine of the angle
+  const a = Math.acos(Math.max(-1, Math.min(1, (ev.clientX - p.spine) / p.reach))) * 180 / Math.PI, now = performance.now();
+  p.a = a; p.trail.push([now, a]); while (p.trail.length > 2 && now - p.trail[0][0] > 140) p.trail.shift();
+  p.l.style.setProperty("--a", -a + "deg"); p.l.style.setProperty("--sh", (Math.sin(a * Math.PI / 180) * .7).toFixed(3));
+}
+function endPull() {
+  removeEventListener("pointermove", movePull); removeEventListener("pointerup", endPull); removeEventListener("pointercancel", endPull);
+  const p = pull; pull = null; if (!p || !p.on) return;             // no movement: it was a click (the corner still turns on a click)
+  document.body.classList.remove("dragging"); justDragged = true; setTimeout(() => { justDragged = false; }, 60);
+  const now = performance.now(), first = p.trail[0], last = p.trail[p.trail.length - 1];       // a flick: how fast the page was going over its last moments
+  const vel = first && last && last !== first && now - last[0] < 90 ? (last[1] - first[1]) / Math.max(16, last[0] - first[0]) : 0;
+  const over = Math.abs(vel) > .15 ? vel > 0 : p.a > 90, was = S.flipped;      // a flick decides; otherwise whichever side it is nearer
+  p.l.getBoundingClientRect(); p.l.classList.remove("pulled"); p.l.style.removeProperty("--a"); p.l.classList.toggle("flipped", over);
+  S.flipped = over ? p.i + 1 : p.i; S.at = S.flipped; if (S.flipped !== was) { sfx.flip(); if (loaded) save(); }
+  setTimeout(() => { busy--; p.l.classList.remove("turning"); p.l.style.removeProperty("--sh");
+    if (!busy) { document.body.classList.add("nomotion"); stack(); leavesEl.getBoundingClientRect(); requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("nomotion"))); drawStrikes(); } }, 660);
 }
 let busy = 0;
 function flipTo(k, quiet) {
@@ -534,7 +573,7 @@ function renderPage(p) {
   const f = faceOf(p), pg = S.pages[p - 1]; if (!f) return;
   f.innerHTML = `<div class="mline"></div><div class="holes"></div><div class="hdr">${esc(pg.date || "")}</div><div class="entries">${pg.entries.map(entryHTML).join("")}</div>`
     + `<svg class="ink" viewBox="0 0 ${W} ${H}">${pg.strokes.map(strokeHTML).join("")}</svg>`
-    + `<div class="stk">${pg.stickers.map(stickerHTML).join("")}</div><div class="pgno">${p}</div><div class="corner"></div><div class="sheen"></div>`;
+    + `<div class="stk">${pg.stickers.map(stickerHTML).join("")}</div><div class="pgno">${p}</div><div class="grip" title="Hold and drag across to turn the page"></div><div class="corner"></div><div class="sheen"></div>`;
 }
 const find = (eid) => { for (let p = 0; p < PAGES; p++) { const i = S.pages[p].entries.findIndex((e) => e.id === eid); if (i >= 0) return { p: p + 1, i, e: S.pages[p].entries[i], pg: S.pages[p] }; } return null; };
 
@@ -665,6 +704,7 @@ leavesEl.addEventListener("pointerdown", (ev) => {
   if (placing || S.flipped === 0) return;
   const face = ev.target.closest(".face.page.live"); if (!face) return;
   if (ev.target.closest(".dash")) { startDrag(ev.target.closest(".entry"), ev); return; }
+  if (ev.target.closest(".grip, .corner")) { ev.preventDefault(); startPull(face, ev); return; }
   if (S.tool === "erase") { eraseAt(ev); erasing = true; return; }
   if (S.tool === "write") { const st = ev.target.closest(".sticker"); if (st && !ev.target.isContentEditable) dragSticker(st, face, ev); return; }
   if (ev.target.closest(".corner")) return;
