@@ -228,6 +228,8 @@ body { background: transparent; overflow: hidden; font-family: var(--ui); color:
 .covers i.noir { background: #18181a; border-right: 5px solid #0b0b0c; outline: 1px solid rgba(255,255,255,.08); }
 .covers i.spiral { background: #c9a36b; border-left: 4px dotted #d9dde2; }
 .covers i.atelier { background: #25483f; outline: 1px solid rgba(217,184,103,.5); outline-offset: -6px; }
+.inside .beit { display: block; margin-top: 16px; font: var(--fa-w) var(--fa-size)/1.95 var(--fa), cursive; white-space: nowrap; }
+.inside .beit small { display: block; text-align: left; font-size: .82em; opacity: .7; }
 .inside .own [contenteditable] { display: block; min-height: 34px; outline: none; border-bottom: 1px solid color-mix(in srgb, currentColor 30%, transparent); user-select: text; -webkit-user-select: text; cursor: text; }
 .tip { position: fixed; z-index: 20; top: 16px; left: 50%; transform: translateX(-50%); padding: 7px 16px; border-radius: 999px; background: rgba(28,28,32,.6); border: 1px solid rgba(255,255,255,.08); font: 600 12px var(--ui); color: #b9b5ab; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); white-space: nowrap; max-width: calc(100vw - 16px); overflow: hidden; text-overflow: ellipsis; transition: opacity .4s; }
 @media (prefers-reduced-motion: reduce) { .leaf, .book { transition-duration: .01s !important; } .leaf.turning .sheen { animation: none; } }
@@ -346,7 +348,7 @@ function addLeaf(i) {
   const leaf = document.createElement("div"); leaf.className = "leaf" + (i ? "" : " cv"); leaf.dataset.i = i;
   leaf.innerHTML = i
     ? `<div class="face front page" data-p="${2 * i - 1}"></div><div class="face back page" data-p="${2 * i}"></div>`
-    : `<div class="face front cover"></div><div class="face back inside"><div class="own"><small>This notebook belongs to</small><span id="owner" contenteditable="plaintext-only" dir="auto" spellcheck="false"></span><i></i></div><div class="hint">write anything. <br>draw a line through it when it is done.<br><span dir="rtl">هر چه خواستی بنویس.</span></div></div>`;
+    : `<div class="face front cover"></div><div class="face back inside"><div class="own"><small>This notebook belongs to</small><span id="owner" contenteditable="plaintext-only" dir="auto" spellcheck="false"></span><i></i></div><div class="hint">write anything. <br>draw a line through it when it is done.<br><span class="beit" dir="rtl">از صدای سخن عشق ندیدم خوش‌تر<br>یادگاری که در این گنبد دوّار بماند<small>حافظ</small></span></div></div>`;
   leavesEl.appendChild(leaf); leaves.push(leaf);
 }
 /* the notebook never runs out: two blank sheets always wait past the last written page */
