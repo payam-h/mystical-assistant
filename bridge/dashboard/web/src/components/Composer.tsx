@@ -1022,7 +1022,7 @@ export function Composer({
   const chipName = `PROFILE — ${bound?.name ?? (profile || "NO PROFILE")}`;
   const chipTitle = chipWins.length
     ? `${chipName} · ${chipWins.map((w) => `${w.name}: ${w.left}% left${w.resets}`).join(" · ")}`
-    : chipMeter ? `${chipName} · usage unknown: this login's access token has lapsed; its meter reads again once it runs a turn` : undefined;
+    : chipMeter ? `${chipName} · usage unknown: the meter could not be read. Either Claude's usage endpoint is rate-limiting (the login itself still works) or this login's access token has lapsed; it is tried again on its own` : undefined;
   // A row picked in the PROFILE menu: + NEW PROFILE opens a blank form, an
   // expired login its RE-LOGIN, another profile binds; the pin is not a pick.
   const pickProfileRow = (id: string) => {

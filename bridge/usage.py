@@ -26,7 +26,8 @@ CREDENTIALS_FILE = os.path.expanduser("~/.claude/.credentials.json")
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CACHE_TTL = 60.0
 RETRY_TTL = 15.0    # fetch failed and there's nothing to show: probe again sooner
-STALE_MAX = 900.0   # how long a last-good payload may stand in for a live one
+STALE_MAX = 3600.0  # how long a last-good payload may stand in for a live one (fork: an hour; the endpoint 429s for long stretches when many CLIs poll it)
+RETRY_MAX = 600.0   # fork: the longest wait between probes of an endpoint that keeps failing
 PACE_SPAN = 3600.0  # pace() reads the last hour of 5-hour readings
 PACE_MIN = 600.0    # under ten minutes of readings is noise, not a pace
 
@@ -38,7 +39,7 @@ _cache: dict = {}
 
 
 def _entry(path: str) -> dict:
-    return _cache.setdefault(path, {"ts": 0.0, "data": None, "next_try": 0.0})
+    return _cache.setdefault(path, {"ts": 0.0, "data": None, "next_try": 0.0, "fails": 0})
 
 
 def _token(path: str) -> str | None:
@@ -177,12 +178,16 @@ def get_usage(creds_path: str | None = None) -> dict:
     if isinstance(payload, dict):
         fresh = _normalize(payload)
         with _lock:
-            _entry(path).update(ts=now, data=fresh, next_try=0.0)
+            _entry(path).update(ts=now, data=fresh, next_try=0.0, fails=0)
             _remember(_entry(path), now, payload)
         return fresh
     with _lock:
         # A value still on screen buys a full cycle before we try again; an
         # empty meter is worth retrying sooner.
-        _entry(path)["next_try"] = now + (CACHE_TTL if data is not None
-                                         else RETRY_TTL)
+        # fork: each failure in a row doubles the wait (15 s, 30 s, … 10 min): probing a
+        # rate-limited endpoint every 15 s from every account is part of why it stays limited.
+        e = _entry(path)
+        fails = int(e.get("fails") or 0)
+        e["fails"] = fails + 1
+        e["next_try"] = now + min(RETRY_MAX, (CACHE_TTL if data is not None else RETRY_TTL) * (2 ** min(fails, 6)))
     return _last_good(data, now - ts)

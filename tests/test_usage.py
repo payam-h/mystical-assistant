@@ -258,3 +258,22 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     raise SystemExit(1 if failed else 0)
+
+
+def test_failures_in_a_row_back_off_and_a_success_resets_them():
+    """fork: a rate-limited endpoint is probed 15 s, 30 s, 60 s … apart, never more than RETRY_MAX; one good answer starts over."""
+    restore, _calls = _stub(*([None] * 9 + [PAYLOAD]))
+    try:
+        waits = []
+        for _ in range(9):
+            _default_entry()["next_try"] = 0.0
+            before = time.time()
+            assert usage.get_usage() == {"available": False}
+            waits.append(round(_default_entry()["next_try"] - before))
+        assert waits[:4] == [15, 30, 60, 120]
+        assert waits == sorted(waits) and waits[-1] == usage.RETRY_MAX
+        _default_entry()["next_try"] = 0.0
+        assert usage.get_usage()["available"] is True
+        assert _default_entry()["fails"] == 0
+    finally:
+        restore()
