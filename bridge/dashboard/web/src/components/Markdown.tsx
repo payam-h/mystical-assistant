@@ -347,6 +347,20 @@ export const Markdown = memo(function Markdown({
             return <CodeBlock code={code} lang={lang} />;
           },
   }), [multiOn, typed, toolStyle, onOpenFile]);
+  // --- fork: perf --- react-markdown parses on every render it gets, so the
+  // parsed tree is kept until what it parses changes. A new className or a new
+  // onOpenFile function (latestOpen above still takes it) re-renders this
+  // wrapper, but hands React the same element, which it skips: the parse was
+  // ~40% of the window's CPU while a long session was open.
+  const parsed = useMemo(() => (
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, ...(breaks ? [remarkBreaks] : []), remarkEmbedAddress, ...(multiOn && !typed ? [remarkFileRefs] : [])]}
+        components={components}
+      >
+        {typed ? children : stripViews(children)}
+      </ReactMarkdown>
+  ), [children, breaks, typed, multiOn, components]);
+  // --- /fork ---
   return (
     <div
       className={`md ${className}`}
@@ -361,12 +375,7 @@ export const Markdown = memo(function Markdown({
     >
       <RefView.Provider value={onOpenFile}>
       <MdTyped.Provider value={typed}>
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, ...(breaks ? [remarkBreaks] : []), remarkEmbedAddress, ...(multiOn && !typed ? [remarkFileRefs] : [])]}
-        components={components}
-      >
-        {typed ? children : stripViews(children)}
-      </ReactMarkdown>
+      {parsed}
       {multiOn && !typed ? <RefImages text={children} /> : null}
       </MdTyped.Provider>
       </RefView.Provider>
