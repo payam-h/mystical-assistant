@@ -495,6 +495,16 @@ def call_tool(s: dict, name: str, args: dict) -> str:
     return str(out) if out is not None else f"{pid} failed: {_broken.get(pid, 'error')}"
 
 
+def holds_ping(sid: "str | None", kind: "str | None", text: str) -> bool:
+    """runner._notify: may a live plugin keep this session's Telegram ping for later? (plugins/later
+    holds a wake-up's pings in quiet hours and sends them as one message when they end.) A plugin
+    that fails here lets the ping through."""
+    for pid, inst in list(_live.items()):
+        if hasattr(inst, "holds_ping") and _guard(pid, lambda: inst.holds_ping(sid, kind, text), default=False):
+            return True
+    return False
+
+
 def on_command(chat_id: int, text: str) -> "str | None":
     """Telegram: `/<cmd> rest` → the first live plugin whose manifest lists the command."""
     cmd, _, rest = text.strip().partition(" ")

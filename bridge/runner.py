@@ -1532,6 +1532,12 @@ def _notify(chat_id: int | None, text: str, kb: dict | None = None, *,
     if quiet or not chat_id or (not always and (not config.NOTIFY_ENABLE
                                                 or (kind and not notices.telegram_ok(kind)))):
         return
+    # --- fork: later --- a plugin may hold this ping till quiet hours end (plugins/later's wake-ups)
+    if kind and sid and not always:
+        from bridge import plugins_ext
+        if plugins_ext.holds_ping(sid, kind, text):
+            return
+    # --- /fork ---
     try:
         if ask and ask():
             return

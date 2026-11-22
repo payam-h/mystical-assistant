@@ -1,0 +1,42 @@
+{
+  "id": "later",
+  "label": "Later",
+  "version": "0.1.0",
+  "blurb": "Jobs the bridge owns: an agent starts a long command (a build, a suite, an upload), ends its turn, and the bridge wakes the same session with the exit code and the end of the log when it finishes. The command runs detached, outlives the turn and a bridge restart, and keeps its log. Capped per session, per hour and per day. /later lists them.",
+  "entry": "plugin.py",
+  "routes": [
+    "/plugin/later"
+  ],
+  "telegram": [
+    "later"
+  ],
+  "settings": [
+    {
+      "key": "LATER_MAX_PER_SESSION",
+      "label": "Open items per session",
+      "default": "10"
+    },
+    {
+      "key": "LATER_MAX_RUNNING",
+      "label": "Jobs running at once (all sessions)",
+      "default": "6"
+    },
+    {
+      "key": "LATER_WAKES_PER_HOUR",
+      "label": "Wake-ups per session per hour",
+      "default": "6"
+    },
+    {
+      "key": "LATER_DAILY_TOKENS",
+      "label": "Wake-up tokens per session per day",
+      "default": "2000000",
+      "hint": "input + output + cache writes of the wake-up turns since local midnight; past it a wake-up is held until tomorrow or /later release"
+    },
+    {
+      "key": "LATER_QUIET",
+      "label": "Quiet hours (HH:MM-HH:MM, empty = off)",
+      "default": "22:00-09:00",
+      "hint": "wake-ups still run; their Telegram pings wait for the end of the window unless the job was marked urgent"
+    }
+  ]
+}
