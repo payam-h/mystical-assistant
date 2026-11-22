@@ -739,10 +739,10 @@ class Plugin:
         return "\n".join(out)
 
     def routes(self) -> dict:
-        return {("GET", "/plugin/later/state"): lambda req: ({"items": sorted(self._items.values(), key=lambda i: i["created"]),
+        return {("GET", "/state"): lambda req: ({"items": sorted(self._items.values(), key=lambda i: i["created"]),
                                                               "held_pings": len(self._held)}, 200),
-                ("POST", "/plugin/later/cancel"): lambda req: ({"text": self.job_cancel(None, str((req.get("body") or {}).get("id") or ""), by="you")}, 200),
-                ("POST", "/plugin/later/release"): lambda req: ({"text": self.release(str((req.get("body") or {}).get("id") or ""))}, 200)}
+                ("POST", "/cancel"): lambda req: ({"text": self.job_cancel(None, str((req.get("body") or {}).get("id") or ""), by="you")}, 200),
+                ("POST", "/release"): lambda req: ({"text": self.release(str((req.get("body") or {}).get("id") or ""))}, 200)}
 
     def status(self) -> dict:
         with self._lock:
