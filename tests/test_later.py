@@ -252,3 +252,19 @@ def test_manifest_validates():
     with open(os.path.join(d, "plugin.json")) as f:
         m = plugins_ext._validate(json.load(f), d, "bundled")
     assert m["id"] == "later" and "later" in m["telegram"]
+
+
+def test_telegram_listing_cancel_release(P):
+    jid = _start(P, "sleep 30", name="long build")
+    out = P._tg(555, "")
+    assert "Pending" in out and "long build" in out and "release chat" in out
+    assert "Cancelled" in P._tg(555, f"cancel {jid}")
+    assert "Recent" in P._tg(555, "") and "cancelled" in P._tg(555, "")
+    assert "isn't held" in P._tg(555, f"release {jid}")
+
+
+def test_owner_message_does_not_drop_a_job(P):
+    """Nothing in the plugin listens to turn starts: a job ends by exiting or by cancel only."""
+    jid = _start(P, "sleep 1; echo ok")
+    assert not hasattr(P, "on_turn_start")
+    assert _wait(P, jid, ("delivered",))["outcome"] == "exit"
