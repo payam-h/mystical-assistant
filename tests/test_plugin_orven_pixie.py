@@ -94,14 +94,59 @@ def test_check_line():
 def test_facts_keep_the_card_short_and_the_report_whole(tmp_path):
     m = _mod()
     p = m.Plugin(); p.ctx = FakeCtx()
-    w = m.Work({"id": 1, "title": "t"}, str(tmp_path), str(tmp_path)); w.root = str(tmp_path); w.run_id = "r"
-    long_report = "Done. Added the badge.\n\n" + "detail line\n" * 400
-    f = p._facts(w, {"id": "r", "summary": "w1 merged: badge added, 11 tests pass.", "check": {"state": "done", "command": "npm test", "code": 0, "ok": True}},
-                 {"id": "i", "report": long_report, "decisions": ["kept css"], "unverified": ["plugin side"]}, ok=True)
-    assert f["summary"] == "w1 merged: badge added, 11 tests pass." and f["report"].startswith("Done. Added") and len(f["report"]) > 3000
-    assert f["decisions"] == ["kept css"] and f["not_verified"] == ["plugin side"] and f["tests"] == "npm: exit 0, ok"
-    f2 = p._facts(w, {"id": "r"}, {"id": "i", "report": long_report}, ok=True)
-    assert f2["summary"] == "Done. Added the badge."
+    w = m.Work({"id": 1, "title": "t"}, str(tmp_path), str(tmp_path)); w.path = str(tmp_path)
+    (tmp_path / ".mystical" / "scratch").mkdir(parents=True)
+    (tmp_path / ".mystical" / "scratch" / "after.png").write_bytes(b"png")
+    long_report = ("**Done.** Added the badge.\n\nRan `npm test`: 11 passed.\n\nDecisions:\n- kept css\n\nNot verified: none\n\n"
+                   + "detail line\n" * 400)
+    f = p._facts(w, long_report, ok=True, cost=0.5)
+    assert f["summary"] == "Done. Added the badge." and f["report"].startswith("**Done.**") and len(f["report"]) > 3000
+    assert f["decisions"] == ["kept css"] and f["not_verified"] is None and f["cost"] == 0.5
+    assert [os.path.basename(x) for x in f["pictures"]] == ["after.png"]
+
+
+def test_read_report_lists():
+    m = _mod()
+    r = m.read_report("Did it.\n\n**Decisions:**\n- a\n- b\n\nNot verified:\n* the Android side\n\nThanks")
+    assert r == {"summary": "Did it.", "decisions": ["a", "b"], "unverified": ["the Android side"]}
+    assert m.read_report("") == {"summary": "", "decisions": [], "unverified": []}
+
+
+def test_a_ticket_runs_as_one_session_in_its_own_worktree(tmp_path, monkeypatch):
+    """No workrun since the 2026-11-23 sync: _start makes pixie/<id>-<slug> in a worktree, puts the ticket on the
+    work list, starts one session there; _wait needs a commit; the list item ends done."""
+    import subprocess
+    import threading
+    import types
+    from bridge import config, runner, store, worklist
+    store.init()
+    ws = tmp_path / "flixdrama"; repo = ws / "app"; repo.mkdir(parents=True)
+    g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
+    g("init", "-q", "-b", "main"); (repo / "a.txt").write_text("a\n"); g("add", "-A")
+    g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+    monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
+    started = {}
+
+    def fake_job(chat_id, prompt, images, project=None, session_id=None, **kw):
+        started.update(prompt=prompt, cwd=project, session=session_id)
+        (open(os.path.join(project, "b.txt"), "w")).write("b\n")
+        subprocess.run(["git", "-C", project, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", project, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "b"], check=True)
+        ev = threading.Event(); ev.set()
+        return types.SimpleNamespace(id="job-1", exited=ev, status="done", interrupted=False, timed_out=False, error_msg=None,
+                                     result="Added b.\n\nDecisions:\n- none", texts=[], cost=0.1)
+    monkeypatch.setattr(runner, "start_streaming_job", fake_job)
+    m = _mod()
+    p = m.Plugin(); p.ctx = FakeCtx()
+    w = m.Work({"id": 31, "title": "Add b", "details": "make b", "workspace": str(ws), "repo": "app"}, str(ws), str(repo))
+    p._start(w)
+    assert w.branch == "pixie/31-add-b" and w.base == "main" and started["cwd"] == w.path and os.path.isdir(w.path)
+    assert "Pixie dev ticket #31" in started["prompt"] and "make b" in started["prompt"]
+    facts = p._wait(w, 60)
+    assert facts["ok"] is True and facts["summary"] == "Added b." and facts["decisions"] is None
+    item = next(i for i in worklist.load(w.root)["items"] if i["id"] == w.item_id)
+    assert item["state"] == "done" and item["source"]["kind"] == "pixie"
+    g("worktree", "remove", "--force", w.path)
 
 
 def test_a_ticket_runs_publishes_and_reports_with_screenshots(tmp_path):

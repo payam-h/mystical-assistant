@@ -6,25 +6,23 @@ spec, acceptance checks and whether screenshots are wanted. This plugin polls `/
 the dev-team token and, per ticket:
 
   1. puts one item on the repo's **work list** (bridge/worklist.py) with source {kind: "pixie"},
-  2. starts a **run** (bridge/workrun.py) in a manager chat of its own for that repo — a helper in
-     its own worktree does the work, the manager reviews and merges into the run branch; evidence
-     (screenshots, logs under .mystical/scratch/) is kept per item; the project's check command
-     runs before and after,
-  3. when the run finishes, publishes the run branch as `pixie/<id>-<slug>`, opens a PR
+  2. starts one **session** in a worktree of its own on `pixie/<id>-<slug>` (from the ticket's base
+     branch) that does the work, runs the repo's checks, commits, and saves screenshots under
+     .mystical/scratch/ (upstream retired the work run this used to drive; see _start),
+  3. when the session ends with a commit, pushes that branch, opens a PR
      (bridge/github.create_pr) and reports back to Pixie: summary, the helper's decisions and
      "not verified", the checks, the PR, the screenshots — Pixie shows the owner ✅ / 🔁 / ❌.
   4. a 🔁 note comes back as a revision: a helper session in a worktree of the PR branch applies the
      note, pushes, and the report goes back again.
 
-Why upstream's run machinery and not a bare session: it already gives isolation (worktrees), a
-reviewer (the manager), reports shaped for a decision, kept evidence and before/after checks — the
-exact things a dev ticket needs — and the owner can watch it in the sidebar. Only a person may start
-a run; the owner's ✅ on Pixie's approval card is that person, so starting from here is that tap.
+Until the 2026-11-23 upstream sync this drove upstream's work run (a manager chat reviewing a helper,
+before/after checks). Upstream replaced it with a task's flow, whose parts wait for an approval tap
+inside Mystical; the owner's ✅ on Pixie's approval card is the approval here, so a ticket now runs as
+one session in its own worktree, which the owner can watch in the sidebar like any other.
 
-What the helper does NOT get for free: the workspace's CLAUDE.md and memory live in the umbrella
-folder, and a worktree under BASE_PATH/.worktrees is outside it. So the item's detail names the
-knowledge files to read first (PIXIE_KNOWLEDGE), and the manager chat's cwd is the repo inside the
-umbrella folder, where Claude Code loads the parents' CLAUDE.md on its own.
+What the session does NOT get for free: the workspace's CLAUDE.md and memory live in the umbrella
+folder, and a worktree under BASE_PATH/.worktrees is outside it. So the brief names the knowledge
+files to read first (PIXIE_KNOWLEDGE).
 
 The work list is an experimental feature; starting this plugin switches it on (experimental.set_enabled).
 Stdlib only.
@@ -71,6 +69,30 @@ def first_paragraph(text: str, limit: int = 700) -> str:
     """The lead of a report: up to its first blank line, bullets and headings stripped of markdown noise."""
     lead = (text or "").strip().split("\n\n")[0].strip()
     return re.sub(r"\*\*|`", "", lead)[:limit]
+
+
+def read_report(text: str) -> dict:
+    """The lead paragraph and the "Decisions:" / "Not verified:" lists from a session's last reply
+    (what workrun.read_report read before upstream retired it)."""
+    out = {"summary": first_paragraph(text or ""), "decisions": [], "unverified": []}
+    key = None
+    for line in (text or "").splitlines():
+        head = re.sub(r"[*_#`]", "", line).strip().lower()
+        if head.startswith("decisions:"):
+            key, rest = "decisions", line.split(":", 1)[1]
+        elif head.startswith("not verified:"):
+            key, rest = "unverified", line.split(":", 1)[1]
+        elif key and re.match(r"\s*[-*•]\s+", line):
+            rest = re.sub(r"^\s*[-*•]\s+", "", line)
+        elif key and not line.strip():
+            continue
+        else:
+            key = None if key and not re.match(r"\s", line) else key
+            continue
+        rest = rest.strip().strip("*").strip()
+        if rest and rest.lower().rstrip(".") not in ("none", "nothing", "n/a"):
+            out[key].append(rest[:300])
+    return out
 
 
 def check_line(v: dict) -> str:
@@ -147,6 +169,10 @@ class Work:
         self.state = "starting"
         self.branch: str | None = None
         self.pr_url: str | None = None
+        self.top: str | None = None       # the repo's top level (the worktree's main checkout)
+        self.base: str | None = None      # the branch the ticket's branch starts from and its PR goes into
+        self.path: str | None = None      # the ticket's worktree
+        self.job = None                   # the session's turn (runner job)
 
 
 class Plugin:
@@ -262,7 +288,7 @@ class Plugin:
                 facts = (self.revise_run or self._revise)(w, str(t.get("revise_note") or ""), max_min * 60)
             else:
                 (self.start_run or self._start)(w)
-                self._api(f"/{w.id}/progress", {"note": f"run {w.run_id} started in {os.path.relpath(w.repo, w.ws)} (manager chat {w.chat['id'][:8] if w.chat else '?'})",
+                self._api(f"/{w.id}/progress", {"note": f"session {w.chat['id'][:8] if w.chat else '?'} started in {os.path.relpath(w.repo, w.ws)} on {w.branch or '?'}",
                                                  "mystical_session": (w.chat or {}).get("id"), "mystical_run": w.run_id})
                 facts = (self.wait_run or self._wait)(w, max_min * 60)
                 if facts.get("ok"):
@@ -290,134 +316,111 @@ class Plugin:
             with self._lock:
                 self.current = None
 
-    # --- the run (upstream's worklist + workrun) ----------------------------------------------
-    def _manager_chat(self, w: Work) -> dict:
-        """One manager chat per repo, kept across tickets; cwd is the repo inside the umbrella folder."""
-        from bridge import config, profiles, store
-        from bridge.browser import rel
-        sid = self.chats.get(w.repo)
-        s = store.get_session(sid) if sid else None
-        if not s:
-            s = store.create_session(config.DASH_CHAT_ID, rel(w.repo), session_id=uuid.uuid4().hex, origin="pixie:devteam",
-                                     cwd=w.repo, permission_mode="bypassPermissions", profile_id=profiles.claude_default(rel(w.repo)))
-            store.rename(s["id"], f"Dev team · {os.path.basename(w.repo)}")
-            self.chats[w.repo] = s["id"]
-            self._save()
-        return s
-
+    # --- the run: one session in a worktree of its own ----------------------------------------
+    # Upstream retired the work run (bridge/workrun.py, 2f8899a6 "Tasks start their own flow") that this
+    # plugin used to drive: a manager chat, a helper per item, before/after checks. Its successor, a
+    # task's flow (worklist.start), splits bigger work into parts that wait for an approval tap inside
+    # Mystical and names its own branch, which does not fit a ticket the owner already approved in Pixie.
+    # So a ticket now runs the way a revision always has: one session in a worktree on
+    # pixie/<id>-<slug>, told to commit there and end with the report Pixie parses. The ticket still
+    # goes on the repo's work list, marked done or blocked when the session ends.
     def _start(self, w: Work) -> None:
-        from bridge import config, runner, worklist, workrun
-        w.chat = self._manager_chat(w)
+        from bridge import config, git, profiles, runner, store, worklist
+        from bridge.browser import rel
         w.root = worklist.root_of(w.repo)
         if not w.root:
             raise RuntimeError(f"{w.repo} is not a git repository")
+        top = subprocess.run(["git", "-C", w.repo, "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip() or w.repo
+        base = str(w.ticket.get("base_branch") or "").strip() or git.current_branch(top)
+        w.branch = f"pixie/{w.id}-{slug(str(w.ticket.get('title') or ''))}"
+        w.top, w.base = top, base
+        w.path = os.path.join(config.BASE_PATH, ".worktrees", os.path.basename(top), f"pixie-{w.id}")
+        if not os.path.isdir(w.path):
+            os.makedirs(os.path.dirname(w.path), exist_ok=True)
+            exists = subprocess.run(["git", "-C", top, "rev-parse", "--verify", "--quiet", f"refs/heads/{w.branch}"], capture_output=True).returncode == 0
+            ok, msg = git.worktree_add(top, w.path, w.branch, "" if exists else base, create=not exists)
+            if not ok:
+                raise RuntimeError(f"could not make a worktree on {w.branch}: {msg[:200]}")
+        sub = os.path.relpath(w.repo, top)
+        cwd = w.path if sub in (".", "") else os.path.join(w.path, sub)
         knowledge = [k for k in str(self._s().get("PIXIE_KNOWLEDGE") or "").split(",") if k.strip()]
-        row = {"title": str(w.ticket.get("title") or f"ticket {w.id}")[:200], "detail": item_detail(w.ticket, w.ws, knowledge),
-               "source": {"kind": "pixie", "ref": str(w.id), "url": f"{self._url()}/tasks"}}
-        items = worklist.add(w.root, [row], session=w.chat["id"])
-        w.item_id = items[0]["id"]
-        run = workrun.start(w.chat, [w.item_id], 1)
-        w.run_id = run["id"]
-        w.state = "running"
-        prompt = workrun._manager_prompt(w.root, run)
-        job = runner.start_streaming_job(config.DASH_CHAT_ID, prompt, [], project=w.repo, permission_mode="bypassPermissions",
+        detail = item_detail(w.ticket, w.ws, knowledge)
+        title = str(w.ticket.get("title") or f"ticket {w.id}")[:200]
+        try:
+            items = worklist.add(w.root, [{"title": title, "detail": detail,
+                                           "source": {"kind": "pixie", "ref": str(w.id), "url": f"{self._url()}/tasks"}}])
+            w.item_id = items[0]["id"]
+        except Exception as e:  # noqa: BLE001 — the list is a view of the work, never a reason to refuse it
+            self.ctx.log(f"ticket #{w.id}: not on the work list ({e})")
+        w.chat = store.create_session(config.DASH_CHAT_ID, rel(cwd), session_id=uuid.uuid4().hex, origin="pixie:devteam", cwd=cwd,
+                                      permission_mode="bypassPermissions", profile_id=profiles.claude_default(rel(cwd)))
+        store.rename(w.chat["id"], f"Dev team · #{w.id} {title[:60]}")
+        prompt = (f"Pixie dev ticket #{w.id}: {title}\n\n{detail}\n\nYou are in a worktree on branch {w.branch} (from {base}). "
+                  "Commit your work on this branch with clear messages; do not push, do not merge, do not deploy. "
+                  "End your final reply with a short summary paragraph first, then the checks you ran and their results, "
+                  "then \"Decisions:\" and \"Not verified:\" lists (say none if so).")
+        job = runner.start_streaming_job(config.DASH_CHAT_ID, prompt, [], project=cwd, permission_mode="bypassPermissions",
                                          session_id=w.chat["id"], origin="pixie:devteam", hang_timeout=3600)
         if job is None:
-            raise RuntimeError("the manager chat is busy")
+            raise RuntimeError("could not start the ticket's session")
+        w.job, w.run_id, w.state = job, job.id, "running"
 
     def _wait(self, w: Work, timeout: float) -> dict:
-        """Until the run ends (the manager called finish, or it paused/stopped), then the facts Pixie needs."""
-        from bridge import worklist, workrun
+        """Until the session's turn ends, then the facts Pixie needs. A turn that ends without a commit fails."""
+        job = w.job
         deadline = time.time() + timeout
-        last_state = None
-        while time.time() < deadline and not self._stop.is_set():
-            data = worklist.load(w.root)
-            run = next((r for r in data["runs"] if r["id"] == w.run_id), None)
-            item = next((i for i in data["items"] if i["id"] == w.item_id), None)
-            if run is None:
-                return {"ok": False, "why": "the run disappeared"}
-            state = (run.get("state"), (item or {}).get("state"))
-            if state != last_state:
-                last_state = state
-                try:
-                    self._api(f"/{w.id}/progress", {"note": f"run {run.get('state')} · item {(item or {}).get('state')}"})
-                except Exception:  # noqa: BLE001
-                    pass
-            if run.get("state") == "finished":
-                run = self._settled(w, run, min(600, max(30, deadline - time.time())))
-                return self._facts(w, run, item or {}, ok=(item or {}).get("state") == "done")
-            if run.get("state") in ("paused", "stopped"):
-                return {"ok": False, "why": f"the run {run.get('state')}: {run.get('paused_why') or 'see the work list'}", **self._facts(w, run, item or {}, ok=False)}
-            self._stop.wait(10)
-        # out of time: stop the run so the repo is not left mid-flight
-        try:
-            data = worklist.load(w.root)
-            run = next((r for r in data["runs"] if r["id"] == w.run_id), None)
-            if run and run.get("state") == "running":
-                workrun._stop(w.root, run)
-        except Exception:  # noqa: BLE001
-            pass
-        return {"ok": False, "why": f"the ticket exceeded {int(timeout // 60)} minutes"}
-
-    def _settled(self, w: Work, run: dict, timeout: float) -> dict:
-        """The finished run once its final check (run on the whole branch, in the background) has an answer."""
-        from bridge import worklist
-        end = time.time() + timeout
-        while time.time() < end and not self._stop.is_set():
-            if (run.get("check") or {}).get("state") != "running":
-                return run
+        while not job.exited.is_set() and time.time() < deadline and not self._stop.is_set():
             self._stop.wait(5)
-            data = worklist.load(w.root)
-            run = next((r for r in data["runs"] if r["id"] == w.run_id), run)
-        return run
+        if not job.exited.is_set():
+            try:
+                job.interrupt()
+            except Exception:  # noqa: BLE001
+                pass
+            self._mark(w, "blocked", f"stopped after {int(timeout // 60)} minutes")
+            return {"ok": False, "why": f"the ticket exceeded {int(timeout // 60)} minutes"}
+        ok = job.status == "done" and not job.interrupted and not job.timed_out
+        commits = subprocess.run(["git", "-C", w.top, "rev-list", "--count", f"{w.base}..{w.branch}"], capture_output=True, text=True).stdout.strip()
+        why = None if ok else (job.error_msg or "the session did not finish")
+        if ok and commits in ("", "0"):
+            ok, why = False, f"the session ended without a commit on {w.branch}"
+        facts = self._facts(w, (job.result or "\n".join(job.texts or [])).strip(), ok=ok, cost=job.cost)
+        self._mark(w, "done" if ok else "blocked", "" if ok else (why or ""))
+        return {**facts, "why": why}
 
-    def _facts(self, w: Work, run: dict, item: dict, ok: bool) -> dict:
-        root = w.root or w.repo
+    def _mark(self, w: Work, state: str, note: str) -> None:
+        if not (w.root and w.item_id):
+            return
+        try:
+            from bridge import worklist
+            worklist.update(w.root, [{"id": w.item_id, "state": state, **({"note": note[:900]} if note else {})}])
+        except Exception as e:  # noqa: BLE001
+            self.ctx.log(f"ticket #{w.id}: work list not updated ({e})")
+
+    def _facts(self, w: Work, text: str, ok: bool, cost=None) -> dict:
+        """The card's short summary, the whole report beside it, the lists, and the screenshots the session saved."""
         pictures = []
-        ev = item.get("evidence") or {}
-        for rel_p in ev.get("pictures") or []:
-            p = os.path.join(root, rel_p)
-            if os.path.isfile(p):
-                pictures.append(p)
-        if not pictures:
-            d = os.path.join(root, ".mystical", "runs", str(run.get("id")), str(item.get("id") or ""))
-            if os.path.isdir(d):
-                for dp, _, names in os.walk(d):
-                    for n in sorted(names):
-                        if n.lower().endswith(PICTURE):
-                            pictures.append(os.path.join(dp, n))
-        checks = {}
-        for k, label in (("baseline", "before"), ("check", "after")):
-            v = run.get(k)
-            if isinstance(v, dict) and v.get("state") not in (None, "running"):
-                checks[label] = check_line(v)
-        # The card the owner sees carries the manager's short summary; the helper's whole report goes along
-        # as `report` for the board, so a long reply never spills the card into several messages.
-        summary = (run.get("summary") or "").strip() or first_paragraph(item.get("summary") or item.get("report") or "")
-        report = (item.get("report") or "").strip()
-        return {"ok": ok, "summary": summary[:1200] or "(the run left no summary)", "report": report[:12000] or None, "decisions": item.get("decisions") or None,
-                "not_verified": item.get("unverified") or None, "checks": checks or None, "pictures": pictures, "tests": checks.get("after"), "cost": None}
+        scratch = os.path.join(w.path or w.repo, ".mystical", "scratch")
+        if os.path.isdir(scratch):
+            for n in sorted(os.listdir(scratch)):
+                if n.lower().endswith(PICTURE):
+                    pictures.append(os.path.join(scratch, n))
+        parsed = read_report(text)
+        return {"ok": ok, "summary": (parsed["summary"] or "(the session left no summary)")[:1200], "report": text[:12000] or None,
+                "decisions": parsed["decisions"] or None, "not_verified": parsed["unverified"] or None,
+                "checks": None, "pictures": pictures, "tests": None, "cost": cost}
 
     def _publish(self, w: Work, facts: dict) -> tuple[str | None, str | None]:
-        """The run branch becomes pixie/<id>-<slug>, pushed, with a PR into the branch the run started from."""
-        from bridge import github, worklist
-        data = worklist.load(w.root)
-        run = next((r for r in data["runs"] if r["id"] == w.run_id), None)
-        if not run:
-            return None, None
-        top = run["top"]
-        branch = f"pixie/{w.id}-{slug(str(w.ticket.get('title') or ''))}"
-        subprocess.run(["git", "-C", top, "branch", "-f", branch, run["branch"]], capture_output=True, text=True, timeout=30)
-        base = run.get("into") or str(w.ticket.get("base_branch") or "main")
+        """The ticket's branch, pushed, with a PR into the branch it started from."""
+        from bridge import github
         title = f"[dev team #{w.id}] {str(w.ticket.get('title') or '')[:70]}"
         body = (f"Pixie dev ticket #{w.id} — {self._url()}/tasks\n\n{facts.get('summary') or ''}\n\n"
                 + (f"Decisions: {facts.get('decisions')}\n" if facts.get("decisions") else "") + (f"Not verified: {facts.get('not_verified')}\n" if facts.get("not_verified") else "")
-                + (f"\nChecks: {json.dumps(facts.get('checks'))}\n" if facts.get("checks") else "") + "\nMade by Mystical's work run; review before merging. Nothing was deployed.")
-        ok, info = github.create_pr(top, branch, base, title, body)
+                + "\nMade by a Mystical dev-team session; review before merging. Nothing was deployed.")
+        ok, info = github.create_pr(w.path or w.top, w.branch, w.base, title, body)
         if not ok:
             self.ctx.log(f"PR for #{w.id} failed: {info.get('output', '')[:200]}")
-            return branch, None
-        return branch, info.get("url") or None
+            return w.branch, None
+        return w.branch, info.get("url") or None
 
     def _revise(self, w: Work, note: str, timeout: float) -> dict:
         """A helper session in a worktree of the PR branch applies the owner's note and pushes."""
@@ -454,8 +457,7 @@ class Plugin:
                 if n.lower().endswith(PICTURE):
                     pictures.append(os.path.join(scratch, n))
         text = (job.result or "\n".join(job.texts or [])).strip()
-        from bridge import workrun
-        parsed = workrun.read_report(text) if text else {}
+        parsed = read_report(text)
         git.push(path)
         return {"ok": ok, "why": None if ok else (job.error_msg or "the revision did not finish"), "summary": (parsed.get("summary") or first_paragraph(text))[:1200], "report": text[:12000] or None, "decisions": parsed.get("decisions") or None,
                 "not_verified": parsed.get("unverified") or None, "pictures": pictures, "branch": branch, "pr_url": w.ticket.get("pr_url"), "cost": job.cost, "checks": None, "tests": None}
