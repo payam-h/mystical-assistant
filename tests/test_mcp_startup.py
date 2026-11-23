@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import stat
+import time
 
 import pytest
 
@@ -52,7 +53,7 @@ def test_unconfigured_session_never_asks_claude_mcp_list(no_mcp_list):
     # case that used to spend 6-9s enumerating servers only to deny them all.
     cmd = _cmd(disabled_tools=None)
     assert "--strict-mcp-config" in cmd
-    assert _mcp_servers(cmd) == ["goals", "verify"]
+    assert _mcp_servers(cmd) == ["goals", "mystical-ux", "verify"]
 
 
 def test_unconfigured_session_emits_no_deny_list(no_mcp_list):
@@ -70,7 +71,7 @@ def test_server_left_on_is_redeclared_under_strict(monkeypatch):
         "figma": {"type": "http", "url": "https://mcp.figma.com/mcp"}})
     cmd = _cmd(disabled_tools=["mcp__figma"])
     assert "--strict-mcp-config" in cmd
-    assert _mcp_servers(cmd) == ["goals", "teamwork", "verify"]
+    assert _mcp_servers(cmd) == ["goals", "mystical-ux", "teamwork", "verify"]
 
 
 def test_mcp_on_beats_the_sessions_toggle_and_extra_args_join_its_one_settings(monkeypatch):
@@ -247,14 +248,14 @@ _BROWSER_DEFS = {
 }
 
 
-def _servers_with(monkeypatch, defs=_BROWSER_DEFS, **settings):
-    """The --mcp-config servers a configured session gets, with `defs` as what
-    ~/.claude.json holds and `settings` written onto config."""
+def _servers_with(monkeypatch, defs=_BROWSER_DEFS, cwd=None, **settings):
+    """The --mcp-config servers a configured session in `cwd` gets, with `defs` as
+    what ~/.claude.json holds and `settings` written onto config."""
     monkeypatch.setattr(toolsets, "servers", lambda: [{"name": n, "rule": f"mcp__{n}"} for n in defs])
     monkeypatch.setattr(runner, "_configured_mcp_servers", lambda cwd: defs)
     for k, v in settings.items():
         monkeypatch.setattr(config, k, v)
-    cmd = _cmd(disabled_tools=[])
+    cmd = _cmd(disabled_tools=[], cwd=cwd)
     with open(cmd[cmd.index("--mcp-config") + 1], encoding="utf-8") as f:
         return json.load(f)["mcpServers"]
 
@@ -285,11 +286,57 @@ def test_a_flag_the_user_set_themselves_is_left_alone(monkeypatch):
     assert srv["playwright"]["args"] == ["-y", "@playwright/mcp@latest", "--user-data-dir=/mine"]
 
 
+def test_playwright_files_land_in_todays_screenshot_folder(monkeypatch, tmp_path):
+    """Playwright writes unnamed files (a screenshot without a file name, page
+    snapshots, console logs) to <cwd>/.playwright-mcp, inside the repo."""
+    off = dict(AI_BROWSER_HEADLESS=False, AI_BROWSER_EXECUTABLE="", AI_BROWSER_PROFILE="")
+    srv = _servers_with(monkeypatch, cwd=str(tmp_path), **off)
+    day = tmp_path / ".mystical" / "screenshots" / time.strftime("%Y-%m-%d")
+    assert srv["playwright"]["args"][2:] == ["--output-dir", str(day)]
+    assert srv["chrome-devtools"]["args"] == _BROWSER_DEFS["chrome-devtools"]["args"]  # no such default
+    mine = {"playwright": {**_BROWSER_DEFS["playwright"],
+                           "args": ["-y", "@playwright/mcp@latest", "--output-dir=/mine"]}}
+    srv = _servers_with(monkeypatch, mine, cwd=str(tmp_path), **off)
+    assert srv["playwright"]["args"] == ["-y", "@playwright/mcp@latest", "--output-dir=/mine"]
+
+
 def test_a_hidden_browser_is_told_to_the_run(monkeypatch):
     monkeypatch.setattr(config, "AI_BROWSER_HEADLESS", True)
     assert runner._HIDDEN_BROWSER_NOTE in runner._compose_system_prompt()
     monkeypatch.setattr(config, "AI_BROWSER_HEADLESS", False)
     assert runner._HIDDEN_BROWSER_NOTE not in runner._compose_system_prompt()
+
+
+def _prompt(cmd):
+    return cmd[cmd.index("--append-system-prompt") + 1]
+
+
+def test_claude_in_chrome_is_off_until_switched_on(monkeypatch, no_mcp_list):
+    monkeypatch.setattr(config, "CHROME_ACCESS", False)
+    cmd = _cmd(disabled_tools=None)
+    assert "--chrome" not in cmd
+    assert runner._CHROME_NOTE not in _prompt(cmd)
+
+
+def test_claude_in_chrome_rides_on_session_runs(monkeypatch, no_mcp_list):
+    monkeypatch.setattr(config, "CHROME_ACCESS", True)
+    cmd = _cmd(disabled_tools=None)
+    assert "--chrome" in cmd and "--strict-mcp-config" in cmd
+    assert runner._CHROME_NOTE in _prompt(cmd)
+
+
+def test_one_shots_never_get_chrome(monkeypatch, no_mcp_list):
+    """Titles and commit messages embed untrusted text: a browser there is an
+    injection vector, and a run with no session has nothing to keep tabs for."""
+    monkeypatch.setattr(config, "CHROME_ACCESS", True)
+    for cmd in (runner._base_cmd("t", 555, stream=False, skip_pack=True),
+                runner._base_cmd("t", 555, stream=False, skip_pack=True, permission_mode="plan"),
+                runner._base_cmd("t", 555, stream=True, interactive=True,
+                                 claude_session_id=SID, skip_pack=True),
+                runner._base_cmd("t", 555, stream=True, interactive=True),
+                runner._base_cmd("t", 555, stream=False)):
+        assert "--chrome" not in cmd
+        assert runner._CHROME_NOTE not in _prompt(cmd)
 
 
 # --- a run whose prompt carries untrusted text -----------------------------------

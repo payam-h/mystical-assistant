@@ -32,10 +32,16 @@ the user at it rather than restarting. Details: the **bridge-ship** skill.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q      # 1007 passing, ~19s (2026-08-18)
+python3 -m pytest tests/ -q -n 6   # backend; ~2 min on 6 workers (pytest-xdist), 7-10 min without -n
+npm run check                      # in bridge/dashboard/web or bridge/miniapp/web: tsc + every *.check.ts
 ```
 
-Fully green. Anything red is your change — there is no known-failure floor.
+Anything red is your change, on macOS too, with one check first: run a red test alone.
+Two time real threads and fail when the machine is busy (both pass alone):
+`test_rivendell_channel.py::test_a_question_nobody_answers_fails_the_run` and
+`test_logostyle.py::test_a_failed_call_says_why_and_keeps_what_landed`. If the suite hangs on macOS at
+`test_device_setup.py::test_a_wall_the_hidden_user_gets_through_comes_down_and_set_up_fails_closed[8787]`
+(it did twice on 2026-10-20; cause not found, and the test opens no port), `--deselect` it.
 
 `tests/conftest.py` pins the environment **before** `bridge.config` is imported,
 because config freezes every setting into module constants at import time. A
@@ -91,6 +97,21 @@ checkout must stay outside the protected folders. Feature worktrees go under `~/
 (inside BASE_PATH, as bridge-worktree says; sessions, not launchd, open those). **Updates:** `payam` tracks `upstream/master`, so the right rail's
 UPDATE shows what ainurdev shipped; PULL is disabled on this install by the marker `~/.bridge_state/fork-pull-disabled` (`selfupdate._is_fork`; a file, so upstream's tests keep their behaviour) — merge upstream by hand via
 the weekly upstream-sync PR, run the suite, then ⟳. `remote.pushDefault=origin` keeps `git push` on the fork.
+
+**Native catch-up.** `bridge/native_sync.py` (ours) appends to the store the turns a bridge session's JSONL gained
+in a terminal or Cockpit tab; upstream only imports a transcript once, at adoption. Its seams: one fenced block in
+`miniapp/server.py transcript_for` and one line before `start_streaming_job` in each server's send path.
+
+**Usage meter.** Upstream reads usage through the CLI (`get_usage` control request), which also renews an idle
+login's token, so our `login_keepalive.py` was dropped in the 2026-11-23 sync. What stays ours in `usage.py` is the
+backoff: reads that keep failing wait 60 s, 2 min, … up to `RETRY_MAX` (10 min), since each read is a `claude` spawn.
+
+**WHILE IT WORKS.** Upstream's prompt box has a per-turn NOW|NEXT switch (steer or queue on Enter); our setting
+`busyEnter` (SETTINGS ▸ WHILE IT WORKS, default STEER) only picks the side it starts on (`Composer.tsx` enterMode).
+
+**Scanner.** `native.scan` skips ~/.claude/projects folders that cannot hold a listed session (outside BASE_PATH,
+or a plugin scratch dir such as `.forge`), and `native.refresh` runs it on a thread. Forge one-shots run with
+`--no-session-persistence` and Forge sessions are archived at birth.
 
 **Workspace.** `BASE_PATH` is `~/Desktop`; the owner's umbrella folders (`flixdrama`, `Orven`, `pixie`) are
 projects here, and dev-team sessions start in those folders, not in a single repo.

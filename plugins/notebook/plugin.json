@@ -1,0 +1,27 @@
+{
+  "id": "notebook",
+  "label": "Notebook",
+  "version": "0.1.0",
+  "blurb": "A paper notebook for todos and everything else: handwriting in Persian and English, pages that turn, a line through what is done, sketches, stickers, tabs by project, labelled with your Mystical and Orven project icons. Opens from the NOTEBOOK tab or with Alt+N. /note on Telegram writes a line into it.",
+  "entry": "plugin.py",
+  "routes": [
+    "/plugin/notebook"
+  ],
+  "pane": {
+    "title": "NOTEBOOK",
+    "entry": "pane.js",
+    "css": "pane.css",
+    "icon": "icon.svg"
+  },
+  "telegram": [
+    "note"
+  ],
+  "settings": [
+    {
+      "key": "NOTEBOOK_ORVEN_URL",
+      "label": "Orven panel URL",
+      "default": "https://console.orven.am",
+      "hint": "its projects and icons label lines in the notebook; needs the Orven plugin, enrolled"
+    }
+  ]
+}

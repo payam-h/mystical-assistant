@@ -89,6 +89,10 @@ def _finished(meta: dict, agent_id: str, marks: set[str]) -> bool:
     """A foreground agent is done when its tool_use has its tool_result. A
     background one gets that at launch ("Async agent launched"), so its mark is
     the task-notification the CLI appends when it ends (see _finished_marks)."""
+    # Any agent the CLI marked finished is: a sub-agent's own sub-agent has its tool result in its
+    # parent's file, not the main transcript, so `marks` never has it and it spun for good.
+    if meta.get("finished") is True:
+        return True
     if meta.get("requestShape") == "background":
         # The CLI writes `finished` when it ends (2.1.318 does; older ones don't, and
         # 2.1.318's notification no longer arrives as a user record, so marks miss it).
@@ -119,6 +123,15 @@ def _alive_since(session: dict) -> "float | None":
     if not sid:
         return None
     return machine.live_session_starts().get(sid)
+
+
+def _since(session: dict) -> "float | None":
+    """_alive_since, honouring a _session_alive that only says alive (agent_team and
+    upstream's tests stand in for it there): alive with no start known counts every agent."""
+    since = _alive_since(session)
+    if since is None and _session_alive(session):
+        since = 0.0
+    return since
 
 
 def _ran_here(since: "float | None", started_at: float, fallback: float = 0.0) -> bool:
@@ -274,7 +287,7 @@ def session_agents(session: dict) -> dict:
     if not d:
         return {"running": 0, "total": 0, "agents": [], "workflows": []}
     marks = _finished_marks(session)
-    since = _alive_since(session)
+    since = _since(session)
     alive = since is not None
     out: list[dict] = []
     for meta_path in glob.glob(os.path.join(d, "*.meta.json")):
@@ -335,7 +348,7 @@ def agent_activity(session: dict, agent_id: str, cursor: int = 0,
     except (OSError, json.JSONDecodeError):
         pass
     run = transcript_jsonl.parse_jsonl(jsonl, cursor, sidechain=True)
-    since = _alive_since(session)
+    since = _since(session)
     alive = _ran_here(since, _summary(jsonl)["started_at"])
     if workflow_id:                                       # status follows the run
         status = _run_status(_workflow_records(d).get(workflow_id, {}), alive)

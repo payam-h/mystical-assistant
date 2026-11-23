@@ -463,7 +463,7 @@ def test_runner_defers_limit_killed_streaming_turn():
     try:
         assert runner._maybe_auto_resume(job, "/tmp/lim", "opus", None) is True
         assert deferred == [((s["id"], CHAT, "/tmp/lim", "opus", None),
-                             {"slot": None})]
+                             {"slot": None, "reset_at": None})]
         assert len(notes) == 1 and "usage limit" in notes[0]
         assert runner._resume_fails.get(s["id"]) is None   # cap untouched
     finally:
@@ -810,6 +810,22 @@ def test_an_offer_rides_the_park_until_it_is_answered():
         assert limits.offer("s-ask", None) is True
         assert limits.parked()["s-ask"]["offer"] is None
         assert "s-ask" in limits.parked(), "waiting is still parked"
+    finally:
+        _reset_limits()
+        restore()
+
+
+def test_an_offers_why_rides_the_park_and_goes_with_the_answer():
+    """Auto-switch asking instead of moving says why on the chat's card too."""
+    _reset_limits()
+    restore = _usage(100, time.time() + 3600)
+    try:
+        limits.defer("s-why", CHAT, "/tmp/why")
+        why = "No account in Auto-switch has room, and Account 2 (85% left) is kept out of it."
+        limits.offer("s-why", [{"slot": 2, "label": "Account 2 (85% left)"}], why)
+        assert limits.parked()["s-why"]["why"] == why
+        limits.offer("s-why", None)
+        assert limits.parked()["s-why"]["why"] is None
     finally:
         _reset_limits()
         restore()

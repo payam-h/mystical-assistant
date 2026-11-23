@@ -288,3 +288,9 @@ def test_one_wait_at_a_time(repo, monkeypatch):
     selfupdate.after()
     assert len(starts) == 1
     selfupdate.after(cancel=True)
+
+
+def test_a_plugin_change_counts_as_bridge_code():
+    """fork: plugins load at boot, so a commit that only touches plugins/ must light ⟳."""
+    from bridge import selfupdate
+    assert "plugins/*.py" in selfupdate._PY and "plugins/*.json" in selfupdate._PY

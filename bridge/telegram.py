@@ -166,6 +166,18 @@ def _fold_code(md: str) -> str:
     return _FENCED.sub(fold, md)
 
 
+# A GitHub callout's marker (`> [!IMPORTANT]`, the to-do box an answer opens with)
+# is plain text to Telegram: it becomes the type's word in bold, in the same quote.
+# Fenced code, closed or still streaming in, keeps its text: a marker there is an example.
+_CALLOUT = re.compile(r"^(>[ \t]*)\[!(note|tip|important|warning|caution)\][ \t]*$", re.M | re.I)
+_CODE = re.compile(r"(```.*?(?:```|\Z))", re.S)
+
+
+def _callouts(md: str) -> str:
+    return "".join(p if i % 2 else _CALLOUT.sub(lambda m: f"{m[1]}**{m[2].upper()}**", p)
+                   for i, p in enumerate(_CODE.split(md)))
+
+
 def _plain(html_text: str) -> str:
     """Telegram HTML as the text it shows: what a refused message falls back to."""
     return _html.unescape(re.sub(r"<[^>]+>", "", html_text))
@@ -196,6 +208,8 @@ def _send(chat_id: int, text: str, reply_markup: dict | None = None, markdown: b
     silent: no sound or vibration. thread: the topic, in a private chat with
     threads (bridge/tgtopics.py)."""
     text = text or "(empty)"
+    if rich:
+        text = _callouts(text)
     base = {**({"disable_notification": "true"} if silent else {}),
             **({"message_thread_id": thread} if thread else {})}
     extra = {"reply_markup": json.dumps(reply_markup)} if reply_markup else {}
@@ -247,6 +261,7 @@ def draft(chat_id: int, draft_id: int, text: str, *, thread: "int | None" = None
     (10.3), which comes back as a stopped_message_generation update. Telegram
     keeps it 30 seconds unless it is sent again, and drops it when the bot sends
     a message. "" shows Telegram's "Thinking…". False when refused."""
+    text = _callouts(text)
     base = dict(chat_id=chat_id, draft_id=draft_id, can_stop="true",
                 **({"message_thread_id": thread} if thread and (chat_id, thread) not in gone_threads else {}))
     if text and config.TG_RICH and tg("sendRichMessageDraft",
@@ -288,13 +303,27 @@ def typing(chat_id: int):
     tg("sendChatAction", chat_id=chat_id, action="typing")
 
 
+# The update list the poll asks for. widget_query is newer than the rest: a refused poll
+# goes back to the old list for the life of the process, so a new type can't make the bot deaf.
+# shortcut: any 400 counts as that refusal, since Telegram's text for it was never seen;
+# match the text once a real refusal is logged.
+UPDATES = ["message", "callback_query", "stopped_message_generation", "widget_query"]
+_OLD_UPDATES = ["message", "callback_query", "stopped_message_generation"]
+_updates = UPDATES
+
+
 def get_updates(offset: int):
+    global _updates
     try:
         url = f"{config.API}/getUpdates?" + urlencode({
             "offset": offset, "timeout": config.POLL_TIMEOUT,
-            "allowed_updates": '["message","callback_query","stopped_message_generation"]',
+            "allowed_updates": json.dumps(_updates, separators=(",", ":")),
         })
         data = _api(url, timeout=config.POLL_TIMEOUT + 15)
+        if not data.get("ok") and data.get("error_code") == 400 and _updates != _OLD_UPDATES:
+            print(f"[telegram] getUpdates refused {_updates}, back to {_OLD_UPDATES}: "
+                  f"{data.get('description')}", file=sys.stderr)
+            _updates = _OLD_UPDATES
         return data.get("result", []) if data.get("ok") else []
     except Exception as e:  # noqa: BLE001
         # A long-poll that idles out is normal; urllib raises it bare or wrapped.

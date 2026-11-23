@@ -11,7 +11,8 @@ in the order a name is claimed:
   name; a subdirectory is organisation only (what the CLI does)
 - enabled plugins, as `plugin:name`: `~/.claude/plugins/installed_plugins.json`
   says where each is checked out, `enabledPlugins` in user + project settings
-  says which count; each contributes `skills/*` and `commands/*.md`
+  says which count; each contributes `skills/*`, the skill paths its
+  `.claude-plugin/plugin.json` lists, and `commands/*.md`
 - BUILTIN: the skills bundled inside the CLI binary. They can't be scanned, so
   this is a static list (see the note on it)
 
@@ -24,6 +25,7 @@ unreadable or malformed contributes nothing, never an error.
 import json
 import os
 
+from bridge import paths
 from bridge.skills import _front_matter
 
 USER_DIR = os.path.expanduser("~/.claude")
@@ -43,6 +45,9 @@ BUILTIN = (
     ("claude-api", "Claude API / Anthropic SDK reference — models, pricing, params, tool use"),
     ("fewer-permission-prompts", "Add a prioritized allowlist to settings from your transcripts"),
     ("update-config", "Configure the Claude Code harness via settings.json"),
+    # Not the CLI's: the bridge's own, answered before a prompt is sent
+    # (dashboard App.tsx, Mini App chat.tsx, the bot) — goals.set_by_user.
+    ("goal", "Keep this session working until <objective> is true; /goal alone clears it"),
 )
 _DESC_MAX = 200
 
@@ -55,20 +60,37 @@ def _read(path: str, n: int = 4096) -> str:
         return ""
 
 
+def _skill_at(d: str) -> "tuple[str, str] | None":
+    """(name, description) of the skill in directory d; front-matter name wins
+    over the directory, as the CLI resolves it."""
+    md = os.path.join(d, "SKILL.md")
+    if not os.path.isfile(md):
+        return None
+    fm = _front_matter(_read(md))
+    return fm.get("name") or os.path.basename(d), fm.get("description") or ""
+
+
 def _skills(root: str) -> "list[tuple[str, str]]":
-    """(name, description) for every `root/<dir>/SKILL.md`; front-matter name
-    wins over the directory, as the CLI resolves it."""
-    out = []
+    """(name, description) for every `root/<dir>/SKILL.md`."""
     try:
         names = sorted(os.listdir(root))
     except OSError:
-        return out
-    for n in names:
-        md = os.path.join(root, n, "SKILL.md")
-        if not os.path.isfile(md):
-            continue
-        fm = _front_matter(_read(md))
-        out.append((fm.get("name") or n, fm.get("description") or ""))
+        return []
+    return [s for n in names if (s := _skill_at(os.path.join(root, n)))]
+
+
+def _manifest_skills(path: str) -> "list[tuple[str, str]]":
+    """The skills a plugin's .claude-plugin/plugin.json lists on top of skills/*.
+    An entry is one skill's directory (Matt Pocock's pack names each
+    skills/<group>/<name>) or a directory of skills; one path or a list."""
+    m = _json(os.path.join(path, ".claude-plugin", "plugin.json"))
+    listed = m.get("skills") if isinstance(m, dict) else None
+    out = []
+    for p in [listed] if isinstance(listed, str) else listed if isinstance(listed, list) else []:
+        if isinstance(p, str):
+            d = os.path.normpath(os.path.join(path, p))
+            one = _skill_at(d)
+            out += [one] if one else _skills(d)
     return out
 
 
@@ -144,8 +166,12 @@ def available(abs_project: "str | None" = None) -> "list[dict]":
                         ("user", USER_DIR)):
         if root:
             sources.append((scope, _skills(os.path.join(root, "skills")) + _commands(os.path.join(root, "commands"))))
-    for short, path in _plugin_roots(abs_project):
-        found = _skills(os.path.join(path, "skills")) + _commands(os.path.join(path, "commands"))
+    roots = _plugin_roots(abs_project)
+    if paths.on():  # the bundled copy stands in for any installed one
+        roots = [r for r in roots if r[0] != "mattpocock-skills"] + [("mattpocock-skills", paths.PACK_DIR)]
+    for short, path in roots:
+        found = (_skills(os.path.join(path, "skills")) + _manifest_skills(path)
+                 + _commands(os.path.join(path, "commands")))
         sources.append(("plugin", [(f"{short}:{n}", d) for n, d in found]))
     sources.append(("builtin", list(BUILTIN)))
 

@@ -8,9 +8,18 @@ import tempfile
 import threading
 import time
 
+import pytest
+
 from bridge import plugins_ext
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+@pytest.fixture(autouse=True)
+def _tables():
+    """The session tests need the store's tables, whatever ran before this file."""
+    from bridge import store
+    store.init()
 
 
 def _mod():
@@ -222,7 +231,7 @@ def test_routes_and_manifest_through_the_loader(monkeypatch):
         assert man and man["origins"] == ("forge",) and man["pane"]["title"] == "FORGE"
         assert plugins_ext.start("orven-forge"), plugins_ext.broken("orven-forge")
         body, code = plugins_ext.dispatch("GET", "/plugin/orven-forge/state", {}, None, 555)
-        assert code == 200 and body["configured"] is False and body["slots"] == 1
+        assert code == 200 and body["configured"] is False and body["slots"] == 16
         assert "no agent token" in plugins_ext.on_command(555, "/forge")
     finally:
         plugins_ext.stop_all()
@@ -239,3 +248,161 @@ def test_one_shots_carry_the_internal_tag_so_the_scanner_skips_them(monkeypatch)
     assert out.result == "ok" and seen["prompt"] == f"{native.INTERNAL_ONESHOT_TAG}\njudge these"
     assert seen["kw"]["skip_pack"] is True and seen["kw"]["cwd"] == "/tmp/w"
     assert native._is_internal_oneshot(seen["prompt"])
+
+
+def _profiles(monkeypatch, rows, usable=(1, 2)):
+    """Two Claude logins as bridge profiles, without touching the profiles file."""
+    from bridge import profiles
+    monkeypatch.setattr(profiles, "all_profiles", lambda: rows)
+    monkeypatch.setattr(profiles, "claude_slot_usable", lambda slot: slot in usable)
+    monkeypatch.setattr(profiles, "default_profile", lambda: rows[0]["id"] if rows else None)
+
+
+_TWO = [{"id": "p_a", "name": "a@x.com", "agent": "claude", "account": "1"},
+        {"id": "p_b", "name": "b@x.com", "agent": "claude", "account": "2"}]
+
+
+def test_the_picked_profile_runs_both_kinds_of_task(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config, runner, store
+    monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
+    _profiles(monkeypatch, _TWO)
+    p = _plugin(m, [], [])
+    assert p._account()["name"] == "a@x.com" and p._account()["slot"] == 1        # blank = the default profile
+    p.ctx._s["FORGE_PROFILE"] = "p_b"
+    acc = p._account()
+    assert (acc["profile"], acc["name"], acc["slot"], acc["problem"]) == ("p_b", "b@x.com", 2, None)
+    seen = {}
+    monkeypatch.setattr(runner, "run_blocking", lambda chat, prompt, **kw: seen.update(kw) or ("ok", "sid", 0.001, False))
+    p._run_once("judge", str(tmp_path), "haiku", "bypassPermissions", 60)
+    assert seen["account_slot"] == 2                                               # a one-shot follows it too
+    made = {}
+    monkeypatch.setattr(store, "create_session", lambda *a, **kw: made.update(kw) or {"id": "s1"})
+    monkeypatch.setattr(store, "set_run_settings", lambda *a, **kw: None)
+    monkeypatch.setattr(store, "rename", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "start_streaming_job", lambda *a, **kw: "job")
+    assert p._start_session("translate", str(tmp_path), None, "bypassPermissions", "", "forge:srt", 60) == "job"
+    assert made["profile_id"] == "p_b"
+
+
+def test_an_unusable_pick_stops_claiming_instead_of_falling_back(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config
+    monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
+    _profiles(monkeypatch, _TWO, usable=(1,))
+    calls = []
+    p = _plugin(m, calls, [{"task": {"id": "t1"}, "job": {"templateKey": "x", "slot": 0}}])
+    p.ctx._s["FORGE_PROFILE"] = "p_b"
+    assert p.claim_once() == "error" and "b@x.com cannot run" in p.last_error
+    assert not any(c[0].endswith("/agent/claim") for c in calls)                   # Forge was never asked
+    p.ctx._s["FORGE_PROFILE"] = "p_gone"
+    assert p.claim_once() == "error" and "gone" in p.last_error
+    p.ctx._s["FORGE_PROFILE"] = "p_a"
+    p.run_once = lambda *a: m.OneShot("done", "sid", 0.0, False)
+    assert p.claim_once() == "claimed" and p.last_error is None
+
+
+def test_usage_is_tallied_per_account_and_survives_a_restart(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config
+    monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
+    _profiles(monkeypatch, _TWO)
+    p = _plugin(m, [], [])
+    for pid, status, cost in (("p_a", "ok", 0.01), ("p_a", "failed", 0.02), ("p_b", "ok", 0.5)):
+        p.ctx._s["FORGE_PROFILE"] = pid
+        run = m.Run("task-" + pid, {"templateKey": "comment-moderation"}, 0, str(tmp_path))
+        run.account = p._account()["name"]
+        p._remember(run, status, "", cost)
+    rows = {r["name"]: r for r in p._view()["usage"]}
+    assert rows["a@x.com"]["today"] == {"runs": 2, "failed": 1, "cost": 0.03, "seconds": 0}
+    assert rows["b@x.com"]["all"]["runs"] == 1 and rows["b@x.com"]["week"]["cost"] == 0.5
+    assert p.recent[0]["account"] == "b@x.com"
+    again = m.Plugin()
+    again.ctx = p.ctx
+    again._load_usage()
+    assert again._usage_view() == p._usage_view()
+    view = p._view()["account"]
+    assert view["picked"] == "p_b" and [o["id"] for o in view["options"]] == ["p_a", "p_b"] and "slot" not in view
+
+
+def test_the_account_route_saves_the_pick_and_refuses_unknown_profiles(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config
+    monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
+    _profiles(monkeypatch, _TWO)
+    p = _plugin(m, [], [])
+    saved = {}
+    monkeypatch.setattr(plugins_ext, "save_settings", lambda pid, values: (saved.update(values), p.ctx._s.update(values)))
+    post = p.routes()[("POST", "/account")]
+    body, code = post({"body": {"profile": "p_b"}})
+    assert code == 200 and saved == {"FORGE_PROFILE": "p_b"} and body["account"]["name"] == "b@x.com"
+    assert post({"body": {"profile": "p_nope"}})[1] == 400
+    body, code = post({"body": {"profile": ""}})
+    assert code == 200 and saved == {"FORGE_PROFILE": ""}
+    assert "FORGE_PROFILE" in {s["key"] for s in json.load(open(os.path.join(HERE, "plugins", "orven-forge", "plugin.json")))["settings"]}
+
+
+def test_slots_follow_the_forge_panel_under_the_local_cap():
+    m = _mod()
+    calls = []
+    p = _plugin(m, calls, [], settings={"FORGE_URL": "https://forge.test", "FORGE_AGENT_TOKEN": "tok"})
+    assert p._slots() == m.MAX_SLOTS == 16 and p._headers()["x-agent-slots"] == "16"   # blank: offer the ceiling
+    p.http = lambda *a, **k: (200, {"ok": True, "queued": 0, "slots": 6})
+    p.beat()
+    assert p.device_slots == 6 and p._slots() == 6 and p._headers()["x-agent-slots"] == "16"
+    p.ctx._s["FORGE_SLOTS"] = "3"                                                         # a local cap still wins
+    assert p._slots() == 3 and p._headers()["x-agent-slots"] == "3"
+    p.http = lambda *a, **k: (200, {"ok": True, "queued": 0})                             # an older Forge says nothing
+    p.device_slots = None
+    p.ctx._s["FORGE_SLOTS"] = ""
+    p.beat()
+    assert p._slots() == 16
+    assert len(m.SLOT_NAMES) == m.MAX_SLOTS
+
+
+def test_one_shots_leave_no_transcript_and_sessions_are_archived(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config, runner, store
+    monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
+    p = _plugin(m, [], [])
+    seen = {}
+    monkeypatch.setattr(runner, "run_blocking", lambda chat, prompt, **kw: seen.update(kw) or ("ok", "sid", 0.0, False))
+    p._run_once("judge", str(tmp_path), "haiku", "bypassPermissions", 60)
+    assert seen["extra_args"] == ["--no-session-persistence"]
+    monkeypatch.setattr(runner, "start_streaming_job", lambda *a, **kw: "job")
+    p._start_session("translate", str(tmp_path), None, "bypassPermissions", "", "forge:srt", 60)
+    made = [s for s in store.list_sessions_all(config.DASH_CHAT_ID, include_archived=True, max_age_secs=None)
+            if s.get("origin") == "forge:srt"]
+    assert made and all(s["archived"] for s in made)
+
+
+def test_old_forge_sessions_are_archived_at_start(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config, store
+    s = store.create_session(config.DASH_CHAT_ID, "/.forge/anvil", origin="forge:news-article", cwd=str(tmp_path))
+    other = store.create_session(config.DASH_CHAT_ID, "/proj", origin="dashboard", cwd=str(tmp_path))
+    p = m.Plugin()
+    p.ctx = FakeCtx({})
+    p._tidy_sessions()
+    assert store.get_session(s["id"])["archived"] == 1 and store.get_session(other["id"])["archived"] == 0
+
+
+def test_claim_all_fills_every_free_slot_in_one_tick(monkeypatch, tmp_path):
+    m = _mod()
+    from bridge import config
+    monkeypatch.setattr(config, "BASE_PATH", str(tmp_path))
+    gate = threading.Event()
+    answers = [{"task": {"id": f"t{i}"}, "job": {"templateKey": "comment-moderation", "slot": i}} for i in range(5)]
+    calls = []
+    p = _plugin(m, calls, answers, settings={"FORGE_URL": "https://forge.test", "FORGE_AGENT_TOKEN": "tok", "FORGE_SLOTS": "3"})
+    p.run_once = lambda *a: (gate.wait(5), m.OneShot("done", "sid", 0.0, False))[1]
+    assert p.claim_all() == 3                                   # stops at full, not after one
+    assert sum(c[0].endswith("/agent/claim") for c in calls) == 3
+    gate.set()
+    for _ in range(100):
+        if not p.runs:
+            break
+        time.sleep(0.02)
+    assert p._wake.is_set()                                     # a finished task wakes the loop
+    assert p.claim_all() == 2                                   # the last two, then the queue is empty
+    assert p.claim_all() == 0

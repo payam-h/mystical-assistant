@@ -6,12 +6,13 @@ import { bannerActions, bannerAnswer } from "../../lib/banner";
 import { openSettings } from "../../lib/opensettings";
 import { RivendellIcon } from "../../lib/rivendellicon";
 import {
-  ago, badge, cardFor, chipCount, freshSince, groupBySubject, isQuiet, matches, needMatches, popFor, safeUrl, sectionOf,
-  type Filter, type Row,
+  ago, badge, cardFor, chipCount, freshSince, groupBySubject, isQuiet, liveToasts, matches, needMatches, popFor, safeUrl, sectionOf,
+  stillWaits, type Filter, type Row,
 } from "../../lib/notices";
 import { ProjectTile } from "../ui/ProjectTile";
 import { useIntegrations } from "../../lib/integrations";
 import { useStyle } from "../../lib/stylerun";
+import { keyAttrs, SHORTCUTS } from "../../lib/shortcuts";
 
 /* The bell, its toasts and the pills (docs/superpowers/specs/notifications.md).
  *
@@ -113,6 +114,8 @@ export function setNeeds(n: Need[] | undefined) { needs = n ?? []; emit(); }
 /** The Rivendell connections, for the RIVENDELL filter's link bar. */
 export function setLinks(l: RivendellInstance[]) { links = l; emit(); }
 const subscribe = (fn: () => void) => { subs.add(fn); return () => { subs.delete(fn); }; };
+/** The NEEDS YOU list as it stands, re-rendering on every poll (the WORK panel's Needs you). */
+export const useNeeds = () => useSyncExternalStore(subscribe, () => needs);
 
 // ---- copy and colour ------------------------------------------------------------
 
@@ -333,7 +336,7 @@ function useStylingProgress(): number | null {
 const CURSOR_KEY = "hud-notice-cursor";
 const NEWS_MS = 8000;
 const NEEDS_MS = 30000;
-interface Toast { n: Notice; until: number; left: number; paused: boolean }
+interface Toast { n: Notice; until: number; left: number; paused: boolean; seen: boolean }   // seen: its ask has been on the needs list
 
 const ICON = (
   <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -423,7 +426,7 @@ export function NotificationCenter() {
         const rank = (x: Toast) => (x.n.tier === "needs" ? 0 : 1);
         setToasts((p) => [...fresh.reverse().map((n) => {
           const ms = n.tier === "needs" ? NEEDS_MS : NEWS_MS;
-          return { n, until: t + ms, left: ms, paused: false };
+          return { n, until: t + ms, left: ms, paused: false, seen: stillWaits(n, needs) };
         }), ...p].sort((a, b) => rank(a) - rank(b)));
       }
     } catch (e) {
@@ -446,6 +449,14 @@ export function NotificationCenter() {
     }, 250);
     return () => window.clearInterval(id);
   }, [toasts.length]);
+  // An answered ask takes its toast with it: answered anywhere in this page
+  // (api.respond), at once; anywhere else, when the needs list stops listing it.
+  useEffect(() => setToasts((p) => liveToasts(p, liveNeeds)), [liveNeeds]);
+  useEffect(() => {
+    const on = (e: Event) => setToasts((p) => p.filter((t) => t.n.meta.request_id !== (e as CustomEvent<string>).detail));
+    window.addEventListener("hud:answered", on);
+    return () => window.removeEventListener("hud:answered", on);
+  }, []);
   useEffect(() => { if (open) setNow(Date.now() / 1000); }, [open, feed]);
   // The session you're looking at: its news is read, however you got there — the
   // same rule that keeps it from popping (popFor). Every poll brings a new `feed`.
@@ -501,7 +512,8 @@ export function NotificationCenter() {
   return (
     <span ref={wrapRef} style={{ position: "relative", flex: "none", display: "flex" }}>
       <button className={`ntf-bell${open ? " on" : ""}`} onClick={() => (open ? close() : setOpen(true))}
-        title={b.kind === "count" ? `${b.n} waiting on you` : "notifications"} aria-label="notifications">
+        title={b.kind === "count" ? `${b.n} waiting on you` : "notifications"} aria-label="notifications"
+        {...(b.kind === "count" ? keyAttrs(SHORTCUTS.needs.keys) : {})}>
         {ICON}
         {b.kind === "count" && <span className="ntf-badge">{b.n > 9 ? "9+" : b.n}</span>}
         {b.kind === "dot" && <span className="ntf-dot" />}

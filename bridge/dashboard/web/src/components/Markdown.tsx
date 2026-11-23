@@ -1,4 +1,4 @@
-import { cloneElement, createContext, isValidElement, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -6,11 +6,15 @@ import { Check, Copy, Play } from "lucide-react";
 import { selectionMd } from "../lib/selmd";
 import { tokenize, type Tok } from "../lib/hl";
 import { parseFileRef } from "../lib/filepath";
+import { ADMONITION_RE, stripMarker } from "../lib/admonition";
+import { isFactList, LEAD_RE } from "../lib/facts";
 import { FileIcon } from "../lib/fileicon";
 import { widgetLang, widgetValue } from "../lib/widgetblock";
+import { mermaidFlow } from "../lib/mermaid";
 import { collapseProgress, type Progress } from "../lib/progressline";
 import type { ToolStyle } from "../lib/toolwidget";
 import { BlockWidget, drawWidget } from "./ResultWidgets";
+import { Flow } from "./DataView";
 import { MdImage, MdLinked, MdTyped } from "./MdImage";
 import { useMultiOn } from "../lib/multistore";
 import { stripViews } from "../lib/dataview";
@@ -147,33 +151,13 @@ function ProgressBlock({ rows }: { rows: (string | Progress)[] }) {
  *  them unbidden — ask for them in a prompt or a skill — but our own reports and
  *  plenty of pasted README content do. */
 const ADMONITIONS: Record<string, { label: string; color: string }> = {
-  note: { label: "NOTE", color: "var(--acc)" },
-  tip: { label: "TIP", color: "var(--ok)" },
-  important: { label: "IMPORTANT", color: "var(--purple)" },
-  warning: { label: "WARNING", color: "var(--warn)" },
-  caution: { label: "CAUTION", color: "var(--err)" },
+  note: { label: "Note", color: "var(--acc)" },
+  tip: { label: "Tip", color: "var(--ok)" },
+  // What a reply asks you to do (the bridge's IMPORTANT box): it waits on you, so the ask colour.
+  important: { label: "For you", color: "var(--ask, var(--warn))" },
+  warning: { label: "Warning", color: "var(--warn)" },
+  caution: { label: "Caution", color: "var(--err)" },
 };
-const ADMONITION_RE = /^\s*\[!(note|tip|important|warning|caution)\]\s*\n?/i;
-
-/** A bold that is really a label: short, one line, ending in a colon. */
-const LEAD_RE = /^[^\n]{2,24}:$/;
-
-/** The same tree with the `[!NOTE]` marker cut out of its first text node. The
- *  marker is always the leading text of the leading paragraph, so only the first
- *  branch needs rewriting. */
-function stripMarker(node: unknown): unknown {
-  if (typeof node === "string") return node.replace(ADMONITION_RE, "");
-  if (Array.isArray(node)) {
-    const i = node.findIndex((n) => n !== null && n !== undefined && n !== "");
-    return i < 0 ? node : node.map((n, k) => (k === i ? stripMarker(n) : n));
-  }
-  if (isValidElement(node)) {
-    const props = node.props as { children?: unknown };
-    if (props.children === undefined) return node;
-    return cloneElement(node, undefined, stripMarker(props.children) as ReactNode);
-  }
-  return node;
-}
 
 /** Opening a file from prose: the path, the line it named, and where on screen
  *  the link sits (so an ambiguous name can be asked about in place). */
@@ -201,6 +185,8 @@ function FileRefSpan({
       }}
       title={`Open ${path}${line ? ` at line ${line}` : ""}`}
       className="md-fileref"
+      // App's right-click menu: Show in Finder, once the path is found in the session's tree
+      data-ctx-type="file" data-ctx-id={path} data-ctx-label={label}
     >
       <FileIcon name={path} size={13} />
       <code>{label}</code>
@@ -269,6 +255,8 @@ export const Markdown = memo(function Markdown({
               {children}
             </strong>
           ),
+          // Every item opens with a label ("**Merge:** …"): the answer card draws it as rows (lib/facts).
+          ul: ({ node, ...props }) => <ul className={node && isFactList(node) ? "md-facts" : undefined} {...props} />,
           // A wide table used to push the whole transcript column sideways.
           // It scrolls in its own box instead — GitHub's rule, and the one the
           // Mini App already had.
@@ -288,8 +276,8 @@ export const Markdown = memo(function Markdown({
               </blockquote>
             );
             return (
-              <div className="md-admonition" style={{ ["--adm" as string]: spec.color }}>
-                <div className="md-admonition-label">{spec.label}</div>
+              <div className="md-admonition" data-kind={kind} style={{ ["--adm" as string]: spec.color }}>
+                <div className="md-admonition-label caps">{spec.label}</div>
                 {stripMarker(children) as ReactNode}
               </div>
             );
@@ -328,6 +316,12 @@ export const Markdown = memo(function Markdown({
             // ```widget:table — the tag arrives verbatim from remark.
             const lang = /language-([\w:+-]+)/.exec(el?.props?.className ?? "")?.[1] ?? "";
             const code = textOf(el?.props?.children).replace(/\n$/, "");
+            // A Mermaid flowchart, drawn as show_data's flow (lib/mermaid). One it can't
+            // read, or another kind of diagram, stays the code block below.
+            if (lang.toLowerCase() === "mermaid") {
+              const flow = mermaidFlow(code);
+              if (flow) return <div className="dv" data-view="diagram"><Flow ev={flow} full={false} /></div>;
+            }
             // A typed block the model drew on purpose (lib/widgetblock). Every
             // step here can decline — an unknown type, a body still streaming
             // in, a payload that isn't the shape its type promised — and each
@@ -347,6 +341,20 @@ export const Markdown = memo(function Markdown({
             return <CodeBlock code={code} lang={lang} />;
           },
   }), [multiOn, typed, toolStyle, onOpenFile]);
+  // --- fork: perf --- react-markdown parses on every render it gets, so the
+  // parsed tree is kept until what it parses changes. A new className or a new
+  // onOpenFile function (latestOpen above still takes it) re-renders this
+  // wrapper, but hands React the same element, which it skips: the parse was
+  // ~40% of the window's CPU while a long session was open.
+  const parsed = useMemo(() => (
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, ...(breaks ? [remarkBreaks] : []), remarkEmbedAddress, ...(multiOn && !typed ? [remarkFileRefs] : [])]}
+        components={components}
+      >
+        {typed ? children : stripViews(children)}
+      </ReactMarkdown>
+  ), [children, breaks, typed, multiOn, components]);
+  // --- /fork ---
   return (
     <div
       className={`md ${className}`}
@@ -361,12 +369,7 @@ export const Markdown = memo(function Markdown({
     >
       <RefView.Provider value={onOpenFile}>
       <MdTyped.Provider value={typed}>
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, ...(breaks ? [remarkBreaks] : []), remarkEmbedAddress, ...(multiOn && !typed ? [remarkFileRefs] : [])]}
-        components={components}
-      >
-        {typed ? children : stripViews(children)}
-      </ReactMarkdown>
+      {parsed}
       {multiOn && !typed ? <RefImages text={children} /> : null}
       </MdTyped.Provider>
       </RefView.Provider>

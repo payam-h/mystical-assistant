@@ -29,7 +29,7 @@ os.environ.setdefault("BRIDGE_DB", os.path.join(tempfile.mkdtemp(), "t.db"))
 
 import pytest  # noqa: E402
 
-from bridge import device_share, device_side, device_view, integrations, rivendell, rivendell_jobs, wsutil  # noqa: E402
+from bridge import config, device_share, device_side, device_view, integrations, rivendell, rivendell_jobs, wsutil  # noqa: E402
 
 _real_ack = rivendell.Worker._ack
 
@@ -1779,6 +1779,26 @@ def test_runs_carry_their_kinds_timeout_as_the_hang_timeout(monkeypatch):
     assert started == [7200, 900]
 
 
+def test_a_review_leaves_no_pr_branch_behind(monkeypatch):
+    """A review runs in the repo's own checkout, and fetching the PR into a pr-<n>
+    branch to read it left that copy in every branch list. The run is told not to
+    branch, and a copy made anyway goes once it ends (git.drop_pr_copy)."""
+    from bridge import git
+    w = _worker()
+    prompts, dropped = [], []
+    monkeypatch.setattr(w, "_find_checkout", lambda slug: "/repo")
+    monkeypatch.setattr(w, "_fetch_prompt", lambda kind_path, rid: {
+        "prompt": "You are an experienced software engineer performing a code review for the team.\n\n"
+                  "Pull request: Fix it\nPull request URL: https://github.com/acme/app/pull/31\n"})
+    monkeypatch.setattr(w, "_start_run", lambda prompt, workdir, hang_timeout=None:
+                        prompts.append(prompt) or _StubJob("done", result="ok"))
+    monkeypatch.setattr(w, "_post_result", lambda *a: None)
+    monkeypatch.setattr(git, "drop_pr_copy", lambda cwd, n: dropped.append((cwd, n)))
+    w._run_review("r1", "acme/app")
+    assert "no new branch" in prompts[0]
+    assert dropped == [("/repo", 31)]
+
+
 def test_watchdog_honours_the_jobs_own_hang_timeout():
     from bridge import runner
 
@@ -2282,6 +2302,36 @@ def test_tasks_names_the_session_running_a_request_here(workers):
 def test_tasks_with_no_running_instance_says_so(workers):
     assert rivendell.tasks("acme/app") == {
         "instances": 0, "projects": [], "tasks": [], "errors": [], "links": []}
+
+
+def test_everywhere_asks_each_projects_first_repo_and_says_where_it_is_cloned(workers, monkeypatch):
+    calls = []
+    projects = [{"id": "p1", "name": "Rivendell", "repositories": ["ainurdev/rivendell", "ainurhq/rivendell"]},
+                {"id": "p2", "name": "No repo", "repositories": []},
+                {"id": "p3", "name": "Osanwe", "repositories": ["ainurdev/osanwe"]}]
+
+    def api(path, payload=None):
+        calls.append(path)
+        if path == "/plugin/projects":
+            return projects
+        slug = path.split("=", 1)[1]
+        return {"projects": [{"id": slug}], "tasks": [{"id": "t-" + slug, "name": slug, "implementation": None}]}
+    w = _worker(id="a")
+    w._api = api
+    workers["a"] = w
+    monkeypatch.setattr(rivendell, "_every", {"at": 0.0, "projects": []})
+    monkeypatch.setattr(rivendell, "_checkout_cache", {"ainurhq/rivendell": os.path.join(config.BASE_PATH, "ainurhq/rivendell")})
+    monkeypatch.setattr(rivendell, "_checkout_cache_at", 1e18)    # fresh: no rescan
+
+    out = rivendell.everywhere()
+
+    assert calls == ["/plugin/projects", "/plugin/tasks?repository=ainurdev/rivendell",
+                     "/plugin/tasks?repository=ainurdev/osanwe"]
+    assert {t["id"]: t["project_dir"] for t in out["tasks"]} == {
+        "t-ainurdev/rivendell": "/ainurhq/rivendell", "t-ainurdev/osanwe": None}
+    calls.clear()
+    rivendell.everywhere()                       # the project list is cached; the tasks are not
+    assert "/plugin/projects" not in calls and len(calls) == 2
 
 
 def test_implement_asks_the_instance_to_create_the_request(workers):

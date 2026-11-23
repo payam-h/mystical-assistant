@@ -10,6 +10,13 @@ in the bridge is visible and stoppable from one place. Either way the switch is
 in the dashboard's AI tab instead of an env var only whoever deployed the bridge
 can reach. A feature's own UI is hidden while its switch is off.
 
+The skill router (bridge/route.py) is the exception: it picks with rules and spends
+no model budget, and is listed so that each piece of it can be turned off on its
+own. Those pieces name the router as their `parent`, and ship ON because they do
+nothing until it is switched on. REVIEW AFTER MERGE does spend budget (a council
+run per merged set) and ships ON all the same, the user's choice on 2026-11-11: its
+parent is TICKETS, which ships OFF, so an untouched install still spends nothing.
+
 Precedence is `ladder.default_policy`'s: the persisted setting wins; with none,
 the environment setting (config.*) decides; with neither, off. Persisting next to
 the DB rather than in it keeps this readable by a bridge whose store is mid-
@@ -36,6 +43,9 @@ from bridge import config
 #           the other tool-using run, scaled down for haiku and a shorter leash.
 # about  -- the paragraph under the switch: what it does, and what appears in the
 #           dashboard once it is on (each feature's UI is hidden while it is off)
+# parent -- optional: the key of the feature this is a sub-switch of. It is shown, and
+#           obeyed by whoever reads it (the dashboard, /local/route), only while the
+#           parent is on; enabled() answers for the switch itself, parent or not.
 FEATURES = (
     {"key": "title", "env": "TITLE_ENABLE", "label": "AUTO TITLES",
      "hint": "names a session from its first exchange",
@@ -200,6 +210,94 @@ FEATURES = (
               "checkout's own work) still pays one call. A call that fails (a login at its "
               "limit) is asked again hourly for a week, and its row is rewritten in place. "
               "Off, the bullets are read from the commit subjects instead."},
+    {"key": "router", "env": "ROUTER_ENABLE", "label": "SKILL PATHS",
+     "hint": "gives every prompt a path through Matt Pocock's skills, bundled in Mystical",
+     "cost": "~300 tokens in every run's system prompt",
+     "tokens": "~300 tokens a run",
+     "about": "Matt Pocock's skills ship bundled with Mystical, so every project has them. "
+              "Rules (no model call) read a prompt first and draw the skill that fits in "
+              "front of it, with one line saying why; when no rule fits, Claude picks the "
+              "path itself. The FLOW tab shows where a session is on its path, and the "
+              "next steps can start by themselves (AUTO NEXT STEPS). Ignore a suggestion "
+              "and the prompt goes as typed; a command AUTO PICKS put in front is sent "
+              "with it, unless Esc takes it out, and then that prompt goes with a line "
+              "saying no path. Costs about 300 tokens in every run's system prompt. Off, "
+              "nothing is drawn or inserted, and the switches under this one are hidden."},
+    {"key": "autopick", "env": "ROUTER_AUTO", "label": "AUTO PICKS",
+     "parent": "router",
+     "hint": "five safe commands go in front without a tap",
+     "cost": "no extra call",
+     "tokens": "0 (rules only)",
+     "about": "/grill-with-docs, /diagnosing-bugs, /research, /prototype and /tdd stay in "
+              "this session and leave nothing but local files, so they are cheap to be "
+              "wrong about. On a session's first prompt, or right after a flow step ended, "
+              "they go in front of your text by themselves, and Esc takes them out "
+              "before you send. Every other command is an outlined suggestion that Tab takes. "
+              "Off, those five are outlined suggestions too."},
+    {"key": "nextstep", "env": "ROUTER_NEXT", "label": "AUTO NEXT STEPS",
+     "parent": "router",
+     "hint": "a step starts by itself when the last one ends",
+     "cost": "a normal turn per step",
+     "tokens": "a normal run per step",
+     "about": "On, when a step of a path ends by calling StepDone, the next step starts by "
+              "itself as a queued turn in the same session. Off, the empty prompt box "
+              "offers the next step as a ghost suggestion and Tab takes it, as before. A "
+              "turn that failed or is still running starts or offers nothing."},
+    {"key": "ticketruns", "env": "TICKET_RUNS", "label": "PARTS",
+     "parent": "router",
+     "hint": "approved parts build as sessions, all ready ones at once, merged at the end",
+     "cost": "one session per part",
+     "tokens": "a normal run per part",
+     "about": "Once you approve the parts /to-tickets wrote, each one builds in a session "
+              "of its own, in its own worktree on a branch off the feature branch, every ready "
+              "one at once, and a part waits until the ones blocking it are done. When the last "
+              "one is done, one session merges them all onto the feature branch. Off, the "
+              "flow stops once the parts are written."},
+    {"key": "ticketapprove", "env": "TICKET_APPROVE", "label": "APPROVE BEFORE BUILD",
+     "parent": "ticketruns",
+     "hint": "parts wait for your tap before any session starts",
+     "cost": "no extra call",
+     "tokens": "0",
+     "about": "Off, BUILD starts as soon as /to-tickets has written the parts (the skill is "
+              "meant to ask you first, but can skip it). On, the parts show their breakdown in "
+              "the card above its chat's prompt box and waits for Approve & build before any branch, worktree or "
+              "session is made."},
+    {"key": "mergereview", "env": "MERGE_REVIEW", "label": "REVIEW AFTER MERGE",
+     "parent": "ticketruns",
+     "hint": "the council reads the merged work before RETRO",
+     "cost": "one council run per merged set",
+     "tokens": "the merged diff per reviewer and round, and the fix turns",
+     "about": "On, once the merge session has merged every part, the council reads the "
+              "merged branch there, with its own settings (bar, rounds, reviewers), and the "
+              "merge session fixes what it finds. FLOW shows this as REVIEW. When the "
+              "council passes, RETRO starts. When it stops without passing, "
+              "RETRO does not start and you get Council needs you: go on from the merge "
+              "session's COUNCIL tab, or press Skip on REVIEW in FLOW to take the work as it "
+              "stands. If a push would send nothing, or you merged the parts by hand, the "
+              "step is passed over. Off, RETRO follows MERGE."},
+    {"key": "smartzone", "env": "ROUTER_ZONE", "label": "SMART ZONE",
+     "parent": "router",
+     "hint": "marks 150k tokens and offers /compact first past it",
+     "cost": "no extra call",
+     "tokens": "0 (rules only)",
+     "about": "Matt's rule: past about 150k tokens of context, /compact at a phase "
+              "boundary, never in the middle of one. The context meter gets a mark at 150k "
+              "that warms once you cross it, and when a flow step ends past the mark, the "
+              "next step is preceded by /compact, told to keep the decisions so far. A step "
+              "that opens a fresh session skips it, since that starts clean. Off, no mark "
+              "and no /compact offer."},
+    {"key": "grillcards", "env": "GRILL_CARDS", "label": "GRILL AS CARDS",
+     "hint": "a grilling skill asks each round as one card",
+     "cost": "no extra call, one line in every run's system prompt",
+     "tokens": "~40 tokens a run",
+     "about": "The bridge's prompt asks for one decision at a time, which fights a grilling "
+              "skill's rounds of questions. On, every run carries one more constant line: "
+              "when grill-with-docs, grill-me or grilling runs, ask each round as one "
+              "AskUserQuestion card, up to 4 questions, the recommended answer first, "
+              "worded so yes takes it. That is taps instead of typing, which suits a "
+              "phone. It shapes any grilling run, typed or routed, so it stands apart from "
+              "SKILL PATHS. Off, the line is left out and a skill asks its rounds its own "
+              "way."},
 )
 
 _KEYS = {f["key"] for f in FEATURES}

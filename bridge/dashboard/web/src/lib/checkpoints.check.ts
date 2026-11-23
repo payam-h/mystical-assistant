@@ -3,7 +3,7 @@
 // the turn they carry on, each turn outlined from its events when the chat has
 // them and from the bridge's summary when it doesn't.
 import type { Turn } from "../chat.ts";
-import { fmtElapsed, resumeOf, timeSplit, toolName, turnRows } from "./checkpoints.ts";
+import { CONTINUED, fmtElapsed, RESTART_NUDGE, resumeOf, turnRows } from "./checkpoints.ts";
 
 const ok = (cond: boolean, what: string) => {
   if (!cond) throw new Error(`FAIL: ${what}`);
@@ -25,6 +25,12 @@ eq(resumeOf(RESTART), "restart", "a bridge-restart nudge");
 eq(resumeOf(ERROR), "error", "an error nudge");
 eq(resumeOf("⏮ go on"), "error", "any other ⏮ nudge reads as an error resume");
 eq(resumeOf("go"), null, "your own words are not a resume");
+eq(resumeOf(CONTINUED), "restart", "Claude Code carrying a cut turn on is a restart resume (recovery.CONTINUED)");
+eq(RESTART_NUDGE, RESTART, "Carry on sends recovery.NUDGE word for word");
+{
+  const rows = turnRows([turn("a", "bump the pin"), turn("b", CONTINUED, { started: 1500 })]);
+  eq([rows.length, rows[0].resumes], [1, ["restart"]], "a carried-on turn folds into the turn it carries on");
+}
 
 // --- numbering and folding ----------------------------------------------------
 {
@@ -79,6 +85,17 @@ eq(resumeOf("go"), null, "your own words are not a resume");
     { kind: "steer", turnId: "a", key: "steer3", label: "also mobile" },
     { kind: "question", turnId: "a", key: "q2", label: "Push", pick: null, note: null, open: true },
   ], "asks carry your pick, steers their index, the open one is open");
+}
+{
+  // A reply opens with what only you can do: the row names the answer under the box.
+  const [a, b] = turnRows([
+    turn("a", "is there a tool?", { events: [{ type: "result", cost: 0, elapsed: 3,
+      result: "> [!IMPORTANT]\n> - Press ⟳ on the right rail.\n\nYes, there's a **tool**.\nMore." }] }),
+    turn("b", "carry on", { started: 2000, events: [{ type: "result", cost: 0, elapsed: 1,
+      result: "> [!IMPORTANT]\n> - Log in to GitHub." }] }),
+  ]);
+  eq([a.answer, b.answer], ["Yes, there's a tool.", "Log in to GitHub."],
+    "the answer under a to-do box, or its first to-do when the box is all there is");
 }
 
 // --- outline from the bridge's summary ----------------------------------------
@@ -160,16 +177,3 @@ eq(turnRows([turn("a", "  two\n\nlines  ")])[0].prompt, "two lines", "a prompt r
 
 // --- durations ------------------------------------------------------------------
 eq([fmtElapsed(31), fmtElapsed(1172), fmtElapsed(4787)], ["31s", "19m 32s", "1h 19m"], "an hour rolls over");
-
-// --- the TIME dock ----------------------------------------------------------------
-{
-  const spend = (union_s: number, calls = 1) => ({ calls, union_s, naive_s: union_s, avg_s: union_s / calls, unfinished: 0 });
-  const t = timeSplit({
-    wall: 600, thinking_s: 200, waiting_s: 50, model_s: 150, tokens: null, capped: 0, turns: 2,
-    tools: { Read: spend(5, 3), Bash: spend(120, 9), mcp__playwright__browser_click: spend(60), Edit: spend(1, 2) },
-  }, 2);
-  eq(t.tools.map((x) => x.name), ["Bash", "playwright · browser_click"], "tools rank by real time, MCP names shortened");
-  eq([t.rest, t.restSecs], [2, 6], "the tools past the top fold into a count and a sum");
-  eq(t.kinds.map((k) => [k.k, k.secs]), [["think", 200], ["gen", 150], ["tools", 186], ["you", 50]], "four kinds, tools summed");
-}
-eq([toolName("Bash"), toolName("mcp__verify__Attach"), toolName("mcp__goals__List__x")], ["Bash", "verify · Attach", "goals · List__x"], "an MCP name splits on its first __ pair");

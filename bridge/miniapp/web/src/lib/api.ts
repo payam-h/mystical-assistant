@@ -369,7 +369,17 @@ export type RunEvent =
   | { type: "result"; result: string; cost: number; elapsed: number }
   | { type: "error"; message: string }
   | { type: "stopped" }
-  | { type: "permission"; request_id: string; tool_name: string; summary: string; detail?: string }
+  // A background command or monitor the agent left running (runner._note_background):
+  // one event when it starts, and background_done when it ends. `state` there is the
+  // CLI's status (completed, failed, killed, stopped) or ours: replaced (your next
+  // message ended the wait), expired (the wait hit its cap).
+  | { type: "background"; id: string; state: "running"; kind: "command" | "monitor"; text: string; command: string }
+  | { type: "background_done"; id: string; state: string; text: string }
+  // The card's checkbox (id + notify: prompt the agent if the wait runs out), or the
+  // agent's own limit on the wait, in seconds (cap, no id).
+  | { type: "background_set"; id?: string; notify?: boolean; cap?: number }
+  // `scopes`: how far an Allow may reach past this one call (bridge/gateway.py SCOPES).
+  | { type: "permission"; request_id: string; tool_name: string; summary: string; detail?: string; scopes?: AllowScope[] }
   | { type: "question"; request_id: string; questions: Question[] }
   | { type: "permission_resolved"; request_id: string; behavior: "allow" | "deny" }
   | { type: "question_answered"; request_id: string; answers: AnswerSelection[] }
@@ -380,6 +390,8 @@ export type RunEvent =
   | { type: "delegation"; session_id: string; name: string; brief: string; agent: string;
       profile?: string | null; write?: boolean }
   | { type: "merge"; name: string; state: string; session_id?: string }
+  // The chat's plan changed (bridge/chatplan.py, lib/planline).
+  | import("./planline").PlanEv
   // The Mystical tools (bridge/gateway_tools.py). A picture shown to you: `images` are
   // absolute paths served by /api/attachment. A recorded test run; a Markdown file
   // presented as a card, its path relative to the project; a request for a key, and
@@ -388,6 +400,8 @@ export type RunEvent =
   | DataEv
   // show_design: a board the agent made (bridge/design_board.py), and its PREVIEW DESIGN button.
   | { type: "design"; board: string; title: string; pages: string[]; ref?: string }
+  // open_site: the Mystical browser it opened (bridge/site_browser.py), and that card's buttons.
+  | { type: "browser"; url: string; profile: string }
   // offer_review: a review the agent offers, with a button after its final answer (OfferCard).
   | { type: "offer"; kind: string; title: string; detail: string; rounds: number; prompt: string }
   | { type: "checks"; command: string; ok: boolean; code: number; ms: number;
@@ -434,6 +448,12 @@ export interface SecretAnswer {
   value: string;
 }
 
+/** An Allow that stands for the rest of the turn, or for the chat from now on. It goes
+ *  back as an answer headed `scope`. */
+export type AllowScope = "turn" | "chat";
+export const SCOPE_WORD: Record<AllowScope, string> = { turn: "Always allow in this turn", chat: "Always allow in this chat" };
+export const scopeAnswer = (scope: AllowScope): AnswerSelection[] => [{ header: "scope", labels: [scope] }];
+
 export interface RespondBody {
   request_id: string;
   behavior?: "allow" | "deny";
@@ -470,12 +490,15 @@ export interface AwaitingSession {
 // "parked" = killed by a usage limit or API error; the bridge resumes it by itself.
 // "waiting" = ended on WaitForSession; it wakes when the session it waits on
 // finishes (bridge/waits.py) — its label names that session.
-export type SessionState = "working" | "awaiting" | "asking" | "checking" | "parked" | "waiting" | "live" | "idle";
-/** The two states where the session is stopped until you say something — one
- *  mid-turn, one at the end of it. Every "waiting" count, filter and badge
- *  means both. */
+// "background" = the turn answered, but background tasks still run in its
+// process: at rest, not working. "credits" = the last turn stopped on
+// credits_required, which no reset fixes (bridge/limits.py): yours to unblock.
+export type SessionState = "working" | "awaiting" | "asking" | "checking" | "parked" | "waiting" | "live" | "background" | "credits" | "idle";
+/** The states where the session is stopped until you do something — a card
+ *  mid-turn, a question at the end of it, or a login out of credits. Every
+ *  "waiting" count, filter and badge means all three. */
 export const needsYou = (s: SessionState | string | undefined) =>
-  s === "awaiting" || s === "asking";
+  s === "awaiting" || s === "asking" || s === "credits";
 // One unified per-session status, identical on every surface. Bridge sessions can
 // be any state; native (VS Code/terminal) sessions are working/live/idle.
 export interface SessionStatus {
@@ -663,9 +686,12 @@ export interface NextUpBoard {
 // The session's objective, if one is running (bridge/goals.py).
 export interface Goal {
   objective: string;
+  title?: string;   // its short name (bridge/goals.py title_of); absent from an older bridge
   state: "active" | "complete" | "blocked";
   iter: number;
   note?: string;
+  at?: number;      // epoch s it was met or blocked
+  seen?: boolean;   // a met goal you have prompted past
 }
 
 // Claude usage — only computed percentages / reset times (no token, ever).
@@ -962,6 +988,12 @@ export const api = {
     request<{ goal: Goal | null; max_iter: number }>(
       `/api/goal?session=${encodeURIComponent(sessionId)}`,
     ),
+  // `/goal <objective>` typed in the composer; a blank objective clears it.
+  setGoal: (sessionId: string, objective: string) =>
+    request<{ ok: boolean; goal: Goal | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/goal`, {
+      method: "POST",
+      body: { objective },
+    }),
 
   agents: (sessionId: string) =>
     request<AgentsInfo>(`/api/agents?session=${encodeURIComponent(sessionId)}`),

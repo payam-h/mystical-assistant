@@ -182,20 +182,22 @@ WORK_LIST = _t("work_list", "The project's work list, which the user sees in the
                     "source": {"type": "object", "description": "Where it came from: {kind, ref, url}."}}}},
                 "ids": {"type": "array", "items": {"type": "string"}, "description": "For remove and reorder."},
                 "clear_done": {"type": "boolean"}}, ["action"])
-WORK_RUN = _t("work_run", "Manage a run on the work list, once the user has started one here: you assign items to helpers, review "
-              "and merge. status shows it. start_item gives an item a helper in its own copy of the code. review_item shows what it "
-              "changed. merge_item merges it into the run's branch, never the user's. send_back returns it with what to change. "
-              "block_item says it needs the user. restart_item drops its copy and puts it back up next. finish ends the run. You "
-              "can't start a run, but when the user asks for one in words, propose shows them a card to tap: `ids` and `parallel` are "
-              "optional, and it starts only if they press Start. Only propose when they asked.",
-              {"action": {"type": "string", "enum": ["propose", "status", "start_item", "review_item", "merge_item", "send_back", "block_item", "restart_item", "finish"]},
-               "ids": {"type": "array", "items": {"type": "string"}, "description": "propose: which tasks. Leave out for everything up next."},
-               "parallel": {"type": "integer", "description": "propose: helpers at once, 1 to 5."},
-               "id": {"type": "string", "description": "The item, for everything but propose, status and finish."},
-               "brief": {"type": "string", "description": "start_item: anything to add to the task's own text. The helper sees nothing else."},
-               "profile": {"type": "string", "description": "start_item: a profile name from list_agents, if the user asked for one."},
-               "text": {"type": "string", "description": "send_back: what to change. block_item: what you need from the user."},
-               "summary": {"type": "string", "description": "finish: what happened."}}, ["action"])
+CHAT_PLAN = _t("chat_plan", "Your plan for this chat's work, which the user sees in the Work list as a timeline. For work in several "
+               "steps, set it before you start, then mark each step as you go with update: it keeps you on track, and they see "
+               "\"step 5 of 10\" without reading back. A step can have a Markdown description, sub-steps and a note on what you "
+               "found. The user may change it: that reaches you as a message from them, and you take it in by writing the plan again.",
+               {"action": {"type": "string", "enum": ["read", "set", "update"]},
+                "steps": {"type": "array", "description": "set: the whole plan, in order. A step named by id or the same title keeps its times.",
+                          "items": {"type": "object", "properties": {
+                              "id": {"type": "string"}, "title": {"type": "string"},
+                              "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "skipped"]},
+                              "detail": {"type": "string", "description": "Markdown: what the step is, if the title isn't enough."},
+                              "note": {"type": "string", "description": "What you found doing it, briefly."},
+                              "substeps": {"type": "array", "items": {"type": "object", "properties": {
+                                  "title": {"type": "string"}, "status": {"type": "string"}}}}}}},
+                "id": {"type": "string", "description": "update: the step."},
+                "status": {"type": "string"}, "title": {"type": "string"}, "detail": {"type": "string"}, "note": {"type": "string"},
+                "substeps": {"type": "array", "items": {"type": "object"}}}, ["action"])
 FIND = _t("find_tools", "Find more tools: Mystical's rarer ones (reports, chat search, waiting, pinging the user, "
           "secrets) and MCP servers shared with you. Empty query lists servers.",
           {"query": {"type": "string"}, "server": {"type": "string"}})
@@ -214,6 +216,14 @@ def _rivendell_on(s: dict) -> bool:
         return False
 
 
+BG_WAIT = _t("background_wait", "How long this chat waits for your background work. When you end your turn with a "
+             "background command or monitor still running, Mystical keeps the chat waiting and wakes you when it "
+             "finishes, as long as it stays silent for no more than 2 hours; past that it is stopped. Call this to "
+             "set a shorter limit for this turn, like 20 minutes for a build that should take 5. It can't go past "
+             "2 hours: for longer work, check on it in steps.",
+             {"minutes": {"type": "number", "description": "The limit, in minutes of silence. 1 to 120."}}, ["minutes"])
+
+
 def _agent_of(s: dict) -> str:
     return profiles.effective(s)["agent"]
 
@@ -226,7 +236,9 @@ def tools_for(s: dict) -> list:
     if not s.get("parent_session") and channel.refusal(s) is None:
         out += [DELEGATE, REVIEW, MERGE, DISCARD]
     if not s.get("parent_session"):
-        out += [WORK_LIST, WORK_RUN]
+        out += [WORK_LIST, CHAT_PLAN]
+    if caps["system_prompt"]:              # Claude: the only runtime with background tasks to wait on
+        out += [BG_WAIT]
     if not caps["system_prompt"]:          # an agent: what Claude has natively
         out += [ASK, RUN]
         if not s.get("parent_session"):
@@ -262,6 +274,9 @@ def tool_names(s: dict) -> set:
 
 # ------- cards -------------------------------------------------------------
 
+SCOPES = ("turn", "chat")     # what a permission card may offer past this one call
+
+
 def _card(job, s: dict, questions: list, on_answer) -> dict:
     """Show a question card. See _show_card."""
     ask = ((questions or [{}])[0].get("question") or "")[:300]
@@ -293,7 +308,8 @@ def _show_card(job, s: dict, entry: dict, event: dict, on_answer, ask: str, tapp
     job.add({**event, "request_id": rid})
     kw = {"job_id": job.id, "request_id": rid} if tappable else {}
     threading.Thread(target=runner.notify_awaiting, daemon=True,
-                     args=(job.chat_id, job.store_session_id, "question"),
+                     args=(job.chat_id, job.store_session_id,
+                           "permission" if entry.get("kind") == "permission" else "question"),
                      kwargs={"body": ask, **kw}).start()
     if not block:
         return _text("The card is shown. End your turn now, without doing anything else: the answer "
@@ -308,22 +324,40 @@ def _show_card(job, s: dict, entry: dict, event: dict, on_answer, ask: str, tapp
     return _text(row.get("text") or "No answer.")
 
 
-def answer_card(job, entry: dict, answers: "list | None") -> None:
+def _scope(answers: "list | None") -> str:
+    """How far an Allow reaches, from a permission card that offers it: "" (this call),
+    "turn" or "chat". It rides in the answers under the header `scope`, the way a
+    background command's tick does (Job.respond), so the route and clients carry it as is."""
+    for a in answers or []:
+        if isinstance(a, dict) and a.get("header") == "scope":
+            got = str(((a.get("labels") or [""])[0]))
+            return got if got in SCOPES else ""
+    return ""
+
+
+def answer_card(job, entry: dict, answers: "list | None", behavior: str = "allow",
+                message: "str | None" = None) -> None:
     """A click on a gateway card (Job.respond, AcpJob.respond)."""
     from bridge import runner
     rid = entry["request_id"]
+    perm = entry.get("kind") == "permission"
+    allow = behavior != "deny"
+    scope = _scope(answers) if perm and allow else ""
     if entry.get("kind") == "question":
         job.add({"type": "question_answered", "request_id": rid, "answers": answers or []})
+    elif perm:
+        job.add({"type": "permission_resolved", "request_id": rid, "behavior": "allow" if allow else "deny",
+                 **({"scope": scope} if scope else {})})
     with _lock:
         row = _cards.get(rid)
     if row is None:
         return
     try:
-        text = row["on_answer"](answers or [])
+        text = row["on_answer"](allow, scope, (message or "").strip()) if perm else row["on_answer"](answers or [])
     except Exception as e:  # noqa: BLE001
         print(f"[gateway] card: {e!r}", file=sys.stderr)
         text = f"That answer couldn't be acted on: {e}"
-    if entry.get("kind") != "question":
+    if entry.get("kind") not in ("question", "permission"):
         # After acting on it, so the card says what happened. Never the answers: a
         # secret's value goes in neither the journal nor the chat.
         ok, text = text if isinstance(text, tuple) else (False, text)
@@ -426,11 +460,20 @@ def _call(s: dict, name: str, a: dict) -> dict:
             return _text(worklist.tool(s, a))
         except worklist.Refused as e:
             return _text(str(e), error=True)
-    if name == "work_run":
-        from bridge import workrun
+    if name == "background_wait":
         try:
-            return _propose_run(s, job, a) if a.get("action") == "propose" else _text(workrun.tool(s, a))
-        except worklist.Refused as e:
+            mins = float(a.get("minutes"))
+        except (TypeError, ValueError):
+            return _text("minutes must be a number from 1 to 120.", error=True)
+        if job is None or not hasattr(job, "set_bg_cap"):
+            return _text("No turn is running here to set it for.", error=True)
+        got = job.set_bg_cap(mins * 60)
+        return _text(f"This turn now waits up to {got // 60} min of silence on background work.")
+    if name == "chat_plan":
+        from bridge import chatplan
+        try:
+            return _text(chatplan.tool(s, a, job))
+        except chatplan.Refused as e:
             return _text(str(e), error=True)
     if name == "find_tools":
         return _text(_find(s, a))
@@ -451,25 +494,6 @@ def _call(s: dict, name: str, a: dict) -> dict:
     return _text(f"Unknown tool: {name}", error=True)
 
 
-def _propose_run(s: dict, job, a: dict) -> dict:
-    """A card: only the user's tap starts a run. Text in a ticket can get this far and no further."""
-    from bridge import workrun
-    wanted = [str(i) for i in a["ids"]] if isinstance(a.get("ids"), list) else None
-    questions = workrun.proposal(s, wanted, a.get("parallel"))
-    if job is None:
-        return _text("No turn is running to ask from.", error=True)
-
-    def on_answer(answers: list) -> str:
-        if not channel.approved(answers):
-            return "The user said not now. Nothing started."
-        try:
-            run = workrun.start(store.get_session(s["id"]), wanted, a.get("parallel"))
-        except worklist.Refused as e:
-            return f"It couldn't start: {e}"
-        return f"The run started on {run['branch']}. Your instructions as its manager arrive as a message: wait for them, then use work_run."
-    return _card(job, s, questions, on_answer)
-
-
 def _roster(chat: dict) -> str:
     from bridge import agent_tree
     rows = [r for r in agent_tree.tree(chat) if r["kind"] == "member"]
@@ -484,15 +508,23 @@ def _delegate(s: dict, job, a: dict) -> dict:
     plan, why = channel.plan_tasks(s, a.get("tasks"))
     if why:
         return _text(why, error=True)
-    if channel.needs_card(s):
-        def on_answer(answers: list) -> str:
-            if not channel.approved(answers):
-                return "The user said not now. Carry on alone."
+    # "Always allow in this turn" lives on the job, so it ends with the turn.
+    if channel.needs_card(s) and not getattr(job, "helpers_ok", False):
+        def on_answer(allow: bool, scope: str, note: str) -> str:
+            if not allow:
+                return "The user said not now. Carry on alone." + (f" They added: {note}" if note else "")
+            if scope == "chat":
+                channel.set_config(store.get_session(s["id"]), {"helpers": "auto"})
+            elif scope == "turn":
+                job.helpers_ok = True
             fresh, again = channel.plan_tasks(store.get_session(s["id"]), a.get("tasks"))
-            if again:
-                return again
-            return _started(s, fresh)
-        return _card(job, s, channel.card_questions(plan), on_answer)
+            return again or _started(s, fresh)
+        summary, detail = channel.card_text(plan)
+        # A permission card, drawn as every tool call's is, with how far an Allow may reach.
+        return _show_card(job, s, {"kind": "permission", "tool_name": "delegate", "summary": summary,
+                                   "detail": detail, "scopes": list(SCOPES)},
+                          {"type": "permission", "tool_name": "delegate", "summary": summary,
+                           "detail": detail, "scopes": list(SCOPES)}, on_answer, summary, tappable=True)
     return _text(_started(s, plan))
 
 

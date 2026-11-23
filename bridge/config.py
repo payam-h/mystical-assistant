@@ -51,14 +51,18 @@ MINIAPP_PERMISSION_MODES = {"auto", "plan", "acceptEdits", "bypassPermissions",
 # flags still apply). See the session-run-settings design.
 NEW_SESSION_PERMISSION_MODE = os.environ.get("NEW_SESSION_PERMISSION_MODE", "bypassPermissions")
 
-# Appended to Claude's system prompt so it asks instead of guessing. Set empty
-# to disable.
+# Appended to Claude's system prompt so it asks instead of guessing, and so what
+# only the human can do comes first in a reply. Set empty to disable.
 ASK_SYSTEM_PROMPT = os.environ.get("ASK_SYSTEM_PROMPT", (
     "You are operating through a Telegram bridge with a human who is usually on "
-    "a phone, away from the keyboard. Lead with what is true now rather than "
-    "what you did: the outcome first, then the evidence for it — the command you "
-    "ran and its result, or the file:line to look at — then the one thing that "
-    "needs them. Never report something as passing, working or fixed unless you "
+    "a phone, away from the keyboard. When your reply leaves them something only "
+    "they can do (turn a setting on, log in, add a file), open it with a "
+    "`> [!IMPORTANT]` box: the marker alone on its line, then one `> - ` line per "
+    "to-do. No box when there are none, and a choice you need from them is an "
+    "AskUserQuestion card, never a box line. Then lead with what is true now "
+    "rather than what you did: the outcome first, then the evidence for it — the "
+    "command you ran and its result, or the file:line to look at. "
+    "Never report something as passing, working or fixed unless you "
     "ran it; say it is unverified instead. If a task is ambiguous, or you need a "
     "decision, a credential, or confirmation before doing something "
     "irreversible, STOP and ask rather than guessing, and ask with "
@@ -73,6 +77,21 @@ ASK_SYSTEM_PROMPT = os.environ.get("ASK_SYSTEM_PROMPT", (
     "Ask first, deliver last."))
 
 RUN_TIMEOUT = int(os.environ.get("RUN_TIMEOUT", "1800"))      # silence before a run is killed as hung (s)
+
+# --- Run API (bridge/run_api.py) ----------------------------------------------
+# Other programs on this machine hand the bridge a prompt (`mystical prompt`,
+# POST /local/runs). How many of those runs may be live at once; the rest queue.
+RUN_API_CONCURRENCY = int(os.environ.get("RUN_API_CONCURRENCY", "2"))
+# Folders such runs may start in, comma-separated, each under BASE_PATH (what is
+# below one counts). Empty = any git repository under BASE_PATH.
+RUN_API_DIRS = os.environ.get("RUN_API_DIRS", "")
+# The model aliases low to high. MINIAPP_MODELS above is in picker order, not by
+# size, and the Models API lists newest first, so "the lowest" is spelled out here.
+MODELS_LOW_TO_HIGH = ("haiku", "sonnet", "opus", "fable")
+# The model a run gets when its caller names none: the lowest by default, since
+# a program's prompt is more often a lookup than a build. Empty = the bridge's
+# normal default (the project's default profile, else the CLI's own).
+RUN_API_MODEL = os.environ.get("RUN_API_MODEL", MODELS_LOW_TO_HIGH[0]).strip()
 
 # Denominator for the context meter: how big the window a session is filling is.
 # The Models API doesn't report per-model windows, so one overridable number is
@@ -101,6 +120,10 @@ MCP_SERVERS = os.environ.get("MCP_SERVERS", "")
 AI_BROWSER_HEADLESS = os.environ.get("AI_BROWSER_HEADLESS", "1").lower() not in ("0", "false", "no", "")
 AI_BROWSER_EXECUTABLE = os.path.expanduser(os.environ.get("AI_BROWSER_EXECUTABLE", ""))
 AI_BROWSER_PROFILE = os.path.expanduser(os.environ.get("AI_BROWSER_PROFILE", ""))
+
+# Session runs get Claude Code's --chrome: the Claude in Chrome extension, reached
+# through Anthropic's relay as the account the run is on. Off until asked for.
+CHROME_ACCESS = os.environ.get("CHROME_ACCESS", "0").lower() not in ("0", "false", "no", "")
 
 # Auto-resume: only the user may stop a turn. A restart leaves the in-flight turn
 # 'running' and the next boot resumes it (bridge/recovery.py); a Claude crash — or a
@@ -179,6 +202,29 @@ RELEVANCE_CONTEXT_TURNS = int(os.environ.get("RELEVANCE_CONTEXT_TURNS", "3"))
 # doc guessed. At a tighter timeout every check fails open and the guardrail is a
 # silent no-op, so this is deliberately generous; it only runs on long prompts.
 RELEVANCE_TIMEOUT = int(os.environ.get("RELEVANCE_TIMEOUT", "25"))
+# Skill router (bridge/route.py): rules, not a model call, that put Matt Pocock's
+# /command in front of a prompt. It runs on its own, so the master switch ships
+# OFF; the sub-switches ship ON but obey it, so they do nothing until it is
+# on. GRILL_CARDS adds a line to every run's system prompt, so it ships OFF too.
+ROUTER_ENABLE = os.environ.get("ROUTER_ENABLE", "0").lower() \
+    not in ("0", "false", "no", "")
+ROUTER_AUTO = os.environ.get("ROUTER_AUTO", "1").lower() \
+    not in ("0", "false", "no", "")
+ROUTER_NEXT = os.environ.get("ROUTER_NEXT", "1").lower() \
+    not in ("0", "false", "no", "")
+ROUTER_ZONE = os.environ.get("ROUTER_ZONE", "1").lower() \
+    not in ("0", "false", "no", "")
+# TICKETS (bridge/tickets.py) starts sessions by itself, so it ships OFF as well.
+TICKET_RUNS = os.environ.get("TICKET_RUNS", "0").lower() \
+    not in ("0", "false", "no", "")
+# APPROVE BEFORE BUILD: tickets wait for a tap before any session starts. Off = trust the skill.
+TICKET_APPROVE = os.environ.get("TICKET_APPROVE", "0").lower() \
+    not in ("0", "false", "no", "")
+# REVIEW AFTER MERGE: the council reads a merged ticket set before RETRO. Ships on, and obeys TICKETS.
+MERGE_REVIEW = os.environ.get("MERGE_REVIEW", "1").lower() \
+    not in ("0", "false", "no", "")
+GRILL_CARDS = os.environ.get("GRILL_CARDS", "0").lower() \
+    not in ("0", "false", "no", "")
 # --- Next-up board -----------------------------------------------------------
 # Ranked next steps across the repos with recent session activity. One read-only
 # scout per changed repo. See the next-up-board design.

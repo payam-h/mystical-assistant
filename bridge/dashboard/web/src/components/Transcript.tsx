@@ -1,26 +1,37 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from "react";
 import { flushSync } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { api, type AccountInfo, type CardAnswer, type RivendellJob, type SlashCommand, type TurnOutcome } from "../api";
+import { defaultRangeExtractor, useVirtualizer, type Range } from "@tanstack/react-virtual";
+import { api, type AccountInfo, type CardAnswer, type RivendellJob, type SessionStatus, type SlashCommand, type TurnOutcome } from "../api";
 import type { PendingRequest, Turn } from "../chat";
 import type { HudSettings } from "../lib/theme";
 import { RunStream, TURN_TAIL } from "./RunStream";
-import { PromptBubble } from "./PromptBubble";
+import { MysticalNote, PromptBubble } from "./PromptBubble";
+import { mysticalNote, viaTag } from "../lib/sender";
 import { JobPlate } from "./JobPlate";
 import { Markdown, type OpenFile } from "./Markdown";
 import { ImageLightbox, MediaThumb, ZoomButton } from "./ImageLightbox";
-import { ckId } from "../lib/checkpoints";
+import { CONTINUED, ckId, RESTART_NUDGE } from "../lib/checkpoints";
+import { bgView, seamOf } from "../lib/clisignals";
+import { Spinner } from "./ui";
 import { openSettings } from "../lib/opensettings";
 import { updateClaude } from "../lib/restart";
 import { anchorAt, type Anchor, type Rows } from "../lib/scrollmem";
 import { hhmm, useClock12 } from "../lib/surfaces";
 import { RuneSpirit } from "./hud/RuneSpirit";
 import { UnfinishedPlate } from "./TeamBar";
-import { LimitBlock, type LimitLive } from "./LimitCard";
-import { limitNudge, resumeNudge } from "../lib/limit";
-import { parseFrame, promptLabel } from "../lib/multi";
+import { LimitBlock, LimitCredits, useLeaveIt, type LimitLive } from "./LimitCard";
+import { limitNudge } from "../lib/limit";
+import { dropNoPath, parseFrame, promptLabel } from "../lib/multi";
 import { useMultiOn } from "../lib/multistore";
 import { IncomingNote } from "./MultiRows";
+
+/** The virtualizer's window plus the last row: a running turn's WORK zone feeds the live row
+ *  (LiveRow), which has to keep going while you read an older turn. Module scope: the
+ *  virtualizer memoizes on this function. */
+const keepLast = (range: Range) => {
+  const r = defaultRangeExtractor(range);
+  return range.count && !r.includes(range.count - 1) ? [...r, range.count - 1] : r;
+};
 
 // The plates draw a prompt that ran a /command as one (PromptBubble, lib/slash
 // leadCommand), checked against the project's command list: read once per
@@ -86,16 +97,22 @@ function Attachments({ items }: { items: string[] }) {
  *  runtime, so not even a row — and 384 error turns in the real store could not
  *  say which of them had actually delivered their answer. `delivered` and
  *  `interrupted` are good news, so they are not painted as errors. */
+/** bridge/outcomes.py's labels are capitals ("API OVERLOADED"); the spine reads them as a
+ *  sentence and the other looks set them back in capitals (.doutcome-l). Names keep theirs. */
+const sentenceCase = (s: string) =>
+  (s.charAt(0) + s.slice(1).toLowerCase()).replace(/\bapi\b/gi, "API").replace(/\bclaude code\b/gi, "Claude Code").replace(/\bclaude\b/gi, "Claude");
+
 function OutcomeBadge({ outcome }: { outcome: TurnOutcome }) {
   const good = outcome.code === "delivered" || outcome.code === "interrupted";
   const tone = good ? "var(--warn)" : "var(--err)";
   return (
-    <div className="doutcome ml-[var(--rail)] flex flex-col gap-0.5">
+    <div className="doutcome ml-[var(--rail)] flex flex-col gap-0.5" data-code={outcome.code} data-good={good || undefined}>
       <span
         className="self-start border px-1.5 py-px text-[length:var(--t95)] tracking-[1px]"
         style={{ color: tone, borderColor: "color-mix(in srgb, currentColor 40%, transparent)" }}
       >
-        {good ? "◇ " : "✕ "}{outcome.label}
+        {/* on the session's spine the node is the glyph and the label reads in sentence case (spine.css) */}
+        <span className="doutcome-g">{good ? "◇ " : "✕ "}</span><span className="doutcome-l">{sentenceCase(outcome.label)}</span>
       </span>
       <span className="text-[length:var(--t95)] opacity-70" style={{ color: tone }}>
         {outcome.detail}
@@ -161,6 +178,40 @@ type Respond = (
   opts: { behavior?: "allow" | "deny"; answers?: CardAnswer[] },
 ) => void;
 
+/** Where a turn a bridge restart cut goes on (design-drafts/cli-signals row 7):
+ *  Claude Code carried it on by itself (recovery.CONTINUED), so nothing was
+ *  sent and no plate draws, only this centred line joining the two halves of
+ *  the work (lib/clisignals seamOf). It spins until the run says anything.
+ *  Declined, it turns warn and offers today's nudge as Carry on, which goes
+ *  the composer's way (queued behind a running turn), or Leave it. */
+function Seam({ seam, turnId, last, onSend }: {
+  seam: NonNullable<ReturnType<typeof seamOf>>;
+  turnId: string;
+  /** The session's last turn: past it, you moved on and the buttons go. */
+  last: boolean;
+  onSend?: (text: string) => void;
+}) {
+  const h12 = useClock12();
+  const [left, leave] = useLeaveIt("hud-seam-left", turnId);
+  const [sent, setSent] = useState(false);
+  return (
+    <>
+      <div className="dseam" data-k={seam.k}>
+        {seam.k === "picking" ? <Spinner className="h-[10px] w-[10px] flex-none border-[1.5px] opacity-100" /> : <span aria-hidden>↪</span>}
+        <b>{seam.at != null ? `${seam.lead} ${hhmm(seam.at, h12)}` : seam.lead.replace(/ at$/, "")}</b>
+        <span>· {seam.rest}</span>
+      </div>
+      {seam.k === "declined" && last && !left && !sent && onSend && (
+        <div className="dseam-acts">
+          <button type="button" className="dlimit-btn" data-strong onClick={() => { setSent(true); onSend(RESTART_NUDGE); }}
+            title="Send the nudge: carry on where the restart cut it, not from the start">↻ Carry on</button>
+          <button type="button" className="dlimit-btn" data-quiet onClick={leave}>Leave it</button>
+        </div>
+      )}
+    </>
+  );
+}
+
 /** One turn, exactly as it has always rendered — prompt bubble, attachments,
  *  then everything the agent did hung off one rail. The virtualizer mounts and
  *  unmounts these whole; RunStream's own content-visibility cards keep the
@@ -168,7 +219,17 @@ type Respond = (
 function TurnBlock({
   turn, prev, next, isActive, isLast, promptIdx, hud, liveTurns, boot, who, unfinishedBy,
   onRespond, onRunCommand, onQuote, onOpenFile, onAnswer, askDocked, job, jobTitle, cmds, limit, logins, agentSession, sessionId,
+  bg, session, onSend, savers,
 }: {
+  /** The last turn answered and Claude Code still runs background tasks in its
+   *  process (lib/clisignals bgView): it rests, and a quiet line says so. */
+  bg?: { n: number; since: number } | null;
+  /** The open session: a credits card's Run now hands its work over. */
+  session?: string | null;
+  /** Send a prompt the composer's way: a declined seam's Carry on. */
+  onSend?: (text: string) => void;
+  /** The Savers trials this session drew the saver in: its prompts' tag. */
+  savers?: string[];
   turn: Turn;
   /** The session it's in, for what a card has to read back (a report). */
   sessionId?: string | null;
@@ -208,12 +269,20 @@ function TurnBlock({
   job?: RivendellJob | null;
   jobTitle?: string | null;
 }) {
-  const working = isActive && turn.status === "running" && turn.pending.length === 0;
+  // Answered, with background tasks still running: not working, whatever the
+  // turn row says (it closes when the process does).
+  const working = isActive && turn.status === "running" && turn.pending.length === 0 && !bg;
   // Stable, so RunStream's memo holds across polls.
   // The job arrives as a new object each poll, so it is keyed by its contents.
   const jobKey = job?.kind ? JSON.stringify(job) : "";
   const view = useMemo(() => (jobKey ? { job: JSON.parse(jobKey) as RivendellJob, prompt: turn.prompt } : null), [jobKey, turn.prompt]);
-  const replied = turn.events.length > 0 || turn.status === "running" || !!turn.runtime;
+  // Claude Code carrying on the turn a restart cut (recovery.CONTINUED): a seam
+  // where a plate would be, and the cut turn before it loses its badge.
+  const seam = seamOf(prev, turn);
+  const carriedOn = next?.prompt === CONTINUED;
+  // A declined continuation said nothing of its own: the seam is all of it.
+  const replied = seam ? turn.status === "running" || turn.events.some((e) => e.type !== "resume")
+    : turn.events.length > 0 || turn.status === "running" || !!turn.runtime;
   // Sent from this page a moment ago: your prompt rises into place, its WORK
   // card a beat behind (RunStream). Read at mount, so a turn you come back to is
   // simply there.
@@ -223,8 +292,12 @@ function TurnBlock({
   // work on draws no plate — those words aren't yours. The two then read as one
   // stretch of work (data-limit / data-cont in index.css).
   const limitHit = turn.outcome?.code === "limit";
+  // Stopped on credits_required: its card (LimitCredits) says it, CLI's words and all.
+  const credits = turn.outcome?.code === "credits";
   const nudge = limitNudge(turn.prompt);
-  const resumed = useMultiOn() ? resumeNudge(turn.prompt) : null;
+  // The bridge's own prompts (lib/sender): a Mystical note, not your plate. A Claude
+  // continuation (CONTINUED) has its seam and a Rivendell job its plate instead.
+  const note = !seam && !nudge && !job ? mysticalNote(turn) : null;
   // ⇄: the channel handing this turn another agent's words (lib/multi parseFrame).
   const frame = parseFrame(turn.prompt);
   // Notes get their own tier only on another agent's turn, whatever the session
@@ -233,13 +306,13 @@ function TurnBlock({
   const saidTier = multiOn && (turn.runtime ? turn.runtime.startsWith("acp:")
     : turn.status === "running" && !!agentSession);
   const events = useMemo(() => {
-    if (!limitHit) return turn.events;
+    if (!limitHit && !credits) return turn.events;
     // The CLI's sentence comes as the error result, and often as a text event too.
     const said = new Set(turn.events.flatMap((e) => (e.type === "result" && e.is_error ? [e.result.trim()] : [])));
     return turn.events.filter((e) => !(e.type === "result" && e.is_error)
-      && !(e.type === "error" && /limit/i.test(e.message))
+      && !(e.type === "error" && (/limit/i.test(e.message) || (credits && /credit|extra usage/i.test(e.message))))
       && !(e.type === "text" && said.has(e.text.trim())));
-  }, [turn.events, limitHit]);
+  }, [turn.events, limitHit, credits]);
   return (
     // data-ctx-*: the dashboard's right-click menu reads the nearest one of
     // these off the target chain, so a click anywhere inside a turn resolves to
@@ -248,22 +321,24 @@ function TurnBlock({
     // on the wrapper), where they make a turn one card: prompt, work, answer.
     <div id={ckId(turn.id)} className="dturn flex flex-col gap-2 scroll-mt-[86px]"
       data-ctx-type="turn" data-ctx-id={turn.id} data-last={isLast || undefined}
-      data-limit={limitHit && limitNudge(next?.prompt) ? "" : undefined} data-cont={nudge || resumed ? "" : undefined}
+      data-limit={(limitHit || credits) && limitNudge(next?.prompt) ? "" : undefined} data-cont={nudge || seam ? "" : undefined}
+      data-cut={carriedOn ? "" : undefined}
       data-ctx-label={promptLabel(turn.prompt || "reply").replace(/\s+/g, " ").slice(0, 60)}>
       <div className="dprompt" data-job={job ? "" : undefined} data-who={who ? "" : undefined}
         style={sent ? { animation: "streamIn .34s cubic-bezier(.2,.8,.2,1) both" } : undefined}>
-        {resumed && <div className="ma-resumed" role="note">↻ {resumed}</div>}
-        {turn.prompt && !nudge && !resumed && (
+        {turn.prompt && !nudge && !seam && (
           <div data-prompt-idx={promptIdx}>
-            {job ? <JobPlate job={job} prompt={turn.prompt} at={turn.started} title={jobTitle} />
+            {note ? <MysticalNote note={note} text={dropNoPath(turn.prompt)} at={turn.started} />
+              : job ? <JobPlate job={job} prompt={turn.prompt} at={turn.started} title={jobTitle} />
               : frame && frame.kind !== "user" ? <IncomingNote frame={frame} at={turn.started} />
-              : <PromptBubble text={frame ? frame.body : turn.prompt} at={turn.started} runtime={turn.runtime} run={turn} prev={prev} commands={cmds} who={who} />}
+              : <PromptBubble text={frame ? frame.body : dropNoPath(turn.prompt)} at={turn.started} runtime={turn.runtime} run={turn} prev={prev} commands={cmds} who={who} via={viaTag(turn.sent_by)} savers={savers} />}
           </div>
         )}
         {turn.attachments && turn.attachments.length > 0 && (
           <Attachments items={turn.attachments} />
         )}
       </div>
+      {seam && <Seam seam={seam} turnId={turn.id} last={isLast} onSend={onSend} />}
       {/* position:relative is safe here — the ImageLightbox portals to body. */}
       {replied && (
         <div className="dreply relative space-y-1.5">
@@ -294,6 +369,8 @@ function TurnBlock({
               working={working}
               hud={hud}
               view={view}
+              bgN={bg?.n}
+              bgSince={bg?.since}
               saidTier={saidTier}
               sessionId={sessionId}
               turnNo={promptIdx + 1}
@@ -304,7 +381,8 @@ function TurnBlock({
         </div>
       )}
       {limitHit ? <LimitBlock turn={turn} next={next} live={limit} logins={logins} />
-        : turn.outcome && <OutcomeBadge outcome={turn.outcome} />}
+        : credits ? <LimitCredits turn={turn} next={next} session={session} logins={logins} />
+        : turn.outcome && !carriedOn && <OutcomeBadge outcome={turn.outcome} />}
       {unfinishedBy && <UnfinishedPlate who={unfinishedBy} />}
     </div>
   );
@@ -360,6 +438,9 @@ export function Transcript({
   unfinished,
   limit,
   logins = NO_LOGINS,
+  status,
+  onSend,
+  savers,
 }: {
   /** The session runs on another agent (TurnBlock). */
   agentSession?: boolean;
@@ -408,8 +489,17 @@ export function Transcript({
   limit?: LimitLive | null;
   /** The Claude logins (/local/accounts), so a limit can name them. */
   logins?: AccountInfo[];
+  /** The open session's status: answered with background tasks still running,
+   *  its last turn rests and says so (lib/clisignals bgView). */
+  status?: SessionStatus | null;
+  /** Send a prompt the composer's way (queued behind a running turn). */
+  onSend?: (text: string) => void;
+  /** The Savers trials this session drew the saver in (Transcript.savers). */
+  savers?: string[];
 }) {
   const cmds = useCommands(project);
+  const back = bgView(status);
+  const bg = useMemo(() => (back ? { n: back.n, since: back.since } : null), [back?.n, back?.since]); // eslint-disable-line react-hooks/exhaustive-deps
   // Tail loading: turns always ship whole but only the last few carry events.
   // Turns before the cut would render as prompt bubbles with missing bodies —
   // worse than absent — so they hide behind the "load older" control.
@@ -469,6 +559,7 @@ export function Transcript({
       ?? Math.min(20000, 80 + (rows[i].kind === "turn"
         ? Math.min(rows[i].turn.events.length, TURN_TAIL) * 20 : 0)),
     overscan: 2,
+    rangeExtractor: keepLast,
     // A jump aims a turn at the list's top, which sits under Terminal's content
     // padding (62px). This lowers it to 86px, clear of the header island with
     // its LAST row open: the line scroll-mt-[86px] draws for scrollIntoView.
@@ -619,6 +710,10 @@ export function Transcript({
         next={turns[cut + index + 1]}
         limit={row.turn.id === turns[turns.length - 1]?.id ? limit : null}
         logins={logins}
+        bg={row.turn.id === turns[turns.length - 1]?.id ? bg : null}
+        session={sessionKey}
+        onSend={onSend}
+        savers={savers}
         isActive={row.turn.id === activeId}
         sessionId={sessionKey}
         agentSession={agentSession}

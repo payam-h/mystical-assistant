@@ -11,11 +11,14 @@ import shutil
 import subprocess
 import time
 
+from bridge import config
 
-def _run(cwd: str, *args: str, timeout: int = 8) -> tuple[int, str, str]:
+
+def _run(cwd: str, *args: str, timeout: int = 8,
+         env: dict | None = None, errors: str | None = None) -> tuple[int, str, str]:
     try:
         p = subprocess.run(["git", "-C", cwd, *args], capture_output=True,
-                           text=True, timeout=timeout)
+                           text=True, timeout=timeout, env=env, errors=errors)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "git timed out"
@@ -57,16 +60,23 @@ def _parse(raw: str):
     which is also when ahead/behind stay 0, so the two can't be told apart
     from the counts alone.
 
+    `# branch.upstream` only names the *configured* upstream: git prints it
+    even when the remote has no such branch (never pushed, deleted there,
+    config carried over from another clone). Only a remote ref that exists adds
+    `# branch.ab`, so without that line the upstream counts as "".
+
     `xy` is porcelain's raw pair: X is the index (staged) state, Y the working
     tree's, `.` meaning unchanged — that pair is the whole staged/unstaged
     split the CHANGES panel draws."""
     branch, upstream, ahead, behind, entries = "", "", 0, 0, []
+    tracked = False
     for line in raw.splitlines():
         if line.startswith("# branch.head"):
             branch = line[len("# branch.head"):].strip()
         elif line.startswith("# branch.upstream"):
             upstream = line[len("# branch.upstream"):].strip()
         elif line.startswith("# branch.ab"):
+            tracked = True
             for tok in line.split():
                 if tok.startswith("+"):
                     ahead = int(tok[1:] or 0)
@@ -88,7 +98,7 @@ def _parse(raw: str):
             entries.append(("U", line.rsplit(" ", 1)[-1], False, ".U"))
         elif line.startswith("? "):
             entries.append(("?", line[2:], True, "??"))
-    return branch, upstream, ahead, behind, entries
+    return branch, upstream if tracked else "", ahead, behind, entries
 
 
 def _numstat(cwd: str) -> dict:
@@ -579,8 +589,11 @@ def push(cwd: str, timeout: int = 30) -> tuple[bool, str]:
 
 
 def fetch(cwd: str, timeout: int = 20) -> tuple[bool, str]:
-    """Refresh the remote-tracking refs, so status()'s behind count is current."""
-    rc, out, err = _run(cwd, "fetch", "--quiet", timeout=timeout)
+    """Refresh the remote-tracking refs, so status()'s behind count is current.
+    The dashboard also runs it unasked (auto-fetch), so a remote that wants a
+    password fails at once instead of prompting on a hand-launched bridge's tty."""
+    rc, out, err = _run(cwd, "fetch", "--quiet", timeout=timeout,
+                        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     return rc == 0, (out + err).strip()
 
 
@@ -591,15 +604,46 @@ def pull(cwd: str, timeout: int = 60) -> tuple[bool, str]:
     return rc == 0, (out + err).strip()
 
 
+def merge_check(cwd: str, ours: str = "HEAD", theirs: str = "@{u}") -> "list[str] | None":
+    """The files merging `theirs` (the upstream) into `ours` (HEAD) would clash in,
+    from a dry run: `git merge-tree --write-tree` merges in memory and touches no
+    file, index or ref (the merged objects it writes are left for gc). [] = merges
+    cleanly; None = couldn't tell (git before 2.38, no upstream)."""
+    rc, out, _ = _run(cwd, "merge-tree", "-z", "--write-tree", "--name-only", "--no-messages",
+                      "--end-of-options", ours, theirs, timeout=20)
+    return [p for p in out.split("\0")[1:] if p] if rc in (0, 1) else None
+
+
+def merge_upstream(cwd: str, theirs: str = "@{u}") -> tuple[bool, str, list[str]]:
+    """The GIT tab's Merge on a diverged branch: the upstream merged into HEAD as
+    a merge commit, never a rebase, so this branch's commits keep their shas.
+    A clash never starts: the dry run says so first, and one it missed (a race)
+    is undone at once (`merge --abort`). Either way its files come back and the
+    tree is as it was. Without a dry run (old git) it won't merge over
+    uncommitted edits, since an abort can't always give those back."""
+    clash = merge_check(cwd, theirs=theirs)
+    if clash:
+        return False, "Merging would clash, so nothing was changed.", clash
+    if clash is None and _run(cwd, "status", "--porcelain", "--untracked-files=no")[1].strip():
+        return False, ("This git can't test a merge before running it, so it won't merge "
+                       "over uncommitted changes. Commit or stash them first."), []
+    ok, output = merge(cwd, theirs)
+    if ok or _run(cwd, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] != 0:
+        return ok, output, []
+    _, names, _ = _run(cwd, "diff", "-z", "--name-only", "--diff-filter=U")
+    _run(cwd, "merge", "--abort")
+    return False, output, [p for p in names.split("\0") if p]
+
+
 def _commits(cwd: str, rng: str, limit: int) -> list[dict]:
-    rc, out, _ = _run(cwd, "log", f"-{limit}", "--format=%h\t%s", rng)
+    rc, out, _ = _run(cwd, "log", f"-{limit}", "--format=%h\t%ct\t%s", rng)
     if rc != 0:
         return []
     commits = []
     for line in out.splitlines():
-        sha, _, subject = line.partition("\t")
+        sha, ts, subject = (line.split("\t", 2) + ["", ""])[:3]
         if sha:
-            commits.append({"sha": sha, "subject": subject})
+            commits.append({"sha": sha, "subject": subject, "ts": int(ts or 0)})
     return commits
 
 
@@ -613,6 +657,53 @@ def outgoing(cwd: str, limit: int = 20) -> list[dict]:
     """The mirror: commits here that the upstream doesn't have — what a push
     sends (newest first). Empty without an upstream, like status()'s ahead."""
     return _commits(cwd, "@{u}..HEAD", limit)
+
+
+def base_ref(cwd: str, base: str) -> str:
+    """The ref a branch is compared with: origin's copy of `base` when there is
+    one (what a PR lands on), else the local branch; "" when neither exists."""
+    for ref in (f"origin/{base}", base):
+        if base and _run(cwd, "rev-parse", "-q", "--verify", f"{ref}^{{commit}}")[0] == 0:
+            return ref
+    return ""
+
+
+def ledger(cwd: str, base: str = "", limit: int = 30) -> dict:
+    """The GIT tab's line below the working tree. `local`: commits only on this
+    machine (what a push sends; with no upstream, everything `base` lacks).
+    `shipped`: on origin but not in `base` yet. `ahead`/`behind`: HEAD against
+    `base` (behind = the base moved). base "" (the branch is its own base, or
+    none is set) gives the local list alone."""
+    has_up = _run(cwd, "rev-parse", "-q", "--verify", "@{u}")[0] == 0
+    ref = base_ref(cwd, base)
+    out = {"base": base if ref else "", "ref": ref, "ahead": 0, "behind": 0, "shipped": [], "shipped_n": 0,
+           "local": _commits(cwd, "@{u}..HEAD" if has_up else f"{ref}..HEAD", limit) if has_up or ref else []}
+    if not ref:
+        return out
+    out["ahead"], out["behind"] = _left_right(cwd, ref, "HEAD") or (0, 0)
+    if has_up:
+        # Not `ref..@{u}`: behind origin, that would list commits this checkout doesn't have.
+        rc, mb, _ = _run(cwd, "merge-base", "HEAD", "@{u}")
+        if rc == 0 and mb.strip():
+            out["shipped"] = _commits(cwd, f"{ref}..{mb.strip()}", limit)
+            rc, n, _ = _run(cwd, "rev-list", "--count", f"{ref}..{mb.strip()}")
+            out["shipped_n"] = int(n) if rc == 0 and n.strip().isdigit() else len(out["shipped"])
+    return out
+
+
+def undo_commit(cwd: str) -> tuple[bool, str]:
+    """Take the newest commit back, keeping its changes staged (`reset --soft`).
+    Only a commit that never left this machine, and never a merge: undoing a
+    pushed commit would need a force push, and a merge's second parent is lost."""
+    rc, parents, _ = _run(cwd, "rev-list", "--parents", "-1", "HEAD")
+    if rc != 0 or len(parents.split()) != 2:
+        return False, "Only a plain commit with a parent can be undone here."
+    if _run(cwd, "rev-parse", "-q", "--verify", "@{u}")[0] == 0:
+        rc, n, _ = _run(cwd, "rev-list", "--count", "@{u}..HEAD")
+        if rc != 0 or n.strip() in ("", "0"):
+            return False, "That commit is already on origin, so it stays."
+    rc, out, err = _run(cwd, "reset", "--soft", "HEAD~1")
+    return rc == 0, (out + err).strip()
 
 
 _LOG_FMT = "%H\x1f%P\x1f%an\x1f%at\x1f%D\x1f%s"
@@ -815,34 +906,81 @@ def merged_branches(cwd: str, base: str = "") -> list[str]:
     return [b for b in (x.strip() for x in out.splitlines()) if b and b != base and not b.startswith("(")]
 
 
-def _left_right(cwd: str, base: str, ref: str) -> tuple[int, int]:
-    """(ahead, behind) of `ref` against `base`; (0, 0) when git can't say."""
+def _left_right(cwd: str, base: str, ref: str) -> "tuple[int, int] | None":
+    """(ahead, behind) of `ref` against `base`; None when git can't say."""
     rc, out, _ = _run(cwd, "rev-list", "--left-right", "--count", f"{base}...{ref}")
     parts = out.split() if rc == 0 else []
-    return (int(parts[1]), int(parts[0])) if len(parts) == 2 else (0, 0)
+    return (int(parts[1]), int(parts[0])) if len(parts) == 2 else None
 
 
-def branch_status(cwd: str) -> dict:
-    """Every local branch, and every detached checkout, with what it has against
-    the default branch: the dashboard's BRANCHES tab in one call.
+_CREATED = re.compile(r"branch: Created from (.+)$")
+
+
+def _made_from(cwd: str, name: str, local: set, remote: set, base: str) -> tuple[str, bool]:
+    """Where `name` was made from, read off its reflog's first entry ("branch:
+    Created from origin/staging"), as a ref this repo has: the local branch, else
+    origin's copy. A gone remote's name ("nr/release/x") falls back to origin's.
+    "Created from HEAD" names whatever a checkout had out: the base when the start
+    commit is in its history, else the branch whose own reflog stood on that
+    commit (a stack: pins cut from the videos branch's worktree). "" when nothing
+    says, or the reflog expired (90 days).
+    Also whether the branch ever moved after it was made: a worktree opened a
+    minute ago sits on its start commit and looks merged, but it holds no work
+    (True when the reflog can't say)."""
+    rc, out, _ = _run(cwd, "reflog", "show", "--format=%H%x09%gs", f"refs/heads/{name}", "--")
+    lines = [ln for ln in out.splitlines() if ln.strip()] if rc == 0 else []
+    sha, _, said = (lines[-1].partition("\t") if lines else ("", "", ""))
+    m = _CREATED.match(said.strip())
+    src = m.group(1).strip() if m else ""
+    for pre in ("refs/heads/", "refs/remotes/"):
+        src = src[len(pre):] if src.startswith(pre) else src
+    if src == "HEAD" and sha:
+        if base and _run(cwd, "merge-base", "--is-ancestor", sha, base)[0] == 0:
+            return ("" if base == name else base), len(lines) != 1
+        rc, held, _ = _run(cwd, "for-each-ref", "--contains", sha, "--format=%(refname:short)", "refs/heads")
+        for c in (held.split() if rc == 0 else []):
+            if c != name and sha in _run(cwd, "reflog", "show", "--format=%H", f"refs/heads/{c}", "--")[1].split():
+                return c, len(lines) != 1
+        return "", len(lines) != 1
+    cands = [c for c in (src, src.split("/", 1)[1] if "/" in src else "") if c and c != "HEAD"]
+    hit = next((c for c in cands if c in local), "") or next(
+        (r for c in cands for r in (c, f"origin/{c}") if r in remote), "")
+    return ("" if hit == name else hit), (len(lines) != 1)
+
+
+def branch_status(cwd: str, targets: "dict | None" = None) -> dict:
+    """Every local branch, and every detached checkout, with where it goes and what
+    it has against that: the dashboard's BRANCHES tab in one call.
+
+    Each branch goes into its own `target`: `targets` first (the route passes a
+    PR's base, then the user's pick, "" for none), else the branch it was made
+    from (its reflog), else the repo's base; the base itself goes nowhere. One
+    base for all was wrong outside this repo: efas features read "62 ahead of
+    main" while their PRs go to staging, where they were 3 ahead (2026-11-08).
 
     A row: `name` ("" for a detached checkout, which carries `head`), `at` (last
     commit, epoch s), `subject` (its first line), `sha` (the branch's tip, which
-    the tab matches against a merged PR's head), `ahead`/`behind` against the base, `upstream` with
-    `unpushed` (its commits the remote lacks; None when it was never pushed or
-    its remote branch is gone), `worktree` (the checkout holding it, else None),
-    `main` (that checkout is the repo folder itself), `dirty` (uncommitted files
-    there, None without a checkout) and `merged` (contained in the base).
+    the tab matches against a merged PR's head), `target`, `ahead`/`behind`
+    against it, `merged` (contained in it), `worked` (it moved after it was
+    made), `clash` (the files a merge into its target would clash in, from a dry
+    run: [] = clean, None = not asked or git can't say), `upstream` with
+    `unpushed` (its commits the remote lacks; None when it was never pushed or its
+    remote branch is gone), `worktree` (the checkout holding it, else None),
+    `main` (that checkout is the repo folder itself) and `dirty` (uncommitted
+    files there, None without a checkout).
 
-    One `for-each-ref` for the names, dates and upstreams, then a rev-list per
-    branch and a status per checkout. ponytail: a repo with hundreds of
-    branches pays one git call each; fold them into one `rev-list` if that bites."""
+    One `for-each-ref` for the names, dates and upstreams, then a rev-list and a
+    reflog read per branch, a status per checkout, and a dry-run merge per branch
+    with work to land. ponytail: a repo with hundreds of branches pays a few git
+    calls each; fold them into one `rev-list` if that bites."""
     if not is_repo(cwd):
         return {"base": "", "branches": []}
     base = default_branch(cwd)
     trees = worktrees(cwd)
     held = {w["branch"]: w for w in trees if w["branch"]}
-    merged = set(merged_branches(cwd, base))
+    want = targets or {}
+    rc, out, _ = _run(cwd, "for-each-ref", "--format=%(refname:short)", "refs/remotes")
+    remote = {r.strip() for r in out.splitlines() if r.strip()} if rc == 0 else set()
 
     def dirty(path: str) -> int:   # porcelain v2: "#" lines are the branch header
         return sum(1 for ln in (_porcelain(path) or "").splitlines() if ln and not ln.startswith("#"))
@@ -851,33 +989,51 @@ def branch_status(cwd: str) -> dict:
     fmt = ("%(refname:short)%09%(committerdate:unix)%09%(upstream:short)%09%(upstream:track,nobracket)"
            "%09%(objectname)%09%(subject)")
     rc, out, _ = _run(cwd, "for-each-ref", f"--format={fmt}", "--sort=-committerdate", "refs/heads")
+    lines = out.splitlines() if rc == 0 else []
+    local = {ln.split("\t", 1)[0] for ln in lines}
+
+    def known(t: str) -> str:      # a target as a ref git can read: local, else origin's copy
+        return t if t in local else f"origin/{t}" if f"origin/{t}" in remote else t if t in remote else ""
+
     rows: list[dict] = []
-    for line in out.splitlines() if rc == 0 else []:
+    dry = 12   # dry-run merges per read: the newest branches with work to land
+    for line in lines:
         name, at, up, track, sha, subject = (line.split("\t", 5) + [""] * 6)[:6]
         if not name:
             continue
         gone = track.strip() == "gone"
         m = re.search(r"ahead (\d+)", track)
-        ahead, behind = _left_right(cwd, base, name)
+        start, worked = _made_from(cwd, name, local, remote, base)
+        target = "" if name == base else known(want[name]) if name in want else start or base
+        if target == name:
+            target = ""
+        lr = _left_right(cwd, target, name) if target else None
+        ahead, behind = lr or (0, 0)
+        clash = None
+        if lr and ahead:
+            clash = [] if not behind else merge_check(cwd, target, name) if dry > 0 else None
+            dry -= 1 if behind else 0
         w = held.get(name)
         rows.append({
             "name": name, "at": int(at or 0), "subject": subject, "sha": sha,
-            "ahead": ahead, "behind": behind,
+            "target": target, "ahead": ahead, "behind": behind,
+            "merged": bool(lr) and ahead == 0, "worked": worked, "clash": clash,
             "upstream": "" if gone else up,
             "unpushed": None if (gone or not up) else (int(m.group(1)) if m else 0),
             "worktree": w["path"] if w else None, "main": bool(w and w["is_main"]),
-            "dirty": dirty(w["path"]) if w else None, "merged": name in merged,
+            "dirty": dirty(w["path"]) if w else None,
         })
     for w in trees:
         if not w["detached"]:
             continue
-        ahead, behind = _left_right(cwd, base, w["head"])
+        ahead, behind = _left_right(cwd, base, w["head"]) or (0, 0)
         rc, log, _ = _run(cwd, "log", "-1", "--format=%ct%x09%s", w["head"])
         at, subject = (log.strip().split("\t", 1) + [""])[:2] if rc == 0 else ("", "")
         rows.append({
             "name": "", "head": w["head"][:7], "at": int(at or 0), "subject": subject, "sha": w["head"],
-            "ahead": ahead, "behind": behind, "upstream": "", "unpushed": None,
-            "worktree": w["path"], "main": w["is_main"], "dirty": dirty(w["path"]), "merged": False,
+            "target": base, "ahead": ahead, "behind": behind, "merged": False, "worked": True, "clash": None,
+            "upstream": "", "unpushed": None,
+            "worktree": w["path"], "main": w["is_main"], "dirty": dirty(w["path"]),
         })
     return {"base": base, "branches": rows}
 
@@ -894,6 +1050,25 @@ def delete_branch(cwd: str, name: str, force: bool = False) -> tuple[bool, str]:
         return False, "refusing to delete the current/default branch"
     rc, out, err = _run(cwd, "branch", "-D" if force else "-d", "--end-of-options", name)
     return rc == 0, (out + err).strip()
+
+
+def drop_pr_copy(cwd: str, number: int) -> bool:
+    """Delete `pr-<number>`, the copy a PR review leaves when it fetches
+    pull/<number>/head to read it, once nothing would be lost: every commit on it
+    is on a remote branch, or it is exactly the PR's head on GitHub. A checkout
+    still using it keeps it (git refuses). True when it went.
+    shortcut: a PR pushed to after the review fetched it, from a branch never
+    fetched here, keeps its copy; fetch the PR head to check ancestry if that shows up."""
+    name = f"pr-{number}"
+    rc, tip, _ = _run(cwd, "rev-parse", "--verify", "-q", f"refs/heads/{name}")
+    if rc != 0:
+        return False
+    rc, extra, _ = _run(cwd, "rev-list", "--count", tip.strip(), "--not", "--remotes")
+    if not (rc == 0 and extra.strip() == "0"):
+        rc, out, _ = _run(cwd, "ls-remote", "origin", f"refs/pull/{number}/head", timeout=20)
+        if rc != 0 or out.split("\t")[0].strip() != tip.strip():
+            return False
+    return delete_branch(cwd, name, force=True)[0]
 
 
 def merge(cwd: str, branch: str, ff_only: bool = False) -> tuple[bool, str]:
@@ -997,13 +1172,78 @@ def worktree_add(cwd: str, path: str, branch: str, start: str = "",
     else:
         args = ["worktree", "add", "--end-of-options", path, branch]
     rc, out, err = _run(cwd, *args, timeout=30)
+    if rc and create and _run(cwd, "rev-parse", "--verify", "-q", "HEAD")[0]:
+        # a repo with no commits: git only says "invalid reference: HEAD", which names no way out
+        cur = _run(cwd, "symbolic-ref", "-q", "--short", "HEAD")[1].strip() or "the default branch"
+        return False, f"this repo has no commits yet, so there is nothing to branch from. Commit once on {cur}, then try again."
     return rc == 0, (out + err).strip()
+
+
+_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def slug(s: str) -> str:
+    return _SLUG_RE.sub("-", (s or "").strip().strip("/")).strip("-") or "wt"
+
+
+def cut_words(s: str, cap: int) -> str:
+    """A slug cut to `cap` characters at a whole word (a "-"), or mid-word when it is one long word."""
+    if len(s) <= cap:
+        return s
+    i = s.rfind("-", 0, cap + 1)   # a "-" right at the cap means the cap ends a word
+    return s[:i] if i > 0 else s[:cap]
+
+
+def worktree_path_for(repo_root: str, branch: str, free: bool = False) -> str:
+    """Where the bridge keeps `branch`'s worktree of the repo at `repo_root`:
+    <BASE_PATH>/.worktrees/<repo>/<branch>, a hidden dir so the project browser
+    never lists it. free=True adds -2, -3, ... until the directory is unused."""
+    repo = slug(os.path.basename((repo_root or "").rstrip("/")) or "repo")
+    wt = base = os.path.join(config.BASE_PATH, ".worktrees", repo, slug(branch))
+    n = 2
+    while free and os.path.isdir(wt):
+        wt, n = f"{base}-{n}", n + 1
+    return wt
+
+
+def copy_env(src: str, dst: str) -> str:
+    """git checks out tracked files only, so a new worktree lacks .env. Copy it;
+    returns an error text, "" on success or when there is nothing to copy."""
+    s, d = os.path.join(src, ".env"), os.path.join(dst, ".env")
+    if os.path.isfile(s) and not os.path.exists(d):
+        try:
+            shutil.copy2(s, d)
+        except OSError as e:
+            return f"worktree created, .env not copied: {e}"
+    return ""
 
 
 def worktree_remove(cwd: str, path: str, force: bool = True) -> tuple[bool, str]:
     args = ["worktree", "remove"] + (["--force"] if force else []) + ["--end-of-options", path]
     rc, out, err = _run(cwd, *args, timeout=20)
     return rc == 0, (out + err).strip()
+
+
+SCRATCH = (".mystical", ".superpowers")   # git-ignored, so a forced remove would delete them
+
+
+def archive_scratch(cwd: str, path: str) -> str:
+    """Move a worktree's git-ignored scratch (screenshots, probe kits, a plan's
+    ledger) into the repo folder's .mystical/archive/<worktree>/ before the
+    worktree goes, as the user's own clean-ups do by hand. Returns where it went,
+    "" when there was nothing to keep. A clash with an older archive gets -2, -3."""
+    found = [d for d in SCRATCH if os.path.isdir(os.path.join(path, d))]
+    main = next((w["path"] for w in worktrees(cwd) if w["is_main"]), "")
+    if not found or not main or os.path.realpath(main) == os.path.realpath(path):
+        return ""
+    dest = base = os.path.join(main, ".mystical", "archive", os.path.basename(path.rstrip("/")))
+    n = 2
+    while os.path.exists(dest):
+        dest, n = f"{base}-{n}", n + 1
+    os.makedirs(dest)
+    for d in found:
+        shutil.move(os.path.join(path, d), os.path.join(dest, d))
+    return dest
 
 
 def diff_ref(cwd: str, base: str, head: str, path: str) -> str:

@@ -149,9 +149,13 @@ REPORT = _t("show_report", "Present a Markdown file you wrote (a report, a revie
             ["path", "title"])
 SEARCH = _t("search_chats", "Search earlier chats and saved lessons: what was decided, what was tried.",
             {"query": _S, "project_only": {"type": "boolean"}}, ["query"])
-READ_CHAT = _t("read_chat", "Read an earlier chat that search_chats found: its prompts and answers.",
+READ_CHAT = _t("read_chat", "Read an earlier chat that search_chats found: its prompts and answers, each turn's "
+               "mode and model, and the permission and question cards it raised.",
                {"id": _S, "last": {"type": "integer", "description": "How many of its newest turns. Default 10."}},
                ["id"])
+MESSAGE_CHAT = _t("message_chat", "Send a message into another chat of yours that search_chats or read_chat found, "
+                  "as its next turn, marked as from this chat. For a chat that stopped while it still owed work.",
+                  {"id": _S, "text": _S}, ["id", "text"])
 WAIT = _t("wait_for", "Stop waiting by hand: end your turn after this, and you're woken when it's true. Waits on "
           "a time, a pull request's checks, or a local port answering. A prompt from the user cancels it.",
           {"kind": {"type": "string", "enum": ["time", "pr", "port"]},
@@ -178,8 +182,13 @@ SCREENSHOT = _t("screenshot", "Look at a page: returns a screenshot to you alone
 RECORD = _t("record", "Record a page to a video and put it in the chat. Returns its final frame. It runs up to 40 s.",
             {"url": _S, "seconds": {"type": "integer"}, "caption": _S}, ["url"])
 
+OPEN_SITE = _t("open_site", "Open a site for the user in the Mystical browser: a real window on their screen, on a profile of its "
+               "own that keeps their sign-ins, with Mystical's comment tool. They pin comments on the page and send them "
+               "here as a message naming each element, with a picture of it. Use it when they want to look at or comment "
+               "on a site, staging or live, or when show_design's view can't load it (its sign-in or security blocks a frame).",
+               {"url": {"type": "string", "description": "The address, like staging.example.com/planning."}}, ["url"])
 # Listed for every session that gets the gateway.
-CORE_ALL = (SHOW, DATA, DESIGN, OFFER, CHECKS, DRIVE)
+CORE_ALL = (SHOW, DATA, DESIGN, OFFER, CHECKS, DRIVE, OPEN_SITE)
 # Reached through find_tools: rarely used, so they don't cost every turn.
 DESIGN_CONTEXT = _t("design_context", "What's already decided in this project: its DESIGN.md, CSS variables, components, "
                     "the references the user keeps and existing boards. Read it before designing, and reuse what's there.", {}, [])
@@ -209,7 +218,7 @@ DOC_PAGE = _t("doc_page", "Write one docs page from the contents, as Markdown. R
 READ_DOCS = _t("read_docs", "The project's docs: with no arguments the contents and what's stale, with id or path a page, with query the pages "
                "mentioning it. Models wrote them: where they disagree with the code, trust the code.",
                {"id": _S, "path": _S, "query": _S}, [])
-EXTRA_ALL = (DOCS_OUTLINE, DOC_PAGE, READ_DOCS, DESIGN_CONTEXT, INSPECT, CRITIQUE, GRAB_STYLE, COMPARE, REPORT, SEARCH, READ_CHAT, WAIT, NOTIFY, LOGS, USAGE, SECRET)
+EXTRA_ALL = (DOCS_OUTLINE, DOC_PAGE, READ_DOCS, DESIGN_CONTEXT, INSPECT, CRITIQUE, GRAB_STYLE, COMPARE, REPORT, SEARCH, READ_CHAT, MESSAGE_CHAT, WAIT, NOTIFY, LOGS, USAGE, SECRET)
 # Device runs aren't here: they run under a device's Claude account and their route finds
 # the session by its Claude id, so an agent session has nothing to send.
 EXTRA_AGENT = (WAIT_SESSION, SCREENSHOT, RECORD)
@@ -376,6 +385,20 @@ def _show_design(s: dict, job, a: dict) -> dict:
     if down:
         said += f"Nothing is answering yet at {', '.join(down)}. Check the server is up.\n"
     return _text(f"{said}Let them comment. {_placed(job, ref)}")
+
+
+def _open_site(s: dict, job, a: dict) -> dict:
+    """The Mystical browser (bridge/site_browser.py), and its card in the chat."""
+    from bridge import site_browser
+    try:
+        # The chat the user sees, not a helper inside it: its card asks after that one.
+        got = site_browser.open_site(s.get("parent_session") or s["id"], str(a.get("url") or ""))
+    except site_browser.Refused as e:
+        return _text(str(e), error=True)
+    if job is not None:
+        job.add({"type": "browser", "url": got["url"], "profile": got["profile"]})
+    return _text(f"Opened {got['url']} in the Mystical browser. Each time they press Send, their comments start a new chat "
+                 "on this project, so nothing comes back here and there's nothing to wait for.")
 
 
 def _design_context(s: dict, job, a: dict) -> dict:
@@ -682,8 +705,40 @@ def _read_chat(s: dict, job, a: dict) -> dict:
     if not rows:
         return _text("No chat has that id.", error=True)
     turns = store.turns_of(rows[0]["id"])[-min(int(a.get("last") or 10), 50):]
-    blocks = [handoff._turn_block(rows[0], t, tools=False) for t in turns]
+    blocks = [handoff._turn_block(rows[0], t, tools=False) + _asked(rows[0], t) for t in turns]
     return _text(f"{rows[0].get('title')}\n\n" + "\n\n".join(b for b in blocks if b)[:40000])
+
+
+def _message_chat(s: dict, job, a: dict) -> dict:
+    """Queue `text` as the other chat's next turn, the way the queue route does for
+    you, tagged with this chat's name so its transcript says who sent it."""
+    want, body = str(a.get("id") or ""), str(a.get("text") or "").strip()
+    if len(want) < 6 or not body:
+        return _text("Give the id search_chats showed and the text to send.", error=True)
+    rows = [r for r in store.list_sessions_all(s["chat_id"], include_archived=False, max_age_secs=None)
+            if r["id"].startswith(want) and r["id"] != s["id"]]
+    if not rows:
+        return _text("No other open chat has that id.", error=True)
+    from bridge import queue_manager  # local import: heavy module
+    o = rows[0]
+    msg = f"[from the chat \"{s.get('title') or s['id'][:8]}\"] {body}"
+    queue_manager.enqueue(o["id"], text=msg, prompt=msg, images=[], model=None, effort=None,
+                          permission_mode=None, width=None, sel=[], surface="carry-on",
+                          chat_id=s["chat_id"], project=o.get("project") or "", sent_by="mystical:chat",
+                          sent_why=f"the chat \"{s.get('title') or s['id'][:8]}\" sent it with send_message")
+    return _text(f"Queued in \"{o.get('title')}\": it runs as that chat's next turn.")
+
+
+def _asked(s: dict, t: dict) -> str:
+    """What a turn ran with and the cards it raised. Why a session asked is recorded only
+    in these events (the CLI transcript keeps no cards); handoff prompts leave it out."""
+    lines = [f"- ran with mode {t.get('permission_mode') or 'unrecorded'}, model {t.get('model') or 'unrecorded'}"]
+    for e in store.events_of_turn(s["id"], t["id"]):
+        if e["type"] == "permission":
+            lines.append(f"- asked to allow {e.get('tool_name')}: {str(e.get('summary') or '')[:160]}")
+        elif e["type"] == "question":
+            lines.append(f"- asked: {str(((e.get('questions') or [{}])[0]).get('question') or '')[:200]}")
+    return "\n" + "\n".join(lines)
 
 
 # ------- waiting -------------------------------------------------------------------------
@@ -821,9 +876,9 @@ def _record(s: dict, job, a: dict) -> dict:
 
 
 _FUNCS = {
-    "show_image": _show_image, "show_data": _show_data, "show_design": _show_design, "docs_outline": _docs_outline, "doc_page": _doc_page, "read_docs": _read_docs, "offer_review": _offer_review, "design_context": _design_context,
+    "show_image": _show_image, "show_data": _show_data, "show_design": _show_design, "open_site": _open_site, "docs_outline": _docs_outline, "doc_page": _doc_page, "read_docs": _read_docs, "offer_review": _offer_review, "design_context": _design_context,
     "inspect_ui": _inspect_ui, "critique_design": _critique_design, "grab_style": _grab_style, "compare_images": _compare, "run_checks": _run_checks, "drive_page": _drive,
-    "show_report": _report, "search_chats": _search, "read_chat": _read_chat, "wait_for": _wait_for,
+    "show_report": _report, "search_chats": _search, "read_chat": _read_chat, "message_chat": _message_chat, "wait_for": _wait_for,
     "wait_for_session": _wait_session, "notify_me": _notify, "server_logs": _logs, "usage_left": _usage,
     "request_secret": _request_secret, "screenshot": _screenshot, "record": _record,
 }

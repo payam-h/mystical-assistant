@@ -1,95 +1,48 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDownToLine, ChevronRight } from "lucide-react";
-import { api, type Notice, type UpdateInfo } from "../../api";
+import { ArrowDownToLine, ArrowUpFromLine, ChevronRight, FileDiff, GitBranch, Monitor, Server, Sparkles, TriangleAlert } from "lucide-react";
+import { api, type Transcript, type UpdateInfo } from "../../api";
 import { notify } from "./Notifications";
 import { Bullets, Meta } from "./ChangelogButton";
-import { ago } from "../../lib/notices";
+import { Flow, type FlowNode } from "./LiveReader";
 import { watchRestart } from "../../lib/restart";
 import { popPlace } from "../../lib/prchip";
+import { openSession } from "../../lib/devicerun";
+import { finished, fixView, isLive, type FixView } from "../../lib/fixsession";
+import { wall } from "../../lib/surfaces";
 
 // The platform's own checkout, both directions: pull the commits waiting
 // upstream (then rebuild + restart the bridge), or ship the work sitting here —
-// commit it with a message Claude writes from the diff, then push. Two looks:
-// `rail` is the right rail's UPDATE icon above ⌘K, always present — quiet when
-// there is nothing to do, a count of incoming commits when there is (an amber
-// dot for unshipped local work alone); `badge` is the labelled chip SETTINGS
-// shows when an update is waiting. Before an update is taken, its popover leads
-// with what it brings (bridge/whatsnew.py preview: a headline and bullets), and the
-// rail's button is where that news pops out.
-// ponytail: self-contained (polls + owns its popover) like NotificationCenter, so
-// the Strip stays a dumb header.
-const POLL_MS = 300_000; // 5 min — new commits are not a live-tail concern
+// commit it with a message Claude writes from the diff, then push. Two looks over
+// one set of actions (useUpdateActions): UpdateReader is the changelog's UPDATE and
+// SHIP rows (the right rail's one button, ChangelogButton); UpdateButton is the
+// labelled chip SETTINGS shows, with its own popover. Before an update is taken, it
+// leads with what it brings (bridge/whatsnew.py preview: a headline and bullets).
+// ponytail: the chip polls on its own (like NotificationCenter), so SETTINGS stays dumb;
+// the rail's hub polls for its rows.
+export const UPDATE_POLL_MS = 300_000; // 5 min — new commits are not a live-tail concern
 
-export function UpdateButton({ onFeed, variant = "badge" }: {
-  onFeed: (texts: string[], project?: string, fresh?: boolean) => void;
-  variant?: "badge" | "rail";
-}) {
-  const [info, setInfo] = useState<UpdateInfo | null>(null);
-  const [open, setOpen] = useState(false);
+export type Feed = (texts: string[], project?: string, fresh?: boolean, onSession?: (id: string) => void) => void;
+
+// The fixing session outlives the popover (readers remount on every open): while it
+// exists, the failure stays up and links to it instead of offering the update again.
+let held: { err: string; failed: "pull" | "build" | "ship"; session: string } | null = null;
+
+/** Pull & restart, commit & push, and the FIX WITH AI escape hatch, for either look. */
+function useUpdateActions(info: UpdateInfo | null, reload: () => Promise<void>, onFeed: Feed, onDone: () => void) {
   const [phase, setPhase] = useState<"" | "updating" | "restarting" | "shipping" | "checking">("");
-  const [err, setErr] = useState("");
-  const [failed, setFailed] = useState<"pull" | "build" | "ship">("pull");
-  const [hov, setHov] = useState("");
-  const [fresh, setFresh] = useState<Notice | null>(null);   // the waiting update, popped out of the rail button
-  const [commitsOpen, setCommitsOpen] = useState(false);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  const busy = phase !== "";
-
-  useEffect(() => {
-    let live = true;
-    const tick = async () => {
-      try { const u = await api.update(); if (live) setInfo(u); } catch { /* ignore */ }
-    };
-    void tick();
-    const id = setInterval(tick, POLL_MS);
-    return () => { live = false; clearInterval(id); };
-  }, []);
-
-  // The rail's button is where a waiting update pops out (hud:update-pop, from the
-  // bell's poll) and what the changelog's Update now and an OS banner open (hud:update).
-  useEffect(() => {
-    if (variant !== "rail") return;
-    const pop = (e: Event) => { setFresh((e as CustomEvent<Notice>).detail); void load(); };
-    const show = () => { setFresh(null); void load().then(() => setOpen(true)); };
-    window.addEventListener("hud:update-pop", pop);
-    window.addEventListener("hud:update", show);
-    return () => { window.removeEventListener("hud:update-pop", pop); window.removeEventListener("hud:update", show); };
-  }, [variant]);
-
-  // However the popover opened, the pop has done its job: it doesn't come back when it shuts.
-  useEffect(() => { if (open) setFresh(null); }, [open]);
-
-  // Release notes you opened are read: the changelog's dot needn't keep them.
-  const comingId = open && info?.coming && !info.coming.read ? info.coming.id : null;
-  useEffect(() => {
-    if (comingId !== null) void api.noticesRead([comingId]).catch(() => { /* next poll */ });
-  }, [comingId]);
-
-  // Closes the way the PR chip's popover does: a press outside it, or Escape —
-  // unless a pull or push is mid-flight, when it stays until that lands.
-  useEffect(() => {
-    if (!open || busy) return;
-    const onDown = (e: PointerEvent) => {
-      const t = e.target as Node;
-      if (!btnRef.current?.contains(t) && !popRef.current?.contains(t)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); setOpen(false); } };
-    document.addEventListener("pointerdown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("pointerdown", onDown); document.removeEventListener("keydown", onKey); };
-  }, [open, busy]);
-
-  async function load() {
-    try { setInfo(await api.update()); } catch { /* ignore */ }
-  }
+  const [err, setErr] = useState(held?.err ?? "");
+  const [failed, setFailed] = useState<"pull" | "build" | "ship">(held?.failed ?? "pull");
+  const [session, setSession] = useState(held?.session ?? "");
+  const fix = useFixSession(session);
 
   // Pull + rebuild happen inside this one request (tens of seconds); the bridge
   // only restarts once it answers ok.
   async function apply() {
     setPhase("updating");
     setErr("");
+    setSession("");
+    held = null;
     try {
       const r = await api.applyUpdate();
       if (!r.ok) {
@@ -105,7 +58,11 @@ export function UpdateButton({ onFeed, variant = "badge" }: {
       return;
     }
     setPhase("restarting");
-    void waitForRestart();
+    // The bridge is re-execing: the boot intro comes back up and waits it out,
+    // then reloads into the new build. Only returns if it never came back.
+    await watchRestart("PULLED");
+    setPhase("");
+    onDone();
   }
 
   // Commit (message generated server-side from the diff) + push, in one request.
@@ -113,6 +70,8 @@ export function UpdateButton({ onFeed, variant = "badge" }: {
   async function ship() {
     setPhase("shipping");
     setErr("");
+    setSession("");
+    held = null;
     try {
       const r = await api.publishUpdate();
       if (!r.ok) {
@@ -129,8 +88,8 @@ export function UpdateButton({ onFeed, variant = "badge" }: {
       return;
     }
     setPhase("");
-    setOpen(false);
-    await load();
+    onDone();
+    await reload();
   }
 
   // Escape hatch when git refuses (diverged history, rejected push…) or a build
@@ -141,8 +100,10 @@ export function UpdateButton({ onFeed, variant = "badge" }: {
     const where = info?.path || "the mystical-assistant repo";
     const pending = info?.behind ?? 0;
     onFeed([
+      // A refused pull or push is a routine merge (the recipe is in memory), so it skips the
+      // paths pack's bug path (bridge/paths.py). A broken build is a bug, and takes it.
       failed === "ship"
-        ? `Committing and pushing the platform's own work in \`${where}\` failed. Work out ` +
+        ? `No path for this message.\n\nCommitting and pushing the platform's own work in \`${where}\` failed. Work out ` +
           `what blocks it and fix it, then commit the changes with a good message and push.` +
           `\n\ngit said:\n${err}`
         : failed === "build"
@@ -150,28 +111,261 @@ export function UpdateButton({ onFeed, variant = "badge" }: {
           `bridge's own checkout (${where}) brought the new commits in, then a web build broke. ` +
           `Work out why and fix it, then rebuild and restart so the update goes live.` +
           `\n\nThe update said:\n${err}`
-        : `Updating the platform failed: \`git pull --ff-only\` in the bridge's own checkout ` +
+        : `No path for this message.\n\nUpdating the platform failed: \`git pull --ff-only\` in the bridge's own checkout ` +
           `(${where}) refused. Work out what blocks it and fix it, then pull the ${pending} ` +
-          `pending commit${pending === 1 ? "" : "s"}. Don't discard my source changes — ` +
-          `generated bundles under dist/ are safe to reset.\n\ngit said:\n${err}`,
-    ], info?.project, true);
-    setOpen(false);
-    setErr("");
+          `pending commit${pending === 1 ? "" : "s"}. Don't discard my source changes.` +
+          `\n\ngit said:\n${err}`,
+    // The popover shuts before the session exists, so its id is held here, not only in state.
+    ], info?.project, true, (id) => { held = { err, failed, session: id }; setSession(id); });
+    onDone();
   }
 
-  // The bridge is re-execing: the boot intro comes back up and waits it out,
-  // then reloads into the new build. Only returns if it never came back.
-  async function waitForRestart() {
-    await watchRestart("PULLED");
-    setPhase("");
-    setOpen(false);
+  function openFix() {
+    openSession(session);
+    onDone();
+  }
+
+  // Retry runs it again, which drops the held fix first (apply/ship clear it).
+  function retry() {
+    return failed === "ship" ? ship() : apply();
   }
 
   async function recheck() {
     setPhase("checking");
-    await load();
+    await reload();
     setPhase("");
   }
+
+  return { phase, busy: phase !== "", err, failed, session, fix, apply, ship, fixWithClaude, openFix, retry, recheck };
+}
+
+// The fixing session, live: /running every few seconds says what it does now; once it
+// goes quiet, one tailed transcript says how its last turn ended (lib/fixsession). The
+// transcript is fetched again only after the session was live again. Polling stops
+// once the fix ends; reopening the reader looks again.
+const FIX_POLL_MS = 4000;
+function useFixSession(id: string): FixView | null {
+  const [view, setView] = useState<FixView | null>(null);
+  useEffect(() => {
+    setView(null);
+    if (!id) return;
+    let on = true, t: Transcript | null = null, wasLive = true;
+    const tick = async () => {
+      try {
+        const run = await api.running();
+        const live = isLive(id, run);
+        if (!live && (wasLive || !finished(t))) t = await api.transcript(id, 0, { tail: 1 });
+        wasLive = live;
+        const v = fixView(id, run, t);
+        if (on) setView(v);
+        if (v.phase === "done" || v.phase === "failed") clearInterval(h);   // ended: nothing left to follow
+      } catch { /* next tick */ }
+    };
+    const h = setInterval(tick, FIX_POLL_MS);
+    void tick();
+    return () => { on = false; clearInterval(h); };
+  }, [id]);
+  return view;
+}
+
+const FIX_TOP: Record<FixView["phase"], string> = {
+  starting: "AI IS STARTING", running: "AI IS FIXING", ask: "AI WAITS ON YOU", done: "FIX DONE", failed: "FIX FAILED",
+};
+
+/** The session fixing it, as one row you open it from (design B · SESSION ROW). */
+function FixRow({ v, onOpen }: { v: FixView | null; onOpen: () => void }) {
+  const phase = v?.phase ?? "starting";
+  const tone = phase === "done" ? "ok" : phase === "failed" ? "bad" : phase === "ask" ? "warn" : "";
+  return (
+    <button className={`upd-fix ${tone}`} onClick={onOpen}>
+      <span className="top"><i className={`dot${phase === "running" || phase === "starting" ? " pulse" : ""}`} />
+        {FIX_TOP[phase]}{phase === "done" && v?.secs ? ` · ${wall(v.secs).toLowerCase()}` : ""}<span className="go">open ›</span></span>
+      <b>{v?.title || "Fixing the update"}</b>
+      {v?.line && <span className="l">{v.line}</span>}
+    </button>
+  );
+}
+
+/** git's error, folded to its last line once a fix is under way. */
+function ErrFold({ err, what }: { err: string; what: string }) {
+  const [open, setOpen] = useState(false);
+  const last = err.trim().split("\n").filter(Boolean).at(-1) ?? "";
+  return (
+    <div className="gl-err upd-errfold">
+      <button aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <b>{what}</b><span>{last}</span><i>{open ? "hide" : "show"} ›</i></button>
+      {open && <pre>{err}</pre>}
+    </div>
+  );
+}
+
+// Release notes you opened are read: the changelog's dot needn't keep them.
+function useReadComing(info: UpdateInfo | null, shown: boolean) {
+  const comingId = shown && info?.coming && !info.coming.read ? info.coming.id : null;
+  useEffect(() => {
+    if (comingId !== null) void api.noticesRead([comingId]).catch(() => { /* next poll */ });
+  }, [comingId]);
+}
+
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+/** UPDATE (side "pull") or SHIP (side "ship"), read in the changelog like any change. */
+export function UpdateReader({ info, side, reload, onFeed, onBusy, onClose, onShip }: {
+  info: UpdateInfo;
+  side: "pull" | "ship";
+  reload: () => Promise<void>;
+  onFeed: Feed;
+  onBusy: (busy: boolean) => void;
+  onClose: () => void;
+  onShip: () => void;   // UPDATE's "Ship yours first": reads the SHIP row
+}) {
+  const a = useUpdateActions(info, reload, onFeed, onClose);
+  const [commitsOpen, setCommitsOpen] = useState(false);
+  useEffect(() => { onBusy(a.busy); }, [a.busy]);
+  useEffect(() => () => onBusy(false), []);
+  useReadComing(info, side === "pull");
+  const incoming = info.behind ?? 0;
+  const dirty = info.dirty ?? 0, ahead = info.ahead ?? 0;
+  const coming = info.coming ?? null;
+  const fixing = a.err !== "" && a.session !== "";   // handed to an AI session: follow it, don't offer the update again
+  const bad = a.err !== "" && !fixing;
+  const fphase = a.fix?.phase ?? "starting";
+  const fixed = fixing && fphase === "done";
+  const at = (s: FlowNode["state"]): FlowNode["state"] => (bad ? "bad" : s);
+  const fixKick = fixed ? (side === "ship" ? "FIXED" : "FIXED · READY TO GO LIVE") : fphase === "failed" ? "FIX FAILED" : side === "ship" ? "FIXING · PUSH FAILED" : "FIXING · UPDATE FAILED";
+  const fixTone = fixed ? "ok" : fphase === "failed" ? "bad" : "";
+  const fixBody = <><FixRow v={a.fix} onOpen={a.openFix} /><ErrFold err={a.err} what={a.failed === "build" ? "BUILD SAID" : "GIT SAID"} /></>;
+  const fixWait = <><button className="pri" onClick={a.openFix}>▸ Open session</button><span style={{ flex: 1 }} /><button onClick={() => void a.retry()} disabled={a.busy}>Retry now</button></>;
+
+  if (side === "ship") {
+    const commit = dirty > 0;
+    return (
+      <div className="clg-read rl-read">
+        <div className="rl-body mscroll">
+        <Flow nodes={[
+          ...([] as FlowNode[]),
+          ...(commit ? [{ key: "files", icon: FileDiff, name: plural(dirty, "file"), tag: "COMMIT", tone: "var(--warn)", state: at(a.phase === "shipping" ? "now" : undefined) }] : []),
+          { key: "push", icon: ArrowUpFromLine, name: commit ? "Push" : plural(ahead, "commit"), tag: "PUSH", tone: "var(--warn)", state: at(a.phase === "shipping" && !commit ? "now" : undefined) },
+          { key: "up", icon: GitBranch, name: "Upstream", tag: info.branch.toUpperCase(), tone: "var(--txl)", state: "next" },
+        ]} />
+        <div className="clg-t">
+          <div className={`rl-kick ${fixing ? fixTone : bad ? "bad" : "warn"}`}>{fixing ? fixKick : bad ? "PUSH FAILED" : commit ? "YOURS · NEEDS COMMIT + PUSH" : "YOURS · NEEDS PUSH"}</div>
+          <div className="h">
+            <b>{commit ? `${plural(dirty, "change")} to ship` : `${plural(ahead, "commit")} to push`}</b>
+            <span className="tm">⎇ {info.branch}</span>
+          </div>
+          <div className="gl-cm rl-cm warn">
+            {(info.files ?? []).slice(0, 6).map((f) => (
+              <div key={f.path} className="rl-file"><b>{f.status}</b><span>{f.path}</span><i className="ok">+{f.add}</i><i className="bad">−{f.del}</i></div>
+            ))}
+            {(info.files?.length ?? 0) > 6 && <div className="more">+ {plural(info.files.length - 6, "more file")}</div>}
+            {(info.outgoing ?? []).slice(0, 4).map((c) => <div key={c.sha}><b>{c.sha}</b>{c.subject}</div>)}
+            {ahead > (info.outgoing ?? []).slice(0, 4).length && <div className="more">+ {plural(ahead - (info.outgoing ?? []).slice(0, 4).length, "more commit")}</div>}
+          </div>
+          {fixing && fixBody}
+          {bad && <div className="gl-err"><div className="h">PUSH FAILED</div><pre>{a.err}</pre></div>}
+        </div>
+        </div>
+        <div className="rl-foot">
+        <div className="clg-acts">
+          {fixing ? fixWait
+            : bad ? <button className="pri" onClick={a.fixWithClaude}>▸ Fix with AI</button>
+            : <button className="warn" onClick={() => void a.ship()} disabled={a.busy}>
+                <ArrowUpFromLine size={14} strokeWidth={2} />{a.phase === "shipping" ? "Committing…" : commit ? "Commit & push" : "Push"}</button>}
+        </div>
+        <div className="clg-mline"><span>{fixing ? "This row follows the fixing session live." : commit ? "Commits with a message written from the diff, then pushes." : "Pushes the commits to the upstream."}</span></div>
+        </div>
+      </div>
+    );
+  }
+
+  const pullState: FlowNode["state"] = a.phase === "updating" ? "now" : a.phase === "restarting" ? "ok" : undefined;
+  return (
+    <div className="clg-read rl-read">
+      <div className="rl-body mscroll">
+      <Flow nodes={[
+        fixing
+          ? { key: "pull", icon: Sparkles, name: fixed ? "ready" : "AI", tag: fixed ? "FIXED" : "FIXING", tone: fixed ? "var(--ok)" : "var(--acc)",
+              state: fphase === "failed" ? "bad" : fixed ? "ok" : "now" }
+          : { key: "pull", icon: ArrowDownToLine, name: plural(incoming, "commit"), tag: "PULL", tone: "var(--ok)", state: at(pullState) },
+        { key: "dashboard", icon: Monitor, name: "Dashboard", tag: "REBUILD", tone: "var(--acc)", state: bad ? undefined : pullState },
+        { key: "bridge", icon: Server, name: "Bridge", tag: "RESTART", tone: "var(--warn)", state: a.phase === "restarting" ? "now" : undefined },
+      ]} />
+      <div className="clg-t">
+        <div className={`rl-kick ${fixing ? fixTone : bad ? "bad" : "ok"}`}>{fixing ? fixKick : bad ? "UPDATE FAILED" : a.phase === "restarting" ? "RESTARTING" : `COMING · ${incoming} COMMIT${incoming === 1 ? "" : "S"}`}</div>
+        <div className="h">
+          <b>{coming ? coming.title : `${plural(incoming, "new commit")} upstream`}</b>
+          {!coming && <span className="tm">⎇ {info.branch}</span>}
+        </div>
+        {coming && <div className="upd-pv"><Bullets body={coming.body} /></div>}
+        <div className="upd-row">
+          {coming && <Meta r={coming} />}
+          <span style={{ flex: 1 }} />
+          <button className="upd-fold" aria-expanded={commitsOpen} onClick={() => setCommitsOpen((v) => !v)}>
+            {commitsOpen ? "Hide" : "Show"} the commits
+            <ChevronRight size={11} strokeWidth={1.8} style={{ transform: commitsOpen ? "rotate(90deg)" : undefined }} />
+          </button>
+        </div>
+        {commitsOpen && <div className="gl-cm rl-cm ok">{(info.commits ?? []).map((c) => <div key={c.sha}><b>{c.sha}</b>{c.subject}</div>)}</div>}
+        {dirty > 0 && <div className="gl-turns rl-dirty"><TriangleAlert size={13} strokeWidth={1.8} />
+          <span>Your {plural(dirty, "uncommitted file")} block{dirty === 1 ? "s" : ""} the pull. Ship yours first, then update.</span></div>}
+        {fixing && fixBody}
+        {bad && <div className="gl-err"><div className="h">UPDATE FAILED</div><pre>{a.err}</pre></div>}
+      </div>
+      </div>
+      <div className="rl-foot">
+      <div className="clg-acts">
+        {fixed ? <><button className="ok" onClick={() => void a.apply()}>
+              <ArrowDownToLine size={14} strokeWidth={2} />Rebuild &amp; restart</button>
+              <span style={{ flex: 1 }} /><button onClick={a.openFix}>Open session</button></>
+          : fixing ? fixWait
+          : bad ? <button className="pri" onClick={a.fixWithClaude}>▸ Fix with AI</button>
+          : <button className="ok" onClick={() => void a.apply()} disabled={a.busy}>
+              <ArrowDownToLine size={14} strokeWidth={2} />{a.phase === "updating" ? "Updating…" : a.phase === "restarting" ? "Restarting…" : "Pull & restart"}</button>}
+        {dirty > 0 && !bad && !a.busy && <button onClick={onShip}>Ship yours first</button>}
+      </div>
+      <div className="clg-mline"><span>{fixed ? "Rebuilds the dashboard and restarts the bridge."
+        : fixing ? "The pull waits for the fix; this row follows the session live."
+        : "Pulls, rebuilds the dashboard and restarts the bridge. Running turns pick up where they were."}</span></div>
+      </div>
+    </div>
+  );
+}
+
+/** The labelled chip SETTINGS shows when an update is waiting, with its own popover. */
+export function UpdateButton({ onFeed }: { onFeed: Feed }) {
+  const [info, setInfo] = useState<UpdateInfo | null>(null);
+  const [open, setOpen] = useState(false);
+  const [hov, setHov] = useState("");
+  const [commitsOpen, setCommitsOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  async function load() {
+    try { setInfo(await api.update()); } catch { /* ignore */ }
+  }
+  const { phase, busy, err, failed, session, fix, apply, ship, fixWithClaude, openFix, retry, recheck } = useUpdateActions(info, load, onFeed, () => setOpen(false));
+
+  useEffect(() => {
+    void load();
+    const id = setInterval(load, UPDATE_POLL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  useReadComing(info, open);
+
+  // Closes the way the PR chip's popover does: a press outside it, or Escape —
+  // unless a pull or push is mid-flight, when it stays until that lands.
+  useEffect(() => {
+    if (!open || busy) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (!btnRef.current?.contains(t) && !popRef.current?.contains(t)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); setOpen(false); } };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("pointerdown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open, busy]);
 
   if (!info || !info.repo) return null;
   // A bridge process older than this bundle answers without the fields it
@@ -195,13 +389,10 @@ export function UpdateButton({ onFeed, variant = "badge" }: {
 
   const onClick = () => (incoming || local ? setOpen((o) => !o) : void recheck());
   // Where the popover sits: under the button, or above it when the button is
-  // low on the screen (the rail's is), flush with its right edge and on screen.
+  // low on the screen, flush with its right edge and on screen.
   const rect = open ? btnRef.current?.getBoundingClientRect() : undefined;
   const pop = rect && { ...popPlace(rect, window.innerHeight),
                         right: Math.max(8, Math.min(window.innerWidth - rect.right, window.innerWidth - 428)) };
-  // The pop sits left of the rail, its notch on the button, like the changelog's.
-  const at = fresh && !open && variant === "rail" ? btnRef.current?.getBoundingClientRect() : undefined;
-  const out = at && { right: window.innerWidth - at.left + 10, bottom: Math.max(8, window.innerHeight - at.bottom - 4) };
   const coming = info.coming ?? null;
   const commitList = (
     <div style={{ marginTop: 10, maxHeight: 150, overflowY: "auto", borderLeft: "2px solid color-mix(in srgb, var(--acc) 30%, transparent)", padding: "2px 0 2px 10px" }}>
@@ -212,37 +403,10 @@ export function UpdateButton({ onFeed, variant = "badge" }: {
       ))}
     </div>
   );
-  // Sized and lit like the rail's tab buttons, so it reads as one more of them;
-  // the count is the same filled pill a tab's badge is, in the update's green.
-  const railBtn = (
-    <button
-      ref={btnRef}
-      onClick={onClick}
-      title={phase === "checking" ? "Checking for updates…" : `Update — ${title}`}
-      aria-label="Update the platform"
-      {...hp("btn")}
-      className={`relative flex h-[38px] items-center justify-center border-l-2 border-transparent hover:bg-accent${out ? " clg-lit" : ""}`}
-      style={{
-        appearance: "none", cursor: "pointer",
-        color: incoming ? "var(--ok)" : local ? "var(--warn)" : hov === "btn" ? "var(--acc)" : "var(--muted-2)",
-        opacity: phase === "checking" ? 0.5 : 1,
-      }}
-    >
-      <ArrowDownToLine size={18} strokeWidth={1.8} aria-hidden />
-      {incoming > 0 ? (
-        <span
-          className="absolute right-[3px] top-[1px] h-[15px] min-w-[15px] rounded-full px-[3px] text-center text-[length:var(--t7)] leading-[15px]"
-          style={{ background: "var(--ok)", color: "var(--acc-on)" }}
-        >{incoming > 99 ? "99+" : incoming}</span>
-      ) : local > 0 ? (
-        <span className="absolute right-[5px] top-[4px] h-[8px] w-[8px] rounded-full" style={{ background: "var(--warn)" }} />
-      ) : null}
-    </button>
-  );
 
   return (
     <>
-      {variant === "rail" ? railBtn : <button
+      <button
         ref={btnRef}
         onClick={onClick}
         title={title}
@@ -271,36 +435,12 @@ export function UpdateButton({ onFeed, variant = "badge" }: {
             : phase !== "checking" && local && !incoming ? <><span className="shipword">SHIP </span><span style={{ color: "var(--txm)", letterSpacing: ".4px" }}>{local}</span></>
             : label}
         </span>
-      </button>}
-
-      {/* What a waiting update brings, out of the rail button: the changelog's own
-          callout, 8 s (its bar's animation is the clock, so hover holds it). */}
-      {fresh && out && createPortal(
-        <div key={fresh.id} className="clg-co" style={out} role="status" onClick={() => { setFresh(null); setOpen(true); }}>
-          <div className="in">
-            <div className="clg-co-h">
-              <ArrowDownToLine size={13} strokeWidth={1.8} className="clg-ic" />
-              <span className="v">{fresh.verb}</span>
-              <span className="w">{ago(fresh.at, Date.now() / 1000)}</span>
-            </div>
-            <div className="clg-co-t">{fresh.title}</div>
-            <div className="clg-co-b">{fresh.body.split("\n").filter(Boolean).map((l) => l.split(" — ")[0]).join(" · ")}</div>
-            <div className="clg-co-f">
-              <span>{`${Number(fresh.meta.commits) || 0} commit${fresh.meta.commits === 1 ? "" : "s"}`}</span>
-              <span style={{ flex: 1 }} />
-              <span className="go">See what's coming ›</span>
-            </div>
-            <span className="bar" onAnimationEnd={(e) => { if (e.animationName === "clg-bar") setFresh(null); }} />
-          </div>
-          <button className="x" title="dismiss" aria-label="dismiss" onClick={(e) => { e.stopPropagation(); setFresh(null); }}>×</button>
-        </div>,
-        document.querySelector("[data-theme]") ?? document.body,
-      )}
+      </button>
 
       {/* A popover off the button, the way the PR chip's opens — not a modal in
           the middle of the screen, so the mouse stays where it clicked. Portalled
           into the themed container so position:fixed escapes any animated
-          ancestor, and so it stacks over SETTINGS when the badge opens it. */}
+          ancestor, and so it stacks over SETTINGS. */}
       {open && pop && (incoming > 0 || local > 0 || err !== "" || busy) && createPortal(
         <div ref={popRef} className="mscroll"
           style={{ position: "fixed", ...pop, width: 420, maxWidth: "92vw", overflowY: "auto", zIndex: 96, border: "1px solid color-mix(in srgb, var(--acc) 40%, transparent)", background: "color-mix(in srgb, var(--panel2) 99%, transparent)", boxShadow: "0 14px 40px var(--shadow-pop)", animation: "mslide .16s ease both" }}>
@@ -378,7 +518,10 @@ export function UpdateButton({ onFeed, variant = "badge" }: {
                 <span>A fast-forward pull refuses on a dirty tree — commit &amp; push first.</span>
               </div>
             )}
-            {err && (
+            {err && session && (
+              <div className="upd-fixwrap"><FixRow v={fix} onOpen={openFix} /><ErrFold err={err} what={failed === "build" ? "BUILD SAID" : "GIT SAID"} /></div>
+            )}
+            {err && !session && (
               <div style={{ marginTop: 12, border: "1px solid color-mix(in srgb, var(--err) 40%, transparent)", background: "color-mix(in srgb, var(--err) 7%, transparent)", padding: "9px 11px" }}>
                 <div style={{ fontSize: "var(--t9)", letterSpacing: 1.5, color: "var(--err)", marginBottom: 6 }}>{failed === "ship" ? "PUSH FAILED" : "UPDATE FAILED"}</div>
                 <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: "var(--t95)", color: "var(--txm)", whiteSpace: "pre-wrap", maxHeight: 150, overflowY: "auto" }}>{err}</div>
@@ -386,12 +529,12 @@ export function UpdateButton({ onFeed, variant = "badge" }: {
             )}
           </div>
           <div style={{ display: "flex", gap: 9, padding: "0 18px 16px" }}>
-            <button className="upd-btn" onClick={() => setOpen(false)} disabled={busy} {...hp("cancel")}
-              style={{ flex: 1, appearance: "none", cursor: busy ? "not-allowed" : "pointer", border: "1px solid color-mix(in srgb, var(--acc) 25%, transparent)", background: hov === "cancel" ? "color-mix(in srgb, var(--acc) 6%, transparent)" : "transparent", color: "var(--tx)", fontFamily: "inherit", fontSize: "var(--t105)", letterSpacing: 1.5, padding: 10, opacity: busy ? 0.5 : 1 }}>{incoming > 0 ? "LATER" : "CANCEL"}</button>
+            <button className="upd-btn" onClick={session ? () => void retry() : () => setOpen(false)} disabled={busy} {...hp("cancel")}
+              style={{ flex: 1, appearance: "none", cursor: busy ? "not-allowed" : "pointer", border: "1px solid color-mix(in srgb, var(--acc) 25%, transparent)", background: hov === "cancel" ? "color-mix(in srgb, var(--acc) 6%, transparent)" : "transparent", color: "var(--tx)", fontFamily: "inherit", fontSize: "var(--t105)", letterSpacing: 1.5, padding: 10, opacity: busy ? 0.5 : 1 }}>{session ? "RETRY" : incoming > 0 ? "LATER" : "CANCEL"}</button>
             {err ? (
-              <button className="upd-btn" onClick={fixWithClaude} {...hp("fix")}
+              <button className="upd-btn" onClick={session && fix?.phase === "done" && failed !== "ship" ? () => void apply() : session ? openFix : fixWithClaude} {...hp("fix")}
                 style={{ flex: 1.4, appearance: "none", cursor: "pointer", border: "1px solid var(--acc)", background: hov === "fix" ? "color-mix(in srgb, var(--acc) 28%, transparent)" : "color-mix(in srgb, var(--acc) 16%, transparent)", color: "var(--acc)", fontFamily: "inherit", fontSize: "var(--t105)", letterSpacing: 1.5, padding: 10 }}>
-                ▸ FIX WITH CLAUDE</button>
+                {session && fix?.phase === "done" && failed !== "ship" ? "REBUILD & RESTART" : session ? "▸ OPEN SESSION" : "▸ FIX WITH AI"}</button>
             ) : (
               <>
                 {local > 0 && (

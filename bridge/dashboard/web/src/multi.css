@@ -58,11 +58,33 @@ button.ma-tr-row:hover { background: var(--ac-08, color-mix(in srgb, var(--acc) 
 .ma-tr-more { appearance: none; align-self: flex-start; padding: 1px 2px; border: 0; background: none; cursor: pointer; font: inherit; font-size: var(--t95); color: var(--txd); }
 .ma-tr-more:hover { color: var(--acc); }
 
+/* ---- a super session's tickets: pips at its row's edge, its ticket sessions under it ---- */
+.tk-pips { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; font-size: var(--t85); font-weight: 700; font-variant-numeric: tabular-nums; }
+.tk-pips > span { display: inline-flex; align-items: center; gap: 2px; height: 15px; padding: 0 4px; border-radius: var(--f-rad-s, 0px);
+  border: 1px solid color-mix(in srgb, var(--acc) 22%, transparent); color: var(--txm); }
+.tk-pips > span.w { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.tk-kids { margin: 0 0 4px 12px; padding-left: 8px; border-left: 1px solid color-mix(in srgb, var(--acc) 14%, transparent); display: flex; flex-direction: column; font-size: var(--t105); }
+.tk-kid { appearance: none; display: grid; grid-template-columns: 8px auto 1fr auto; align-items: center; gap: 6px; min-height: 22px; padding: 1px 4px 1px 2px;
+  border: 0; background: none; font: inherit; text-align: left; color: var(--tx); cursor: pointer; }
+.tk-kid:hover { background: color-mix(in srgb, var(--acc) 8%, transparent); }
+.tk-kid[data-on] { background: color-mix(in srgb, var(--acc) 12%, transparent); box-shadow: inset 2px 0 0 var(--acc); }
+.tk-kid:focus-visible { outline: 1px solid var(--acc); outline-offset: 1px; }
+.tk-kid i { width: 7px; height: 7px; border-radius: 50%; }
+.tk-kid .no { font-weight: 700; color: var(--txd); font-variant-numeric: tabular-nums; }
+.tk-kid .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tk-kid .tm { font-size: var(--t95); color: var(--txd); }
+
 /* ---- the nameplate's CHAT | GRID and a helper's path back ---- */
-.ma-viewsw { display: inline-flex; flex: none; border: 1px solid color-mix(in srgb, var(--acc) 20%, transparent); border-radius: var(--f-rad-s, 0); overflow: hidden; }
-.ma-viewsw button { appearance: none; padding: 1px 7px; border: 0; background: none; cursor: pointer; font-family: var(--mono); font-size: var(--t85, var(--t9)); letter-spacing: 1.2px; color: var(--txd); }
+/* One switch for the chat's views (Terminal.tsx): CHAT · AGENTS · GRID · TICKETS, 24px like the ⌕ beside it.
+   Buttons are inline-block, not flex: ::first-letter (natural case in Middle-earth) needs a block container. */
+.ma-viewsw { display: inline-flex; flex: none; height: 24px; border: 1px solid color-mix(in srgb, var(--acc) 20%, transparent); border-radius: var(--f-rad-s, 0); overflow: hidden; }
+.ma-viewsw button { position: relative; display: inline-block; line-height: 22px; white-space: nowrap; appearance: none; padding: 0 8px; border: 0; background: none; cursor: pointer; font-family: var(--mono); font-size: var(--t85, var(--t9)); letter-spacing: 1.2px; color: var(--txd); }
 .ma-viewsw button:hover { color: var(--txb); }
 .ma-viewsw button[aria-pressed="true"] { color: var(--acc); background: color-mix(in srgb, var(--acc) 14%, transparent); }
+.ma-viewsw button + button { border-left: 1px solid color-mix(in srgb, var(--acc) 12%, transparent); }
+/* TICKETS d/t: the set's progress, a 2px line along the button's foot. */
+.ma-viewsw .vs-prog { position: absolute; left: 8px; right: 8px; bottom: 2px; height: 2px; border-radius: 2px; pointer-events: none;
+  background: linear-gradient(to right, var(--ok) var(--p), color-mix(in srgb, var(--txl) 30%, transparent) var(--p)); }
 .ma-crumb { appearance: none; flex: 0 1 auto; min-width: 0; max-width: 240px; padding: 0; border: 0; background: none; cursor: pointer; font-family: inherit; font-size: var(--t95);
   color: var(--acc); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ma-crumb:hover { color: var(--txb); }
@@ -208,9 +230,6 @@ button.ma-card-open:hover { background: var(--ac-08, color-mix(in srgb, var(--ac
 .ma-set-tool code { font-family: var(--mono); font-size: var(--t10); color: var(--tx); overflow-wrap: anywhere; }
 .ma-set-all { margin-top: 10px; }
 
-/* A turn the bridge sent to carry on: one line, not a message you wrote. */
-.ma-resumed { padding: 4px 0 4px var(--rail, 0); font-size: var(--t10); letter-spacing: .4px; color: var(--muted-2); }
-
 /* ---- what the agent shows you (components/Proof) ---- */
 .ma-proof { margin: 6px 0 2px var(--rail, 0); display: flex; flex-direction: column; gap: 12px; }
 .ma-proof-lab { font-family: var(--mono); font-size: var(--t9); letter-spacing: 2px; color: var(--txl); }
@@ -222,6 +241,14 @@ button.ma-card-open:hover { background: var(--ac-08, color-mix(in srgb, var(--ac
 .ma-compare-side { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .ma-compare-lab { font-family: var(--mono); font-size: var(--t9); letter-spacing: 1.5px; color: var(--txd); }
 .ma-compare .ma-proof-img { width: 100%; max-height: 360px; object-fit: contain; }
+/* Gallery only: one line in the chat, the pictures in the WORK strip. */
+.ma-proof-line { appearance: none; display: flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%; margin: 6px 0 2px var(--rail, 0);
+  padding: 5px 10px 5px 5px; font: inherit; font-size: var(--t11); color: var(--txm); background: transparent; cursor: zoom-in; text-align: left;
+  border: 1px solid color-mix(in srgb, var(--acc) 22%, transparent); border-radius: 8px; }
+.ma-proof-line:hover { border-color: color-mix(in srgb, var(--acc) 45%, transparent); }
+.ma-proof-mini { flex: none; width: 34px; height: 22px; object-fit: cover; border-radius: 4px; background: var(--panel3); }
+.ma-proof-says { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ma-proof-go { flex: none; color: var(--acc); }
 .ma-gone { padding: 14px 18px; font-size: var(--t11); color: var(--txl); border: 1px dashed var(--line2); }
 .ma-lb-meta { position: fixed; top: 12px; left: 12px; z-index: 96; max-width: min(46vw, 560px); padding: 7px 11px; font-size: var(--t12); line-height: 1.45;
   color: var(--tx); background: color-mix(in srgb, var(--panel3) 82%, transparent); border: 1px solid color-mix(in srgb, var(--acc) 25%, transparent); }
@@ -269,8 +296,8 @@ button.ma-card-open:hover { background: var(--ac-08, color-mix(in srgb, var(--ac
 .ma-rc-list > li[data-tone="ok"] > span { color: var(--ok); }
 .ma-rc-list code { color: var(--txl); }
 .ma-rc-new { margin: 2px 0 2px 12px; padding: 0; list-style: none; color: var(--err); }
-.ma-rc-fail { display: flex; align-items: flex-start; gap: 7px; padding: 3px 0; color: var(--err); }
-.ma-rc-fail > svg { flex: none; margin-top: 3px; }
+.ma-rc-fail { display: flex; align-items: flex-start; gap: 5px; padding: 3px 0; color: var(--err); }
+.ma-rc-fail > svg { flex: none; margin-top: 4px; }
 .ma-rc-fail-t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .ma-rc-fail-t b { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ma-rc-fail-t span { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: color-mix(in srgb, var(--err) 75%, var(--txm)); font-size: var(--t11); }

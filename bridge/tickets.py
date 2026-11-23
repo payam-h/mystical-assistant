@@ -1,0 +1,1374 @@
+"""Ticket sets: Matt Pocock's /to-tickets files, read as a dependency graph.
+
+A feature path's TICKETS step runs Matt's skill, which writes one markdown file per
+ticket under `.mystical/tickets/<feature-slug>/<NN>-<slug>.md` in the session's
+checkout, beside the SPEC.md its SPEC step wrote (no NN- name, so no ticket). We read
+those files as they are (`# NN: Title`, `**Blocked by:** ...`) rather than keep a
+second copy of the plan in the DB: the files are what the user and Claude both edit,
+so they can't drift.
+
+What the bridge adds is state, in `set.json` beside the ticket files: per ticket
+queued/running/done/fix/missing, its branch, worktree, session and base. State is files,
+not DB tables, so a set moves with its checkout and a restart loses nothing. A registry
+(`ticketsets.json`, beside the DB like waits.json) lists the folders so we can find sets.
+
+Rules the scheduler and the merge follow, decided in the spec:
+- Every ticket whose blockers are done runs at once: no cap (the user's call, 2026-11-12).
+- Branching: a ticket with one blocker starts from that blocker's branch; with several,
+  from the first blocker's branch with the rest merged in.
+- Nothing merges while building. One merge session handles the whole pass at the end.
+- Tickets live in the session's checkout, not the feature worktree.
+- Names: the set builds on the flow's feature branch, the one its agent named (StepDone),
+  else feat/<the ticket folder>. A ticket's branch is tk/<the ticket folder>/<NN>-<its
+  file's name>, as tk/telegram-widgets/07-usage-bars: under tk/ and never under the feature
+  branch, because git can't hold feat/x and feat/x/07 at once.
+
+Blocked-by parsing: `#2`, `02`, `2`, `#02` are all ticket 02; anything else must equal
+another ticket's title (trimmed, case-insensitive). "None..." or empty is no blockers.
+Several are separated by commas or "and".
+
+Not built: titles containing a comma or " and " can't be referenced by title; use the number.
+
+The scheduler. BUILD (start_build) freezes the graph into set.json at approval, so a
+ticket file edited later can't rewire what has started; one deleted or renamed is
+`missing` when its turn to start comes, and holds its dependents. While the set builds,
+every tick (and the end of each turn of the flow's own session) reads the folder again
+(_refresh): a ticket file with a new number joins as `queued` when it is ready (Status
+ready-for-agent or ready-for-human, or none: one that says done was built elsewhere), and a ticket
+that hasn't started takes its file's Blocked by. A change that breaks the graph applies
+nothing and says why once. Before this the folder was read only at approval, and on
+2026-11-17 a super session that wrote tickets 21-24 into its building set built them
+itself, because nothing would ever start them. A ticket session is
+an ordinary session (origin "ticket", "#NN Title") in its own worktree, put on a
+one-step `implement` path before its first turn: that way its StepDone lands in
+flows.json like any path's, and its typed /implement can't join the FEATURE path
+(paths.on_turn_start), whose next station would build a second time. A one-step path
+has no next station, so StepDone never starts a flow step there either.
+
+Done means StepDone was called since the ticket last (re)started and its branch has
+a commit of its own, merges aside: the merge of a second blocker is not work. Since
+StepDone rather than this exact turn: a turn that dies after StepDone is resumed by
+the runner, and the resumed turn ends without calling it again. A failed turn the
+runner gave up on (a usage limit parks and resumes by itself) and a StepDone with
+nothing committed are both `fix`: the slot frees, dependents wait, and the StepDone is
+forgotten, so only a new one finishes it. A fix tells the flow session, with why and
+which tickets wait for it: it starts nothing by itself. retry() runs it again in the same
+session (`retry`, a status an older cap left in set.json, still starts first). A
+turn that just ends (a question in prose, a Stop) keeps its slot: it is waiting on you,
+and retry() carries that one on too, as it does a merge whose turn ended the same way.
+Nobody watches a ticket session, though, and until 2026-11-17 a turn that ended to wait
+on a background command never woke (the command died with the turn; the watchdog now
+waits for it, runner.BG_WAIT_CAP): a turn that ends done without
+StepDone gets a carry-on, at most NUDGES per run, before the slot is left waiting.
+The merge session gets the same, and once the carry-ons are spent a `tickets` notice
+on that session says it waits on you. Both prompts say to test in the foreground:
+with that line no ticket stalled (7 of 7, 2026-11-11), without it the same set's
+merge did, and stayed `merging` until someone asked.
+
+A ticket's `Repos:` line names the repos it builds in (default: the set's own); BUILD
+makes its worktree in each, the first holding its session, and makes none at home when
+home isn't named, so MERGE merges at home only the branches home holds.
+A set can span repos (Rivendell beside Mystical): the prompt sends work in another repo
+to a worktree on the ticket's branch at the place worktree_path_for gives that repo, so
+_repos finds it. A ticket is done when any of its repos has a commit of its own, and
+MERGE merges each repo's ticket branches into a branch of the feature's name there.
+
+Never twice: a ticket gets its session_id in set.json before its first turn starts,
+tick starts as new only tickets that never had one (`queued`, or `missing` once its
+file is back), and it runs one with a session again only when retry() asked (`retry`).
+boot() judges what a restart left unheard: a running ticket whose session sits idle,
+and isn't parked, ended its turn (or never got one) while nothing listened, and is
+judged as at a turn end; one that ended without StepDone keeps its slot and gets the
+carry-on its turn end would have brought, unless that turn ended on your Stop. A set
+builds once: a finished one would start every ticket
+again, so only a new set or one that stopped before building starts. The flow's BUILD
+is marked done once the last ticket is, so FLOW shows it running while tickets build
+and the step after MERGE is REVIEW or RETRO. One lock serializes tick and every set.json write, since
+turn ends arrive on several threads at once; it is held across git and session
+creation, which takes seconds only when tickets are starting.
+
+AUTO-START (a tickets flow's own, stored inverted as its `approve`, read from the flow that
+started the set) is the user's choice to trust the skill or not: /to-tickets is meant to
+quiz the user before it ends, but can skip it. Off, start_build parses and validates the
+tickets, saves the set as `approve` and stops: no feature branch, carry or worktree.
+approve() (the Approve & build tap) does the rest; decline() (Not now) stops it instead,
+the one way out short of building it. The wait rings once (`tickets_wait`) and stays in
+Needs you until then, read live (notices.needs), unless its session is abandoned. boot()
+and tick() leave an `approve` set alone. A set of one ticket made by a work-list task's
+session (origin "work") never waits: pressing the task's Start was the approval
+(bridge/worklist.py), and a second tap for one part is friction.
+
+TICKETS OF YOURS: a ticket whose file says `**Status:** ready-for-human` (a step only you can
+take, such as a look and a go between two phases) never gets a session. Once its blockers are
+done, tick makes it `yours`: it rings once (`tickets_yours`, with its open to-dos) and stays in
+Needs you until go() (TICKETS' Go) marks it done, which starts what waits on it. It has no
+branch, so a ticket blocked by it starts from what it was blocked by in turn (_bases). Its file
+is read when its turn comes, as for `missing`, so a set approved earlier holds too. Until
+2026-11-17 such a ticket went to an agent like any other, and the gate it stood for was the
+agent's to skip (staging-world #17, the go between its two phases).
+
+Asking what a set is doing: `bin/ticket-status [slug]` prints each ticket's state and why,
+and how its session's last turn ended (StepDone or not, the last tool, the last words). It
+reads the registry, set.json and the DB read-only: run it first, before any query by hand.
+
+REVIEW (the flow's REVIEW step, with its TICKETS on): once the set is merged, the flow's next step is
+REVIEW, and it starts the council in the merge session, on the feature checkout
+(start_review). The merge session fixes what the council finds; the council's pass
+ends the step and RETRO starts (council_passed); a council that stops moves nothing,
+and its own notice says it needs you. The set stays `merged` through all of it: where
+the review stands is the merge session's council run and the flow's own record, so no
+set status was added and clean-up works meanwhile.
+"""
+
+import json
+import os
+import re
+import sys
+import threading
+import time
+from typing import NamedTuple
+
+from bridge import aifeatures, config, flowbranch, flowsettings, git, limits, notices, paths, profiles, state, store
+
+
+class TicketError(ValueError):
+    pass
+
+
+class Ticket(NamedTuple):
+    n: str
+    title: str
+    path: str
+    blocked_by: tuple
+    repos: tuple = ()   # the repos it builds in, main checkouts; () = the set's own
+
+
+_FILE = re.compile(r"\d+-")   # <NN>-<slug>.md
+_HEAD = re.compile(r"^#\s+(\d{1,2})\s*:\s*(.+?)\s*$", re.M)
+# Label with an optional list marker and bold, colon inside or outside the bold.
+_BLOCK = re.compile(r"^[ \t]*(?:[-*+][ \t]+)?(?:\*\*)?blocked by(?:\*\*[ \t]*:|[ \t]*:(?:\*\*)?)[ \t]*(.*?)\s*$",
+                    re.M | re.I)
+_TAIL = re.compile(r"(?:\.+|\s*\([^)]*\))+\s*$")
+_NUM = re.compile(r"^#?(\d{1,2})$")
+_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?!\[[ xX]\])(.+?)\s*$")   # a checkbox is no ref
+_SPLIT = re.compile(r"\s*,\s*|\s+and\s+", re.I)
+_STATUS_LINE = re.compile(r"^[ \t]*(?:[-*+][ \t]+)?(?:\*\*)?status(?:\*\*[ \t]*:|[ \t]*:(?:\*\*)?)[ \t]*(.*?)\s*$",
+                          re.M | re.I)
+_REPOS = re.compile(r"^[ \t]*(?:[-*+][ \t]+)?(?:\*\*)?repos?(?:\*\*[ \t]*:|[ \t]*:(?:\*\*)?)[ \t]*(.*?)\s*$",
+                    re.M | re.I)
+_HUMAN = re.compile(r"^[ \t]*(?:[-*+][ \t]+)?(?:\*\*)?status(?:\*\*[ \t]*:|[ \t]*:(?:\*\*)?)[ \t]*`?ready-for-human\b",
+                    re.M | re.I)
+_TODO = re.compile(r"^[ \t]*[-*+][ \t]+\[ \][ \t]+(.+?)\s*$", re.M)   # an open checkbox
+
+
+def _repo_paths(n: str, text: str) -> tuple:
+    """A ticket's `Repos:` line as main checkouts: absolute, ~, or a project under BASE_PATH."""
+    m = _REPOS.search(text)
+    out = []
+    for r in _SPLIT.split(m.group(1).strip().strip("*").strip()) if m else []:
+        r = r.strip().strip("`").rstrip("/")
+        if not r:
+            continue
+        p = os.path.expanduser(r)
+        p = p if os.path.isabs(p) else os.path.join(config.BASE_PATH, p)
+        if not git.is_repo(p):
+            raise TicketError(f"#{n} builds in {r!r}, which is no git repo")
+        p = git.main_checkout(p)
+        if p not in out:
+            out.append(p)
+    return tuple(out)
+
+
+def parse_dir(folder: str, also=()) -> list:
+    """`also`: ticket numbers that exist without a file here (a building set's, deleted since)."""
+    raw = []   # (n, title, path, refs)
+    repos = {}
+    for name in sorted(os.listdir(folder)):
+        if not (name.endswith(".md") and _FILE.match(name)):   # the SPEC.md beside them is no ticket
+            continue
+        path = os.path.join(folder, name)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        h = _HEAD.search(text)
+        if not h:   # silently skipped, a ticket would vanish from the set
+            raise TicketError(f"{name} has no '# NN: Title' line")
+        b = _BLOCK.search(text)
+        val = b.group(1).strip().strip("*").strip() if b else ""
+        if b and not val:   # refs may be a list on the lines under the label
+            items = []
+            for line in text[b.end():].lstrip(" \t").lstrip("\n").split("\n"):
+                m = _ITEM.match(line)
+                if not m:
+                    break
+                items.append(m.group(1))
+            val = ", ".join(items)
+        refs = [] if not val or val.lower().startswith("none") else \
+            [r for r in (_TAIL.sub("", x.strip()).strip()
+                         for x in _SPLIT.split(re.sub(r"\([^)]*\)", "", val))) if r]
+        if val and not val.lower().startswith("none") and not refs:
+            raise TicketError(f"#{h.group(1).zfill(2)} has an unreadable Blocked by: {val!r}")
+        if any(r[0] == h.group(1).zfill(2) for r in raw):
+            raise TicketError(f"two tickets are numbered #{h.group(1).zfill(2)}")
+        raw.append((h.group(1).zfill(2), h.group(2), path, refs))
+        repos[h.group(1).zfill(2)] = _repo_paths(h.group(1).zfill(2), text)
+    by_title = {t.strip().lower(): n for n, t, _, _ in raw}
+    known = {n for n, *_ in raw} | set(also)
+    out = []
+    for n, title, path, refs in raw:
+        deps = []
+        for r in refs:
+            m = _NUM.match(r)
+            d = m.group(1).zfill(2) if m else by_title.get(r.strip().lower())
+            if d is None or d not in known:
+                raise TicketError(f"#{n} is blocked by {'#' + d if d else repr(r)}, "
+                                  "which doesn't exist")
+            if d not in deps:
+                deps.append(d)
+        out.append(Ticket(n, title, path, tuple(deps), repos[n]))
+    return out
+
+
+def order(tks: list) -> list:
+    """Topological order, lowest number first among the ready ones."""
+    deps = {t.n: set(t.blocked_by) for t in tks}
+    done, out = set(), []
+    while len(out) < len(deps):
+        ready = sorted(n for n, d in deps.items() if n not in done and d <= done)
+        if not ready:
+            raise TicketError("cycle: " + " → ".join("#" + n for n in _cycle(deps, done)))
+        out.append(ready[0])
+        done.add(ready[0])
+    return out
+
+
+def _cycle(deps: dict, done: set) -> list:
+    left = {n for n in deps if n not in done}
+    n, seen = min(left), []
+    while n not in seen:   # every left ticket has a blocker that is also left
+        seen.append(n)
+        n = min(deps[n] & left)
+    loop = seen[seen.index(n):]
+    i = loop.index(min(loop))
+    loop = loop[i:] + loop[:i]
+    return loop + [loop[0]]
+
+
+def _atomic(path: str, data) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+def load(folder: str) -> dict:
+    try:
+        with open(os.path.join(folder, "set.json"), encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def save(folder: str, state: dict) -> None:
+    _atomic(os.path.join(folder, "set.json"), state)
+
+
+_lock = threading.Lock()
+
+
+def _path() -> str:
+    return os.path.join(os.path.dirname(config.BRIDGE_DB), "ticketsets.json")
+
+
+def _load_locked() -> list:
+    try:
+        with open(_path(), encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return []
+    return [r for r in d if isinstance(r, dict)] if isinstance(d, list) else []
+
+
+def _save_locked(rows: list) -> None:
+    try:
+        _atomic(_path(), rows)
+    except OSError as e:
+        print(f"[tickets] persist failed: {e}", file=sys.stderr)
+
+
+def register(folder: str, project: str, slug: str) -> None:
+    with _lock:
+        rows = [r for r in _load_locked() if r.get("folder") != folder]
+        rows.append({"folder": folder, "project": project, "slug": slug, "created": time.time()})
+        _save_locked(rows)
+
+
+def sets() -> list:
+    with _lock:
+        return _load_locked()
+
+
+def owners() -> "tuple[dict, dict]":
+    """Who holds which session, for the sidebar: {ticket or merge session: its super
+    session (the flow session that made the set)}, and {super session: {done, total,
+    status}} for its newest set. Ticket sessions leave the sidebar's top level and fold
+    under that row instead (decided 2026-11-12, .mystical/design-drafts/ticket-flow).
+    Read from set.json on every call: a handful of small files, never stale."""
+    of: dict = {}
+    counts: dict = {}
+    at = lambda r: r["created"] if isinstance(r.get("created"), (int, float)) else 0   # noqa: E731
+    for r in sorted(sets(), key=at):
+        if not isinstance(r.get("folder"), str):
+            continue
+        st = load(r["folder"])
+        parent = st.get("parent_session")
+        ts = st.get("tickets") if isinstance(st.get("tickets"), dict) else {}
+        if not parent or not ts:
+            continue
+        for t in ts.values():
+            if isinstance(t, dict) and t.get("session_id"):
+                of[t["session_id"]] = parent
+        if st.get("merge_session"):
+            of[st["merge_session"]] = parent
+        counts[parent] = {"done": sum(1 for t in ts.values() if isinstance(t, dict) and t.get("status") == "done"),
+                          "total": len(ts), "status": st.get("status") or "", "at": at(r),
+                          "yours": sorted(n for n, t in ts.items() if isinstance(t, dict) and t.get("status") == "yours")}
+    return of, counts
+
+
+def waiting() -> dict:
+    """{super session: owners()' counts} for each whose newest set waits for Approve & build, as
+    its sidebar row reads it: what Needs you lists (notices.needs). `at`: when it began to wait."""
+    return {p: c for p, c in owners()[1].items() if c["status"] == "approve"}
+
+
+def approval_line(n: int) -> str:
+    """What a set waiting for Approve & build says: its notice, its Needs-you row, Telegram."""
+    return f"{n} part{'s wait' if n != 1 else ' waits'} for your approval"
+
+
+def yours() -> dict:
+    """{super session: owners()' counts} for each whose newest set has tickets of yours waiting
+    for Go, read live like waiting(): what Needs you lists."""
+    return {p: c for p, c in owners()[1].items() if c["yours"]}
+
+
+def yours_line(ns: list) -> str:
+    """What tickets of yours say in Needs you: which, and what ends the wait."""
+    return f"{' and '.join('#' + n for n in ns)} {'is' if len(ns) == 1 else 'are'} yours: Go in PARTS once done"
+
+
+def summary_for(session_id: str):
+    """The newest set whose parent session is this one, with its folder, or None."""
+    for r in sorted(sets(), key=lambda r: r["created"] if isinstance(r.get("created"), (int, float)) else 0, reverse=True):
+        if not isinstance(r.get("folder"), str):
+            continue
+        st = load(r["folder"])
+        if st.get("parent_session") == session_id:
+            return {**st, "folder": r["folder"]}
+    return None
+
+
+# --- the scheduler: BUILD, every ready ticket at once -------------------------
+
+# The bridge's own copy: a ticket's worktree can predate it, or be another repo's.
+_STATUS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "ticket-status")
+_build = threading.RLock()   # tick and every set.json write; re-entered by start_build/after_turn -> tick
+
+
+def _on(st: dict) -> bool:
+    """SKILL PATHS on, and TICKETS on in the flow that started the set (BUILD's for a set from before)."""
+    return paths.on() and flowsettings.tickets(st.get("flow") or "build")
+
+
+def _flow_folder(flow_session_id: str, co: str, since: float) -> str:
+    """The ticket folder under `co` this flow's turns wrote last, else the newest one."""
+    root = os.path.join(co, ".mystical", "tickets")
+    mine = [os.path.basename(os.path.dirname(p)) for p in flowbranch.written(flow_session_id, since)
+            if os.path.dirname(os.path.dirname(os.path.realpath(p))) == os.path.realpath(root)]
+    return os.path.join(root, mine[-1]) if mine else _newest(root, since)
+
+
+def _newest(root: str, since: float) -> str:
+    """The ticket folder under `root` whose newest .md was written last, at or after `since`."""
+    best, at = "", since
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return ""
+    for name in names:
+        d = os.path.join(root, name)
+        try:
+            m = max(os.path.getmtime(os.path.join(d, f)) for f in os.listdir(d) if f.endswith(".md"))
+        except (OSError, ValueError):   # not a folder, or no ticket in it
+            continue
+        if m >= at:
+            best, at = d, m
+    return best
+
+
+def start_build(flow_session_id: str, folder: str = "") -> str:
+    """BUILD: the ticket folder this flow wrote since its path began (or `folder`,
+    a stopped set built again) becomes a set on top of the feature branch,
+    and its first tickets start. "" once it is building, else why not; a set that
+    can't build stops with a `tickets` notice."""
+    sess = store.get_session(flow_session_id) or {}
+    flow = paths.get(flow_session_id) or {}
+    since = flow.get("at") or 0
+    co = flowbranch._checkout(sess)  # noqa: SLF001
+    folder = folder or (_flow_folder(flow_session_id, co, since) if co else "")
+    if not folder:
+        msg = "no parts were written since this flow began"
+        notices.emit("tickets", flow_session_id, body=f"BUILD stopped: {msg}.")
+        return msg
+    slug = flowbranch.feature_slug(os.path.basename(folder))
+    with _build:
+        old = load(folder)
+        was = old.get("status")
+        fl = old.get("flow") or paths.flow_id(flow.get("path"))   # the flow that started the set, kept on a rebuild
+        # AUTO-START off: stop at the breakdown. It counts for later sets: one waiting stays waiting.
+        wait = flowsettings.approve(fl) or was == "approve"
+        if was not in (None, "stopped", "approve"):
+            return f"{slug} is already {was}"
+        # flow_at: the flow's path this set builds for, kept when a stopped set builds again;
+        # a new path in that session since is left alone (mark_done, advance)
+        at = old.get("flow_at", flow.get("at"))
+        since = at or 0
+        st = {"slug": slug, "parent_session": flow_session_id, "flow": fl, "flow_at": at, "checkout": co,
+              "feature_branch": "", "feature_checkout": "", "status": "building", "tickets": {}, "merge_session": "",
+              # the branch the flow's agent named, kept here: an approval or a rebuild can come after the session moved on
+              "wanted_branch": (flow.get("branch") if flow.get("at") == at else None) or old.get("wanted_branch") or ""}
+        try:
+            tks = parse_dir(folder)
+            order(tks)
+            if not tks:
+                raise TicketError(f"no parts in {folder}")
+            # a work-list task's one part starts without asking: its Start was the approval
+            wait = wait and not (len(tks) == 1 and was != "approve" and sess.get("origin") == "work")
+            if not wait:
+                _branch(st, sess, flow_session_id, since)
+        except Exception as e:  # noqa: BLE001 — a cycle, a missing blocker or git: nothing starts
+            st.update(status="stopped", error=str(e))
+            save(folder, st)
+            register(folder, sess.get("project") or "", slug)
+            notices.emit("tickets", flow_session_id, body=f"BUILD stopped: {e}")
+            return str(e)
+        st["tickets"] = {t.n: _row(slug, t) for t in tks}
+        if wait:
+            st["status"] = "approve"
+        save(folder, st)
+        register(folder, sess.get("project") or "", slug)
+        if not wait:
+            tick(folder)
+    if wait and was != "approve":   # one ring a set: built again while it waits, it rings nothing
+        from bridge import runner  # local import: runner<->tickets cycle
+        body = approval_line(len(tks))
+        try:
+            runner._notify(sess.get("chat_id"), f"▦ Parts need you — {runner._session_label(flow_session_id)}\n{body}",  # noqa: SLF001
+                           runner._session_kb(sess.get("chat_id"), flow_session_id, "🛠 Open session"),  # noqa: SLF001
+                           kind="tickets_wait", sid=flow_session_id, body=body)
+        except Exception as e:  # noqa: BLE001 — the set waits either way
+            print(f"[tickets] approval notice failed: {e}", file=sys.stderr)
+    return ""
+
+
+def _ticket_branch(slug: str, t: Ticket) -> str:
+    """tk/<the set>/<NN>-<the ticket file's name>; the number alone when the name leaves nothing."""
+    name = flowbranch.short_name(_FILE.sub("", os.path.splitext(os.path.basename(t.path))[0], count=1).lower())
+    return f"tk/{slug}/{t.n}" + (f"-{name}" if name else "")
+
+
+def _row(slug: str, t: Ticket) -> dict:
+    """A ticket's state in set.json until it first starts."""
+    return {"status": "queued", "title": t.title, "path": t.path, "blocked_by": list(t.blocked_by),
+            "branch": _ticket_branch(slug, t), "builds_in": list(t.repos),
+            "worktree": "", "session_id": "", "base": ""}
+
+
+def _ready(path: str) -> bool:
+    """A ticket file added to a building set is ready: Status ready-for-agent or ready-for-human
+    (tick hands that one to you), or none."""
+    with open(path, encoding="utf-8") as f:
+        m = _STATUS_LINE.search(f.read())
+    return not m or m.group(1).strip("*` ").lower().startswith(("ready-for-agent", "ready-for-human"))
+
+
+def _refresh(folder: str, st: dict) -> None:
+    """The ticket files of a building set, read again: new numbers join, unstarted tickets take
+    their file's Blocked by, all or nothing. A change that can't apply says why once."""
+    tks = st["tickets"]
+    try:
+        parsed = {t.n: t for t in parse_dir(folder, also=tks)}
+        new = {n: t for n, t in parsed.items() if n not in tks and _ready(t.path)}
+        deps = {n: parsed[n].blocked_by if n in parsed and t["status"] == "queued" else tuple(t["blocked_by"])
+                for n, t in tks.items()}
+        deps.update({n: t.blocked_by for n, t in new.items()})
+        gone = next((f"#{n} is blocked by #{b}, which isn't in the set" for n, bs in deps.items()
+                     for b in bs if b not in deps), "")
+        if gone:
+            raise TicketError(gone)
+        order([Ticket(n, "", "", bs) for n, bs in deps.items()])
+    except (OSError, TicketError) as e:
+        if st.get("refresh_error") != str(e):   # each tick reads it again: say it once
+            st["refresh_error"] = str(e)
+            notices.emit("tickets", st["parent_session"], body=f"New or changed parts wait: {e}.")
+        return
+    st.pop("refresh_error", None)
+    for n, bs in deps.items():
+        if n in tks:
+            tks[n]["blocked_by"] = list(bs)
+    tks.update({n: _row(st["slug"], t) for n, t in new.items()})
+
+
+def _branch(st: dict, sess: dict, flow_session_id: str, since) -> None:
+    """The feature branch, the one the flow's agent named else feat/<the ticket folder>,
+    and what the flow wrote so far carried onto it."""
+    prefix, name = flowbranch.branch_name(st.get("wanted_branch")) or ("feat", st["slug"])
+    st["feature_branch"], st["feature_checkout"] = flowbranch.ensure_feature_branch(sess, name, prefix)
+    flowbranch.carry_and_commit(st["checkout"], st["feature_checkout"],
+                                flowbranch.flow_files(flow_session_id, since), name,
+                                ours=flowbranch.added_lines(flow_session_id, since))
+
+
+def approve(folder: str) -> str:
+    """The user's tap on a set waiting in `approve`: branch, carry, then build as
+    start_build would have. "" once building, else why not."""
+    with _build:
+        st = load(folder)
+        if st.get("status") != "approve":
+            return f"{st.get('slug') or 'the set'} is already {st.get('status')}"
+        sid = st["parent_session"]
+        try:
+            _branch(st, store.get_session(sid) or {}, sid, st.get("flow_at") or 0)
+        except Exception as e:  # noqa: BLE001 — git: nothing starts
+            st.update(status="stopped", error=str(e))
+            save(folder, st)
+            notices.emit("tickets", sid, body=f"BUILD stopped: {e}")
+            return str(e)
+        st["status"] = "building"
+        save(folder, st)
+        tick(folder)
+    return ""
+
+
+def decline(folder: str) -> str:
+    """Not now, the other tap on a set waiting in `approve`: it stops, so it leaves Needs you,
+    with no error, as nothing failed. Build makes it wait again. "" once stopped, else why not."""
+    with _build:
+        st = load(folder)
+        if st.get("status") != "approve":
+            return f"{st.get('slug') or 'the set'} is already {st.get('status')}"
+        st["status"] = "stopped"
+        save(folder, st)
+    return ""
+
+
+_FOREGROUND =" Run tests in the foreground."
+
+
+def _elsewhere(st: dict, n: str) -> str:
+    """Where a ticket's work in another repo goes: a worktree at the place
+    worktree_path_for gives that repo, on this ticket's branch name, so _repos finds it.
+    Also the lines every ticket prompt ends with."""
+    t = st["tickets"][n]
+    base = ", ".join(_bases(st, t["blocked_by"]))
+    return (f"\nIf the ticket needs another repo, work there in a worktree at "
+            f"{os.path.join(config.BASE_PATH, '.worktrees', '<repo>', git.slug(t['branch']))} on branch {t['branch']} "
+            + (f"(start from {base} there if it exists, else from that repo's up-to-date main)"
+               if base else "(start from that repo's up-to-date main)")
+            + " and commit there too." + _FOREGROUND
+            + f" For where the whole set stands, run {_STATUS} {st['slug']}.")
+
+
+# What a part's final reply ends with, carried over from the work run (2026-11-17): what it decided
+# and what it couldn't check is what you need before the merge.
+_REPORT = (" End your final reply with two short lists, headed exactly \"Decisions:\" (choices you made that the "
+           "user may want to check) and \"Not verified:\" (what you couldn't run or see for yourself), each "
+           "saying \"none\" if so.")
+
+
+def _done_line() -> str:
+    """How a ticket ends. With PONYTAIL on it reviews its own diff first: a ticket path
+    has no REVIEW station, since MERGE is what joins the branches (bridge/paths.py)."""
+    if aifeatures.enabled("ponytail"):
+        return ("When it is done and the tests pass, review your branch's diff with the ponytail-review skill, "
+                "fix what it finds and commit, then call StepDone." + _REPORT)
+    return "When it is done and the tests pass, call StepDone." + _REPORT
+
+
+def _prompt(st: dict, n: str, clash: "list | None" = None) -> str:
+    t = st["tickets"][n]
+    return (f"/mattpocock-skills:implement {t['path']}\n\nThis is ticket #{n} of {st['slug']}. "
+            f"Work on branch {t['branch']} in this checkout and commit there. "
+            + _done_line() + _elsewhere(st, n)
+            + (f"\nFirst resolve the merge of {', '.join(clash)} left in this checkout." if clash else ""))
+
+
+def _again(st: dict, n: str, word: str = "Try this ticket again") -> str:
+    """A retry's prompt, or with `word` a carry-on's. With no /command in front, the paths
+    pack would have Claude pick a path for it, hence the pack's own "No path" line first."""
+    t = st["tickets"][n]
+    return ("No path for this message.\n\n"
+            f"{word}: {t['path']}\n"
+            f"Work on branch {t['branch']} in this checkout and commit there. "
+            + _done_line() + _elsewhere(st, n))
+
+
+def _one_step(sid: str, st: dict, n: str) -> None:
+    """Ticket n's session on a fresh one-step `implement` path: StepDone counts from now."""
+    paths.set_path(sid, "one", f"ticket #{n} of {st['slug']}", "rule", skill="implement")
+
+
+def _settle(st: dict, n: str, status: str) -> None:
+    """Ticket n is `status` now. A fix forgets its StepDone, so a later turn that
+    commits half the work can't finish it, and start its dependents, without a new one.
+    It also tells the flow session, with why (t["why"]) and who waits for it: a fix
+    starts nothing by itself, and a set once sat stopped for 15 hours unnoticed."""
+    t = st["tickets"][n]
+    t["status"] = status
+    if status != "fix":
+        t.pop("why", None)
+        return
+    if t.get("session_id"):
+        _one_step(t["session_id"], st, n)
+    held = sorted(k for k, x in st["tickets"].items() if n in x["blocked_by"])
+    notices.emit("tickets", st["parent_session"],
+                 body=f"#{n} {t['title']} needs a fix: {t.get('why') or 'it did not finish'}."
+                 + (f" {', '.join('#' + k for k in held)} wait{'s' if len(held) == 1 else ''} for it." if held else "")
+                 + " Retry it in PARTS.")
+
+
+def _start_ticket(folder: str, st: dict, n: str) -> None:
+    """Worktree, session and first turn for ticket n: running after, or fix when it
+    couldn't start. Base: the feature branch, its one blocker's branch, or with
+    several the first's with the others merged in (--no-ff); a clash is its first job."""
+    from bridge import runner  # local import: runner<->tickets cycle
+    t = st["tickets"][n]
+    try:
+        parent = store.get_session(st["parent_session"])
+        if not parent:
+            raise RuntimeError("its flow session is gone")
+        home = git.main_checkout(st["feature_checkout"])
+        clash: list = []
+        wt = ""
+        for repo in t.get("builds_in") or [home]:   # the first repo's worktree is the session's
+            w, c = _worktree(st, t, repo, home)
+            wt = wt or w
+            clash += [b if repo == home else f"{b} in {repo}" for b in c]
+        project = parent.get("project") or ""
+        pid = profiles.claude_default(project)   # Claude, never an agent: the steps are Claude skills
+        s = store.create_session(parent["chat_id"], project, origin="ticket", cwd=wt,
+                                 permission_mode=None if pid else config.NEW_SESSION_PERMISSION_MODE,
+                                 profile_id=pid)
+        store.rename(s["id"], f"#{n} {t['title']}")
+        _one_step(s["id"], st, n)
+        t.update(status="running", worktree=wt, session_id=s["id"], nudges=0)
+        save(folder, st)   # before the turn: from here on a restart never starts it again
+        if runner.start_streaming_job(parent["chat_id"], _prompt(st, n, clash), [], project=wt,
+                                      session_id=s["id"], origin="ticket", sent_by="mystical:ticket",
+                                      sent_why=f"ticket #{n} of {st['slug']} started") is None:
+            raise RuntimeError("the bridge refused the run")
+    except Exception as e:  # noqa: BLE001 — one ticket failing to start never stops the others
+        print(f"[tickets] #{n} of {st['slug']} didn't start: {e}", file=sys.stderr)
+        t["why"] = f"it didn't start: {e}"
+        _settle(st, n, "fix")
+    save(folder, st)
+
+
+def _bases(st: dict, ns, have=None) -> list:
+    """The branches of the tickets `ns` (only those in `have`, when given), in order. A ticket
+    of yours has no branch, so the ones it was blocked by stand in for it."""
+    out: list = []
+    for x in ns:
+        t = st["tickets"][x]
+        for b in (_bases(st, t["blocked_by"], have) if t.get("human") else [t["branch"]]):
+            if (have is None or b in have) and b not in out:
+                out.append(b)
+    return out
+
+
+def _worktree(st: dict, t: dict, repo: str, home: str) -> tuple:
+    """(path, clash) of ticket t's worktree in `repo`, made on its first start. Base: its one
+    blocker's branch there, or with several the first's with the others merged in (--no-ff,
+    a clash is its first job); with none there, the feature branch at home, elsewhere that
+    repo's up-to-date default branch. Kept at worktree_path_for's place so _repos finds it."""
+    have = git.branches(repo)
+    blockers = _bases(st, t["blocked_by"], have)
+    if blockers:
+        base = blockers[0]
+    elif repo == home:
+        base = st["feature_branch"]
+    else:
+        d = git.default_branch(repo)
+        base = f"origin/{d}" if git._run(repo, "rev-parse", "--verify", "-q", f"origin/{d}")[0] == 0 else d  # noqa: SLF001
+    if repo == home or "base" not in t:
+        t["base"] = base
+    wt = next((w["path"] for w in git.worktrees(repo)
+               if w["branch"] == t["branch"] and os.path.isdir(w["path"])), "")
+    if wt:   # a branch from an earlier run of this set is reused, never remade
+        return wt, []
+    wt = git.worktree_path_for(repo, t["branch"], free=True)
+    os.makedirs(os.path.dirname(wt), exist_ok=True)
+    new = t["branch"] not in have
+    ok, out = git.worktree_add(repo, wt, t["branch"], start=base if new else "", create=new)
+    if not ok:
+        raise RuntimeError(f"worktree failed in {repo}: {out}")
+    git.copy_env(repo, wt)
+    for i, b in enumerate(blockers[1:] if new else []):
+        if git._run(wt, "merge", "--no-ff", "--no-edit", b, timeout=60)[0] != 0:  # noqa: SLF001
+            return wt, blockers[1 + i:]   # left mid-merge; the rest come after it
+    return wt, []
+
+
+def tick(folder: str) -> None:
+    """Start every ready ticket, lowest number first, and MERGE once
+    every one is done. Only while SKILL PATHS and TICKETS are on: switched off,
+    running tickets finish and nothing new starts."""
+    with _build:
+        st = load(folder)
+        if state.shutting_down or not _on(st):
+            return
+        tks = st.get("tickets") or {}
+        if st.get("status") != "building" or not tks:
+            return
+        _refresh(folder, st)
+        for n in sorted(tks, key=lambda k: (tks[k]["status"] != "retry", k)):   # a retry was promised the next slot
+            t = tks[n]
+            if t["status"] not in ("queued", "missing", "retry") or \
+                    any(tks[b]["status"] != "done" for b in t["blocked_by"]):
+                continue
+            if t["status"] == "retry":
+                _rerun(folder, st, n)
+            elif not os.path.isfile(t["path"]):
+                t["status"] = "missing"   # deleted or renamed after approval: held, and its dependents
+            else:
+                with open(t["path"], encoding="utf-8") as f:
+                    text = f.read()
+                if _HUMAN.search(text):
+                    _hand_over(st, n, _TODO.findall(text))
+                else:
+                    _start_ticket(folder, st, n)
+        save(folder, st)
+        if all(t["status"] == "done" for t in tks.values()):
+            # only now: FLOW shows BUILD running while tickets build, and after MERGE comes REVIEW or RETRO
+            paths.mark_done(st["parent_session"], "build", st.get("flow_at"))
+            start_merge(folder)
+
+
+def _hand_over(st: dict, n: str, todos: list) -> None:
+    """Ticket n is yours: no session, no worktree. It rings once with its open to-dos and
+    waits in Needs you (yours()) until go()."""
+    from bridge import runner  # local import: runner<->tickets cycle
+    t = st["tickets"][n]
+    t.update(status="yours", human=True)
+    sid = st["parent_session"]
+    chat = (store.get_session(sid) or {}).get("chat_id")
+    body = (f"#{n} {t['title']} is yours. Tap Go in PARTS once it's done"
+            + (":\n" + "\n".join(f"- {x}" for x in todos) if todos else "."))
+    # shortcut: rings under the set lock, so an unreachable Telegram (30 s timeout) holds other
+    # tickets' turn ends that long; send it after the lock if that ever bites.
+    runner._notify(chat, f"▦ #{n} is yours — {runner._session_label(sid)}\n{body}",  # noqa: SLF001
+                   runner._session_kb(chat, sid, "🛠 Open session"),  # noqa: SLF001
+                   kind="tickets_yours", sid=sid, body=body)
+
+
+def go(folder: str, n: str) -> str:
+    """You finished ticket n, one of yours: it is done, and what waits on it starts. "" once done."""
+    with _build:
+        st = load(folder)
+        t = (st.get("tickets") or {}).get(n)
+        if not t or t.get("status") != "yours":
+            return f"#{n} isn't waiting on you"
+        t["status"] = "done"
+        save(folder, st)
+        tick(folder)
+        return ""
+
+
+def _merge_prompt(st: dict, tks: dict) -> str:
+    branches = ", ".join(_home_branches(st, tks))
+    return ("No path for this message.\n\n"   # else the paths pack has Claude pick a path
+            f"First run the project's full test suite on {st['feature_branch']} as it is, so you can tell "
+            "what already failed from what the merge breaks.\n"
+            f"Merge these branches into {st['feature_branch']}, in this order, each with git merge --no-ff: "
+            f"{branches}\nResolve any clash so both tickets' work survives, run the project's full test "
+            "suite, fix what breaks, and commit. End your final reply with what failed before the merge and "
+            "what fails after it."
+            + "".join(f"\nThen in {repo}: merge {', '.join(bs)} into {st['feature_branch']} there the same way, "
+                      f"in a worktree on {st['feature_branch']} (start it from that repo's up-to-date main if it "
+                      "doesn't exist), and run that repo's tests."
+                      for repo, bs in _other_branches(st).items())
+            + " Then call StepDone." + _FOREGROUND)
+
+
+def _home_branches(st: dict, tks: dict) -> list:
+    """The ticket branches the set's own repo holds, in dependency order: a ticket that
+    builds only elsewhere has none here."""
+    have = set(git.branches(st["feature_checkout"]))
+    return [tks[n]["branch"] for n in order([Ticket(n, "", "", tuple(t["blocked_by"])) for n, t in tks.items()])
+            if tks[n]["branch"] in have]
+
+
+def _other_branches(st: dict) -> dict:
+    """repo -> its ticket branches, in dependency order, for the tickets that worked there."""
+    tks = st["tickets"]
+    out: dict = {}
+    for n in order([Ticket(n, "", "", tuple(t["blocked_by"])) for n, t in tks.items()]):
+        for repo in tks[n].get("repos") or []:
+            out.setdefault(repo, []).append(tks[n]["branch"])
+    return out
+
+
+def start_merge(folder: str) -> None:
+    """MERGE: one session merges every ticket branch onto the feature branch. Idempotent:
+    `merging` is saved before the session opens, and only a `building` set starts one
+    (tick calls this on every later tick and boot too)."""
+    from bridge import runner  # local import: runner<->tickets cycle
+    with _build:
+        st = load(folder)
+        if st.get("status") != "building":
+            return
+        st["status"] = "merging"
+        save(folder, st)
+        try:
+            parent = store.get_session(st["parent_session"])
+            if not parent:
+                raise RuntimeError("its flow session is gone")
+            project = parent.get("project") or ""
+            pid = profiles.claude_default(project)   # Claude, never an agent: the steps are Claude skills
+            s = store.create_session(parent["chat_id"], project, origin="ticket-merge",
+                                     cwd=st["feature_checkout"],
+                                     permission_mode=None if pid else config.NEW_SESSION_PERMISSION_MODE,
+                                     profile_id=pid)
+            store.rename(s["id"], f"Merge {st['slug']}")
+            paths.set_path(s["id"], "one", f"merge {st['slug']}", "rule", skill="merge")
+            st["merge_session"] = s["id"]
+            save(folder, st)   # before the turn: a restart never opens a second merge session
+            if runner.start_streaming_job(parent["chat_id"], _merge_prompt(st, st["tickets"]), [],
+                                          project=st["feature_checkout"], session_id=s["id"],
+                                          origin="ticket-merge", sent_by="mystical:ticket",
+                                          sent_why=f"every ticket of {st['slug']} is built") is None:
+                raise RuntimeError("the bridge refused the run")
+        except Exception as e:  # noqa: BLE001 — the merge didn't start: fix, retry() starts it again
+            print(f"[tickets] merge of {st['slug']} didn't start: {e}", file=sys.stderr)
+            st["status"] = "fix"
+            save(folder, st)
+
+
+def _merge_turn(job) -> None:
+    """The merge session's turn ended (a Stop moves nothing): judged by _merge_end."""
+    if not job.interrupted:
+        _merge_end(job.store_session_id, job.status, job.chat_id)
+
+
+def _merge_set(sid: str) -> "tuple | None":
+    """(folder, set) of the set this session merges, or None."""
+    for r in sets():
+        folder = r.get("folder")
+        st = load(folder) if isinstance(folder, str) else {}
+        if st.get("merge_session") == sid:
+            return folder, st
+    return None
+
+
+def _merge_end(sid: str, status: str, chat_id=None, carry: bool = True) -> None:
+    """The merge session's turn ended `status`: StepDone since it started, with every
+    ticket branch in, means merged, then the flow goes on to REVIEW or RETRO; an error
+    that isn't a parked limit is `fix`; done without StepDone gets a carry-on (_nudge)
+    unless `carry` is off (it ended on your Stop); else it waits on you. A turn that
+    ends there once the set is merged starts a REVIEW that found the session mid-turn."""
+    with _build:
+        hit = _merge_set(sid)
+        if not hit:
+            return
+        folder, st = hit
+        if st.get("status") == "merged":
+            if _at_review(st["parent_session"]):
+                paths._go(st["parent_session"])  # noqa: SLF001 — once, and only a step that never started
+            return
+        if st.get("status") != "merging":
+            return
+        if status == "error":
+            if sid in limits.parked():
+                return
+            st["status"] = "fix"
+        elif status == "done" and (paths.get(sid) or {}).get("done"):
+            have = _merged(st)   # StepDone alone isn't merged: every branch must be in
+            left = [b for b in _home_branches(st, st["tickets"]) if b not in have]
+            for repo, bs in _other_branches(st).items():
+                there = _merged_in(repo, st["feature_branch"])
+                left += [f"{b} in {repo}" for b in bs if b not in there]
+            st["status"] = "fix" if left else "merged"
+            if left:
+                notices.emit("tickets", st["parent_session"], body=f"MERGE called StepDone, but {', '.join(left)} "
+                             f"{'is' if len(left) == 1 else 'are'}n't merged into {st['feature_branch']} yet.")
+        elif status == "done" and carry:
+            _nudge(st, sid, "merge", chat_id)   # the set keeps its merge's count
+        else:
+            return
+        save(folder, st)
+    if st["status"] == "merged":
+        try:   # its tickets are in the feature branch: their worktrees and branches go now
+            kept = cleanup(folder)[1]
+            if kept:
+                notices.emit("tickets", st["parent_session"], body=f"After the merge, {', '.join(kept)} "
+                             f"kept {'its' if len(kept) == 1 else 'their'} worktree: uncommitted work there, or a "
+                             "session still at work. Clean up in PARTS tries again.")
+        except Exception as e:  # noqa: BLE001 — a failed clean-up never holds the flow up
+            print(f"[tickets] clean-up of {folder} failed: {e}", file=sys.stderr)
+        paths.advance(st["parent_session"], "merge", st.get("flow_at"))
+
+
+def _at_review(flow_session_id: str) -> bool:
+    """REVIEW is the flow's next step: not started yet, or its council hasn't passed."""
+    return ((paths.get(flow_session_id) or {}).get("next") or {}).get("station") == "review"
+
+
+def start_review(flow_session_id: str) -> bool:
+    """REVIEW: the council reads the merged feature branch in the merge session, which
+    fixes what it finds, round by round (bridge/council.py). True once it runs, or once
+    the step is passed over because no council can read anything: the tickets were
+    merged by hand (this path has no merged set), the merge session is gone, or a push
+    would send nothing. False leaves it pending: the set is still building or merging,
+    or the merge session is mid-turn (_merge_end starts it when either ends).
+    shortcut: only the feature checkout is read, so a set's work in other repos (a
+    ticket's `repos`) goes unreviewed; upgrade to a council per repo when a set that
+    spans repos needs it."""
+    from bridge import council  # local import: council imports runner
+    st = summary_for(flow_session_id) or {}
+    if st.get("flow_at") not in (None, (paths.get(flow_session_id) or {}).get("at")):
+        st = {}             # the set of an earlier path in this session isn't this one's
+    if st.get("status") in ("building", "merging"):
+        return False
+    sess = store.get_session(st.get("merge_session") or "") if st.get("status") == "merged" else None
+    if sess:
+        try:
+            council.start(sess, st["feature_checkout"])
+            return True
+        except ValueError as e:
+            if str(e) != "nothing":
+                return False    # mid-turn, or a run of yours is under way there: its pass counts too
+    paths.advance(flow_session_id, "review")
+    return True
+
+
+def skip_review(flow_session_id: str) -> bool:
+    """Skip, pressed on a REVIEW in FLOW: the step is done as the work stands, and RETRO
+    follows. It is how you take work the council didn't pass. False off REVIEW, and
+    while the council still runs: the merge session is at work, so stop it there first."""
+    sid = (summary_for(flow_session_id) or {}).get("merge_session")
+    if not _at_review(flow_session_id) or sid and (store.get_council(sid) or {}).get("status") in ("reviewing", "fixing"):
+        return False
+    paths.advance(flow_session_id, "review")
+    return True
+
+
+def council_passed(sid: str) -> None:
+    """The council's run in `sid` passed (council._ended). In a merge session whose flow
+    waits at REVIEW that ends the step, and RETRO follows. A run that stops moves
+    nothing: FLOW stays at REVIEW, waiting on you, with the council's own notice."""
+    hit = _merge_set(sid)
+    # only from REVIEW: a run by hand after the flow moved on must not start RETRO again
+    if hit and _at_review(hit[1]["parent_session"]):
+        paths.advance(hit[1]["parent_session"], "review", hit[1].get("flow_at"))
+
+
+def flow_set(session_id: str):
+    """summary_for, as FLOW draws it: once the set is merged, with the council's run in
+    its merge session as `review` (status, reason, round, max_rounds)."""
+    st = summary_for(session_id)
+    if st and st.get("status") == "merged" and st.get("merge_session"):
+        from bridge import council  # local import: council imports runner
+        b = council.brief(st["merge_session"])
+        st["review"] = {k: b[k] for k in ("status", "reason", "round", "max_rounds")}
+    return st
+
+
+def _merged(st: dict) -> set:
+    """The branches the feature branch already holds."""
+    return _merged_in(st["feature_checkout"], st["feature_branch"])
+
+
+def _merged_in(repo: str, branch: str) -> set:
+    """The branches `branch` already holds in `repo`; none when it doesn't exist there."""
+    rc, out, _ = git._run(repo, "branch", "--merged", branch)  # noqa: SLF001
+    return {b.strip().lstrip("*+ ").strip() for b in out.splitlines()} if rc == 0 else set()
+
+
+def merged_count(st: dict) -> int:
+    """How many done tickets' branches the feature branch already holds (a fresh
+    branch sits at the feature tip, so it counts as merged to git)."""
+    have = _merged(st)
+    return sum(t["status"] == "done" and t["branch"] in have for t in (st.get("tickets") or {}).values())
+
+
+def summaries() -> list:
+    """Every registered set, newest first: set.json plus its folder, how many branches
+    are merged (one git call per set) and each ticket's session state: running, or
+    how its last turn ended. `stalled` (a ticket) and `merge_stalled` (the set) mark a
+    turn that ended with nothing coming to start another: retry() carries it on."""
+    out = []
+    for r in sorted(sets(), key=lambda r: r["created"] if isinstance(r.get("created"), (int, float)) else 0,
+                    reverse=True):
+        folder = r.get("folder")
+        st = load(folder) if isinstance(folder, str) else {}
+        if not st:
+            continue
+        for t in (st.get("tickets") or {}).values():
+            sid = t.get("session_id")
+            t["session"] = ("running" if store.running_turn_id(sid) else
+                            (store.last_turn(sid) or {}).get("status") or "") if sid else ""
+            t["stalled"] = t.get("status") == "running" and bool(t["session"]) and not _busy(sid, "")
+        ms = st.get("merge_session")
+        st["merge_stalled"] = bool(st.get("status") == "merging" and ms and store.last_turn(ms) and not _busy(ms, ""))
+        try:
+            merged = merged_count(st)
+        except Exception:  # noqa: BLE001 — a set whose checkout is gone still lists
+            merged = 0
+        out.append({**st, "folder": folder, "merged": merged})
+    return out
+
+
+def cleanup(folder: str) -> tuple:
+    """Remove a merged set's ticket worktrees and branches: (removed, skipped) names. Runs
+    by itself when the merge ends and at boot; the map's Clean up runs it again. Never
+    forces: a branch git calls unmerged, a worktree with uncommitted work, or one whose
+    session is mid-turn stays. A worktree's .mystical/ scratch (screenshots, notes) moves
+    to .mystical/archive/ first, as the user's own clean-ups do."""
+    with _build:
+        st = load(folder)
+        tks = st.get("tickets") or {}
+        if st.get("status") != "merged":
+            return [], [t["branch"] for t in tks.values()]
+        fc = st["feature_checkout"]   # branch -d judges "merged" against HEAD: the feature branch's
+        merged = git._run(fc, "branch", "--merged", st["feature_branch"])[1]  # noqa: SLF001
+        merged = {b.strip().lstrip("*+ ").strip() for b in merged.splitlines()}
+        removed, skipped = [], []
+        have = set(git.branches(fc))
+        for t in tks.values():
+            b, wt = t["branch"], t.get("worktree") or ""
+            if b not in have:
+                continue   # an earlier clean-up got it
+            if b not in merged:
+                skipped.append(b)
+                continue
+            if wt and os.path.isdir(wt):
+                if store.running_turn_id(t.get("session_id") or "") or \
+                        git._run(wt, "status", "--porcelain")[1].strip():  # noqa: SLF001
+                    skipped.append(b)
+                    continue
+                git.archive_scratch(fc, wt)
+                ok, _ = git.worktree_remove(fc, wt, force=False)
+                if not ok:
+                    skipped.append(b)
+                    continue
+            if git._run(fc, "branch", "-d", b)[0] != 0:  # noqa: SLF001
+                skipped.append(b)
+            else:
+                removed.append(b)
+        return removed, skipped
+
+
+def _verdict(st: dict, t: dict, status: str) -> "str | None":
+    """done | fix for a ticket whose turn ended `status`; None while it still runs
+    or waits on you."""
+    sid = t["session_id"]
+    if status == "error":
+        if sid in limits.parked():
+            return None
+        t["why"] = "its turn failed"
+        return "fix"
+    if status != "done" or not (paths.get(sid) or {}).get("done"):
+        return None
+    blockers = _bases(st, t["blocked_by"])
+    home = git.main_checkout(st["feature_checkout"])
+    cand = _repos(st, t["branch"]) + [r for r in t.get("builds_in") or [] if r != home]
+    t["repos"] = [r for r in dict.fromkeys(cand) if _own(r, t["branch"], blockers + ["--remotes"])]
+    if _own(st["feature_checkout"], t["branch"], [st["feature_branch"]] + blockers) or t["repos"]:
+        return "done"
+    t["why"] = "StepDone, but no commit"   # short: the TICKETS row shows it beside the branch
+    return "fix"
+
+
+def _own(repo: str, branch: str, nots: list) -> bool:
+    """`branch` has a commit of its own in `repo`, merges aside. A ref missing there
+    (a blocker that never touched that repo) is dropped rather than failing the count."""
+    have = [x for x in nots if x.startswith("--") or
+            git._run(repo, "rev-parse", "--verify", "-q", f"refs/heads/{x}")[0] == 0]  # noqa: SLF001
+    have += [b for b in ("main", "master")
+             if git._run(repo, "rev-parse", "--verify", "-q", f"refs/heads/{b}")[0] == 0 and b != branch]  # noqa: SLF001
+    rc, out, _ = git._run(repo, "rev-list", "--count", "--no-merges", branch, "--not", *have)  # noqa: SLF001
+    return rc == 0 and out.strip() not in ("", "0")
+
+
+def _repos(st: dict, branch: str) -> list:
+    """Other repos this ticket worked in: worktrees on its branch at the place the
+    prompt names (<BASE>/.worktrees/<repo>/<branch slug>), each folded to its main checkout.
+    shortcut: finds only worktrees at that place; a ticket that branched in a repo's
+    main checkout goes unseen, upgrade to asking the session if that happens."""
+    root = os.path.join(config.BASE_PATH, ".worktrees")
+    home = os.path.realpath(git.main_checkout(st["feature_checkout"]))
+    out = []
+    try:
+        dirs = sorted(os.listdir(root))
+    except OSError:
+        return []
+    for d in dirs:
+        wt = os.path.join(root, d, git.slug(branch))
+        if not os.path.isdir(wt):
+            continue
+        main = git.main_checkout(wt)
+        if os.path.realpath(main) == home or main in out:
+            continue
+        if git._run(wt, "rev-parse", "--abbrev-ref", "HEAD")[1].strip() == branch:  # noqa: SLF001
+            out.append(main)
+    return out
+
+
+NUDGES = 2   # carry-ons per ticket or merge run before its session is left waiting on you
+_NUDGE = ("[mystical] Your turn ended without StepDone. Anything you were still waiting for is no "
+          "longer running: run it again in the foreground, finish the {} and call StepDone. If you "
+          "really need the user, say what in one line and stop.")
+
+
+def _nudge(own: dict, sid: str, what: str, chat_id=None) -> None:
+    """A ticket's or the merge's turn ended done without StepDone, and not on your Stop:
+    nobody is watching such a session, so most often it ended to wait on a background
+    command the turn's end killed. Queue a carry-on, at most NUDGES per run, unless
+    something is queued; once they are spent, say once that the session waits on you.
+    `own` keeps the count: the ticket, or the set for its merge."""
+    from bridge import queue_manager  # local import: heavy module
+    if any(i.get("status") in ("queued", "running") for i in queue_manager.snapshot(sid).get("items") or []):
+        return
+    n = own.get("nudges", 0)
+    if n > NUDGES:
+        return   # said already
+    own["nudges"] = n + 1
+    if n == NUDGES:
+        notices.emit("tickets", sid, body=f"Told to carry on {NUDGES} times and still not finished: "
+                                          f"this {what} waits on you.")
+        return
+    sess = store.get_session(sid) or {}
+    text = _NUDGE.format(what)
+    queue_manager.enqueue(
+        sid, text=text, prompt=text, images=[], model=None, effort=None,
+        permission_mode=None, width=None, sel=[], surface="carry-on",
+        chat_id=chat_id if chat_id is not None else sess.get("chat_id"),
+        project=sess.get("project") or "", sent_by="mystical:nudge",
+        sent_why=f"the {what} ended without StepDone · {n + 1} of {NUDGES} nudges")
+
+
+def _stopped(sid: str) -> bool:
+    """The session's last turn ended on your Stop: the runner marks it with a `stopped`
+    event. For boot, which has no job to ask."""
+    return any(e.get("type") == "stopped"
+               for e in store.events_of_turn(sid, store.latest_turn_id(sid) or ""))
+
+
+def _find(sid: str):
+    """(folder, set, n) of the ticket this session runs, or None."""
+    for r in sets():
+        folder = r.get("folder")
+        if not isinstance(folder, str):
+            continue
+        st = load(folder)
+        for n, t in (st.get("tickets") or {}).items():
+            if isinstance(t, dict) and t.get("session_id") == sid:
+                return folder, st, n
+    return None
+
+
+def after_turn(job) -> bool:
+    """A turn ended in a ticket's session: judge its ticket, then start what that
+    frees. True when the session was a ticket's. A turn of the flow's own session
+    ticks its building set, so ticket files it wrote start without waiting for one."""
+    try:
+        sid = job.store_session_id
+        origin = (store.get_session(sid) or {}).get("origin") if sid else None
+        if origin == "ticket-merge":
+            _merge_turn(job)
+            return True
+        if origin != "ticket":
+            own = summary_for(sid) if sid and not job.interrupted else None
+            if own and own.get("status") == "building":
+                tick(own["folder"])   # ticket files the flow's session wrote join its set (_refresh)
+            return False
+        with _build:
+            hit = _find(sid)
+            if not hit:
+                return False
+            folder, st, n = hit
+            t = st["tickets"][n]
+            # after a Stop nothing moves by itself
+            v = _verdict(st, t, job.status) if t["status"] in ("running", "fix") and not job.interrupted else None
+            if v:
+                _settle(st, n, v)
+            elif t["status"] == "running" and job.status == "done" and not job.interrupted:
+                _nudge(t, sid, "ticket", job.chat_id)
+            save(folder, st)
+            tick(folder)
+        return True
+    except Exception as e:  # noqa: BLE001 — never raise into the turn lifecycle
+        print(f"[tickets] after_turn failed: {e}", file=sys.stderr)
+        return False
+
+
+def _rerun(folder: str, st: dict, n: str, word: str = "Try this ticket again") -> str:
+    """A new turn in ticket n's own session and worktree: "" once it runs, else why
+    not, and it is fix again (a carry-on that can't start leaves its ticket waiting, as it
+    was). Its StepDone is forgotten before the turn starts (a fast one must count)
+    and put back if the run is refused (your own turn still going)."""
+    from bridge import runner  # local import: runner<->tickets cycle
+    t = st["tickets"][n]
+    waiting = t["status"] == "running"
+    t.update(status="running", nudges=0)
+    t.pop("why", None)
+    save(folder, st)
+    snap = paths.get(t["session_id"])
+    try:
+        s = store.get_session(t["session_id"]) or {}
+        _one_step(t["session_id"], st, n)   # before the turn: a StepDone it records at once must count
+        job = runner.start_streaming_job(s.get("chat_id"), _again(st, n, word), [], project=t["worktree"],
+                                         session_id=t["session_id"], origin="ticket", sent_by="mystical:ticket",
+                                         sent_why=f"ticket #{n} was sent back to run again")
+        err = "" if job else "the bridge refused the run"
+    except Exception as e:  # noqa: BLE001 — a retry that can't start is fix again
+        err = str(e) or type(e).__name__
+    if err:
+        print(f"[tickets] #{n} of {st['slug']} didn't start again: {err}", file=sys.stderr)
+        paths.restore(t["session_id"], snap)   # a refused run keeps the StepDone you recorded
+        if not waiting:
+            t.update(status="fix", why=f"it didn't start again: {err}")
+    save(folder, st)
+    return err
+
+
+def _retry_merge(folder: str, st: dict) -> str:
+    """The merge asked for fix runs again: a new turn in its own session, or a fresh start."""
+    from bridge import runner  # local import: runner<->tickets cycle
+    sid = st.get("merge_session")
+    if not sid:
+        st["status"] = "building"
+        save(folder, st)
+        start_merge(folder)
+        return "" if load(folder).get("status") == "merging" else "the merge didn't start"
+    st.update(status="merging", nudges=0)
+    save(folder, st)
+    snap = paths.get(sid)
+    try:
+        s = store.get_session(sid) or {}
+        paths.set_path(sid, "one", f"merge {st['slug']}", "rule", skill="merge")   # before the turn: its StepDone must count
+        job = runner.start_streaming_job(s.get("chat_id"), _merge_prompt(st, st["tickets"]), [],
+                                         project=st["feature_checkout"], session_id=sid, origin="ticket-merge",
+                                         sent_by="mystical:ticket", sent_why="the merge was sent back to run again")
+        err = "" if job else "the bridge refused the run"
+    except Exception as e:  # noqa: BLE001
+        err = str(e) or type(e).__name__
+    if err:
+        paths.restore(sid, snap)
+        st["status"] = "fix"
+    save(folder, st)
+    return err
+
+
+def _busy(sid: str, name: str) -> str:
+    """Why `name`'s session can't take another turn now; "" when it sits idle."""
+    from bridge import queue_manager  # local import: heavy module
+    if store.running_turn_id(sid):
+        return f"{name} is still working"
+    if sid in limits.parked():
+        return f"{name} is paused and resumes by itself"
+    if any(i.get("status") in ("queued", "running") for i in queue_manager.snapshot(sid).get("items") or []):
+        return f"{name} has a message queued; it runs next"
+    return ""
+
+
+def retry(folder: str, n: str) -> str:
+    """A fix ticket runs again: a new turn in its own session and worktree, or a fresh
+    start when it never got a session. "" once that is under way. A ticket or
+    merge left waiting (its turn ended without StepDone, or you stopped it) carries on
+    the same way, its slot kept; one that works, is paused or has a message queued says so."""
+    with _build:
+        st = load(folder)
+        tks = st.get("tickets") or {}
+        if n == "merge":
+            if st.get("status") == "merging" and st.get("merge_session"):
+                return _busy(st["merge_session"], "the merge") or _retry_merge(folder, st)
+            return _retry_merge(folder, st) if st.get("status") == "fix" else "the merge isn't waiting for a retry"
+        t = tks.get(n)
+        if t and t.get("status") == "running" and t.get("session_id"):
+            return _busy(t["session_id"], f"#{n}") or _rerun(folder, st, n, "Carry on with this ticket")
+        if not t or t.get("status") != "fix":
+            return f"#{n} isn't waiting for a retry"
+        if not t.get("session_id"):
+            t["status"] = "queued"   # tick starts it as new
+            t.pop("why", None)
+            save(folder, st)
+            tick(folder)
+            return ""
+        return _rerun(folder, st, n)
+
+
+def _boot_merge(folder: str) -> None:
+    """A merging set after a restart: no merge session yet (cut between the two saves)
+    opens one; an idle, unparked one is judged as at its turn end (no turn: never began).
+    Loaded and acted on under _build, so overlapping boots never open two."""
+    with _build:
+        st = load(folder)
+        if st.get("status") != "merging":
+            return
+        sid = st.get("merge_session")
+        if not sid:
+            if _on(st):
+                save(folder, {**st, "status": "building"})   # start_merge opens one only from building
+                start_merge(folder)
+            return
+    if not store.running_turn_id(sid) and sid not in limits.parked():
+        _merge_end(sid, (store.last_turn(sid) or {}).get("status") or "error", carry=not _stopped(sid))
+
+
+def _boot_review(st: dict) -> None:
+    """A merged set whose flow waits at REVIEW, after a restart: the round that was
+    reading died with the old process. Reading the run settles it as stopped, so its
+    notice comes now and not when someone next opens FLOW or the COUNCIL tab. A run
+    waiting on its fix turn goes on when that turn ends, as the council has it."""
+    sid = st.get("merge_session")
+    if st.get("status") == "merged" and sid and _at_review(st["parent_session"]) \
+            and (store.get_council(sid) or {}).get("status") == "reviewing":
+        from bridge import council  # local import: council imports runner
+        council.get(sid)
+
+
+def boot() -> None:
+    """After a restart: judge every running ticket whose session sits idle and isn't
+    parked (its turn ended, or never began, while nothing listened) as at a turn end:
+    done, fix, or still running and told to carry on. Then tick each building set, and
+    reconcile each merging one (_boot_merge). A merged set's leftover ticket worktrees go
+    (cleanup: a restart cut it off, or the set merged before it ran by itself). Nothing here
+    starts a ticket that has a session; only retry() does. Run again when TICKETS or SKILL
+    PATHS comes back on."""
+    for r in sets():
+        folder = r.get("folder")
+        try:
+            if isinstance(folder, str) and load(folder).get("status") == "merging":
+                _boot_merge(folder)
+            if isinstance(folder, str):
+                _boot_review(load(folder))
+                if load(folder).get("status") == "merged":
+                    cleanup(folder)
+            if not isinstance(folder, str) or load(folder).get("status") != "building":
+                continue
+            with _build:
+                st = load(folder)
+                for n, t in st["tickets"].items():
+                    sid = t.get("session_id")
+                    if t["status"] != "running" or not sid or store.running_turn_id(sid) or sid in limits.parked():
+                        continue
+                    last = (store.last_turn(sid) or {}).get("status") or "error"   # no turn at all: never began
+                    _settle(st, n, _verdict(st, t, last) or "running")
+                    if t["status"] == "running" and last == "done" and not _stopped(sid):
+                        _nudge(t, sid, "ticket")   # ended without StepDone while nothing listened
+                save(folder, st)
+                tick(folder)
+        except Exception as e:  # noqa: BLE001 — one bad set never stops the boot
+            print(f"[tickets] boot of {folder} failed: {e}", file=sys.stderr)

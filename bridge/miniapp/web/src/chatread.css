@@ -8,7 +8,7 @@
 .rd-menu, .rd-pop {
   /* the same surface as the app's own context menu, so it wears each theme the same way */
   position: fixed; z-index: 9500; background: var(--panel2); border: 1px solid color-mix(in srgb, var(--acc) 40%, transparent);
-  border-radius: var(--prad, 0px); font-family: var(--ui-font, var(--page-font, var(--font-sans, inherit)));
+  border-radius: min(var(--prad, 0px), 16px); font-family: var(--ui-font, var(--page-font, var(--font-sans, inherit)));
   font-size: var(--t12, 12px); color: var(--tx); box-shadow: 0 12px 44px var(--shadow-pop, rgba(0, 0, 0, 0.45));
 }
 .rd-menu { width: 260px; padding: 4px; }

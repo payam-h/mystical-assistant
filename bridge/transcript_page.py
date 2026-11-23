@@ -9,7 +9,9 @@ observed 34 rows) and the dashboard's TURNS tab needs them all, while
 next_cursor must keep meaning "the live head" so forward polling is unaffected.
 summarize() gives each turn the outline that tab draws before its events are
 cut, so a turn behind the tail still says what it answered and asked.
-Stdlib only."""
+first_line() is the one line of an answer that outline shows, and so do the
+bell's done line and Rivendell's pings. Stdlib only."""
+import re
 
 
 def tail_slice(data: dict, tail: int, before: int | None = None) -> dict:
@@ -42,6 +44,34 @@ def tail_slice(data: dict, tail: int, before: int | None = None) -> dict:
 
 
 ANSWER_MAX = 240
+
+_MARKER = re.compile(r">\s*\[!(?:note|tip|important|warning|caution)\]", re.I)
+
+
+def first_line(text: str) -> str:
+    """An answer's first line that says something, for the places that show one
+    line of it. A callout box it opens with (`> [!IMPORTANT]`: what only you can
+    do) isn't the answer, so the line under the box is; a reply that is only the
+    box gives its first item."""
+    lines = (text or "").strip().splitlines()
+    if lines and _MARKER.fullmatch(lines[0].strip()):
+        end = next((i for i, ln in enumerate(lines) if not ln.lstrip().startswith(">")), len(lines))
+        lines = lines[end:] + [re.sub(r"^>\s*(?:[-*+]\s+)?", "", ln.strip()) for ln in lines[1:end]]
+    return next((ln.strip() for ln in lines if ln.strip()), "")
+
+
+def todo(text: str) -> str:
+    """The to-do box an answer opens with (`> [!IMPORTANT]`) as one line: its first item and
+    how many more, or "" without one. first_line skips the box; a ticket's finished turn
+    shows it instead (runner.notify_turn_done), since nobody reads a ticket session."""
+    lines = (text or "").strip().splitlines()
+    if not lines or not re.fullmatch(r">\s*\[!important\]", lines[0].strip(), re.I):
+        return ""
+    box = [ln.strip() for ln in lines[1:]]
+    box = box[:next((i for i, ln in enumerate(box) if not ln.startswith(">")), len(box))]
+    items = [m[1] for ln in box if (m := re.match(r">\s*[-*+]\s+(.+)", ln))] \
+        or [x for x in (re.sub(r"^>\s*", "", ln) for ln in box) if x][:1]
+    return (items[0] + (f" (+{len(items) - 1} more)" if len(items) > 1 else "")) if items else ""
 
 
 def summarize(data: dict) -> dict:
@@ -78,7 +108,7 @@ def summarize(data: dict) -> dict:
         if kind == "tool":
             s["tools"] += 1
         elif kind in ("result", "text"):
-            line = next((ln.strip() for ln in str(e.get(kind) or "").splitlines() if ln.strip()), "")
+            line = first_line(str(e.get(kind) or ""))
             if line and kind == "result":
                 s["answer"] = line[:ANSWER_MAX]
             elif line:

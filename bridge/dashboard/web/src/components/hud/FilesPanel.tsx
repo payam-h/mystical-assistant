@@ -7,8 +7,11 @@ import { askConfirm } from "../ui/Ask";
 import { FileIcon } from "../../lib/fileicon";
 import { ignoredMatcher } from "../../lib/gitignored";
 import { Skeleton } from "../ui";
+import { TabKick } from "./TabKick";
+import { WritingCard } from "./WritingCard";
 import { useLoadingPhase } from "../../lib/loadingPhase";
 import { findFiles } from "../../lib/filefind";
+import { revealItems } from "../../lib/revealfile";
 
 /* FILES — a VS Code-ish explorer for the ACTIVE SESSION's working tree
    (project + its branch's worktree). Git-changed files carry their status
@@ -39,7 +42,7 @@ interface Props {
   branch?: string;
   // `changed` lets the caller land a dirty file on the GIT tab (diff) instead
   // of the editor, so its changed lines are visible.
-  onOpenFile: (path: string, changed: boolean) => void;
+  onOpenFile: (path: string, changed: boolean, line?: number) => void;
   // TEAM: send this file to a teammate (absent while there's no one to send to).
   onSendFile?: (path: string) => void;
   // The session's writes, relative to this tree (lib/sessionedits), and the one
@@ -48,6 +51,9 @@ interface Props {
   editing?: string | null;
   // Puts the path in the prompt box (a row's @, and its menu).
   onAddToPrompt?: (path: string) => void;
+  // The opened session's turns and its checkout, for the writing card.
+  turns?: Parameters<typeof WritingCard>[0]["turns"];
+  cwd?: string | null;
   // The .mystical row's way to its panel, while the panel exists (the experimental switch).
   onOpenMystical?: () => void;
 }
@@ -81,10 +87,11 @@ function countAbove(paths: Iterable<string>): Map<string, number> {
   return out;
 }
 
-export function FilesPanel({ project, branch, onOpenFile, onSendFile, edited, editing, onAddToPrompt, onOpenMystical }: Props) {
+export function FilesPanel({ project, branch, onOpenFile, onSendFile, edited, editing, onAddToPrompt, turns, cwd, onOpenMystical }: Props) {
   const [paths, setPaths] = useState<string[]>([]);
   // .gitignore'd paths, as prefixes — listed like everything else, just dimmed.
   const [ignored, setIgnored] = useState<string[]>([]);
+  const [root, setRoot] = useState("");   // the tree's absolute dir, for Show in Finder
   const [files, setFiles] = useState<GitFile[]>([]);
   // Folders start closed — a repo tree is thousands of rows in a 358px column.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -115,6 +122,7 @@ export function FilesPanel({ project, branch, onOpenFile, onSendFile, edited, ed
       const r = await api.filesTree(project, branch || undefined);
       setPaths(r.files);
       setIgnored(r.ignored ?? []);
+      setRoot(r.root ?? "");
       setCollapsed(new Set(dirsOf(r.files)));
     } catch { setPaths([]); setIgnored([]); }
     finally { setTreeReady(true); }
@@ -189,7 +197,8 @@ export function FilesPanel({ project, branch, onOpenFile, onSendFile, edited, ed
   /* Row menu. A changed file can be staged or discarded from here; the GIT
      tab is where the index is worked in full. */
   function ctxItems(t: NonNullable<typeof ctx>): CtxItem[] {
-    if (t.dir) return [{ icon: "⧉", label: "Copy Path", onClick: () => copyPath(t.path) }];
+    const reveal = revealItems(root && `${root}/${t.path}`);
+    if (t.dir) return [{ icon: "⧉", label: "Copy Path", onClick: () => copyPath(t.path) }, ...reveal];
     const st = changed.get(t.path);
     const untracked = st === "?";
     const items: CtxItem[] = [
@@ -213,7 +222,7 @@ export function FilesPanel({ project, branch, onOpenFile, onSendFile, edited, ed
     // TEAM (bridge/team.py): never a .env file, which the bridge refuses anyway.
     if (onSendFile && !/^\.env/i.test(t.path.split("/").pop() ?? ""))
       items.push({ icon: "➤", label: "Send to teammate…", hint: "through Rivendell", onClick: () => onSendFile(t.path) });
-    items.push({ icon: "⧉", label: "Copy Path", onClick: () => copyPath(t.path) });
+    items.push({ icon: "⧉", label: "Copy Path", onClick: () => copyPath(t.path) }, ...reveal);
     items.push({
       icon: "✕", label: "Delete File", danger: true,
       onClick: () => void askConfirm(`Delete ${t.path} from disk?`, { ok: "Delete", danger: true })
@@ -299,15 +308,12 @@ export function FilesPanel({ project, branch, onOpenFile, onSendFile, edited, ed
 
   return (
     <div className="panel gp" style={{ border: "1px solid color-mix(in srgb, var(--acc) 16%, transparent)", background: "color-mix(in srgb, var(--panel) 86%, transparent)", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-      {/* GIT's head (.gp root + gp-*), so the two tabs read alike in every theme. */}
-      <div className="gp-head">
-        <span className="gp-title">FILES</span>
-        {branch && <span className="gp-branch" title={branch}><i>⎇</i><span>{branch}</span></span>}
-        {tools.map((t) => (
+      <TabKick name="FILES"
+        chip={branch ? <span className="gp-branch" title={branch}><i>⎇</i><span>{branch}</span></span> : undefined}
+        tools={tools.map((t) => (
           <button key={t.k} className="gp-ib" onClick={t.on} title={t.t} aria-label={t.t}>{t.g}</button>
-        ))}
-      </div>
-      <div style={{ height: 1, background: "linear-gradient(90deg,var(--acc),transparent)", flex: "none" }} />
+        ))} />
+      {project && turns && <WritingCard turns={turns} root={cwd} onOpen={(p, line) => onOpenFile(p, false, line)} />}
 
       {project && (
         // The sidebar's search, so every theme family draws it the same way.

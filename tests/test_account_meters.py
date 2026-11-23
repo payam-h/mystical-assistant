@@ -112,6 +112,15 @@ def test_a_login_a_turn_died_on_reads_expired_until_it_signs_in_again(monkeypatc
     assert accounts.meter(2)["logged_in"]
 
 
+def test_the_dashboard_answers_the_usage_meter(monkeypatch):
+    # The /local/accounts branch imports usage inside the same handler, which
+    # made the name local to all of it: this route raised on every call (11-03).
+    monkeypatch.setattr(usage, "get_usage", lambda: {"available": True, "left": 42})
+    h, box = _handler(dash)
+    h._get_api("/local/usage", {})
+    assert box == {"obj": {"available": True, "left": 42}, "code": 200}
+
+
 def test_both_servers_list_the_same_logins_with_their_meters():
     h, box = _handler(dash)
     h._get_api("/local/accounts", {})
@@ -123,6 +132,24 @@ def test_both_servers_list_the_same_logins_with_their_meters():
     assert box["obj"]["accounts"] == mbox["obj"]["accounts"] == accounts.with_meters()
     a2 = mbox["obj"]["accounts"][1]
     assert (a2["slot"], a2["email"], a2["left"], a2["five_hour"]["percent"]) == (2, "b@x.com", 91, 9)
+
+
+def test_every_logins_meter_is_read_side_by_side(monkeypatch):
+    # A cold meter is a `claude -p` per login (~1.7 s, up to its 20 s timeout). Read one
+    # after another, a fresh bridge's /local/accounts took 5.2 s for three logins
+    # (2026-11-17), and the dashboard's boot waits on it.
+    import threading
+    started = threading.Barrier(len(LOGINS), timeout=5)
+    seen = set()
+
+    def usage_for(slot):
+        if slot not in seen:
+            seen.add(slot)
+            started.wait()          # passes only once every login's read has begun
+        return METERS[int(slot)]
+
+    monkeypatch.setattr(accounts, "usage_for", usage_for)
+    assert [a["slot"] for a in accounts.with_meters()] == [1, 2]
 
 
 # --- the bot ------------------------------------------------------------------

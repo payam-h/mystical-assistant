@@ -19,8 +19,9 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+from bridge import native_sync                       # fork: native catch-up
 from bridge import (accounts, agent_caps, agents, browser, channel, config, devserver, experimental,
-                    git, github, multi_api,
+                    git, github, goals, multi_api,
                     httpgz, integrations, models, native, profiles, project_config, projectmarks,
                     relevance, runner, state, store, transcript_jsonl,
                     transcript_page, usage)
@@ -213,6 +214,8 @@ def _session_brief(s: dict) -> dict:
     work = wt if wt_branch else (cwd or "")
     run = profiles.brief(s)
     return {"id": s["id"], "title": s["title"], "project": s["project"],
+            # Its project's folder is gone (moved, renamed, deleted): MOVE TO PROJECT puts it in one of yours.
+            "missing": browser.gone(s["project"]),
             "created": s.get("created"), "updated": s["updated"], "archived": s["archived"],
             "asked": s.get("asked"),           # its last prompt's time; None before the first
             "origin": s.get("origin"), "cwd": cwd,
@@ -224,7 +227,7 @@ def _session_brief(s: dict) -> dict:
             # overrides, defaults filled in) — both composers load these.
             **run,
             "slot": _run_slot(s, run),
-            "goal": store.parse_goal(s.get("goal")),
+            "goal": goals.brief(store.parse_goal(s.get("goal"))),
             **_multi_brief(s, run),
             # A Rivendell job's kind and facts (rivendell_jobs): its tag, plate and bar.
             "job": store.parse_job(s.get("job")),
@@ -285,6 +288,9 @@ def transcript_for(session: dict, cursor: int = 0,
         data = (transcript_jsonl.parse_jsonl(path, cursor) if path
                 else {"turns": [], "events": [], "next_cursor": cursor})
         return page({"session": session, **data})
+    # --- fork: native catch-up --- turns this session gained outside the bridge (bridge/native_sync.py)
+    native_sync.catch_up(session)
+    # --- /fork ---
     data = store.transcript(session["id"], cursor)
     # Fallback: a bridge row whose conversation actually lives in the native JSONL
     # (shares a claude_session_id but was never journaled) -> render from JSONL.
@@ -491,6 +497,9 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/sessions/") and path.endswith("/policy"):
                 return self._api_session_policy(
                     chat_id, path[len("/api/sessions/"):-len("/policy")], body)
+            if path.startswith("/api/sessions/") and path.endswith("/goal"):
+                return self._api_session_goal(
+                    chat_id, path[len("/api/sessions/"):-len("/goal")], body)
             if path.startswith("/api/sessions/") and path.endswith("/autocompact"):
                 return self._api_session_autocompact(
                     chat_id, path[len("/api/sessions/"):-len("/autocompact")], body)
@@ -618,11 +627,12 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             runner._cleanup_uploads(job_id)
             return self._json({"error": str(e)}, 413)
+        native_sync.catch_up_id(session_id, wait=True)       # fork: native catch-up, before our turn lands
         job = runner.start_streaming_job(chat_id, prompt, paths, project_path,
                                          job_id=job_id, model=model, effort=effort,
                                          permission_mode=permission_mode,
                                          session_id=session_id, profile_id=profile_id,
-                                         origin="miniapp", ponytail=ponytail)
+                                         origin="miniapp", ponytail=ponytail, sent_by="miniapp")
         if job is None:
             runner._cleanup_uploads(job_id)
             return self._json({"error": "busy"}, 409)
@@ -698,7 +708,7 @@ class Handler(BaseHTTPRequestHandler):
         # Plugin-worker sessions are exempt (their workdir may be BASE_PATH
         # itself, whose rel "/" is never a project) — see dashboard/server.py.
         rows = [r for r in rows if integrations.is_plugin_origin(r.get("origin"))
-                or browser.project_exists(r["project"])]
+                or browser.project_exists(r["project"]) or browser.gone(r["project"])]
         self._json({"sessions": [_session_brief(s) for s in rows]})
 
     def _api_sessions_create(self, chat_id: int, body: dict):
@@ -846,6 +856,18 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": ok, "path": res} if ok else {"error": res}, 200 if ok else 400)
 
     # --- queue / next up / goal (the WORK tab + the chat's goal pill) --------
+    def _api_session_goal(self, chat_id: int, sid: str, body: dict):
+        """/goal typed in the Mini App's composer: an objective sets the goal (and
+        starts on it when nothing runs), a blank one clears it — goals.set_by_user,
+        the same as the dashboard and the bot."""
+        s = self._owned_session(chat_id, sid)
+        if not s:
+            return self._json({"error": "not found"}, 404)
+        goal, refusal = goals.set_by_user(s, body.get("objective") or "")
+        if refusal:
+            return self._json({"error": refusal}, 409)
+        self._json({"ok": True, "goal": goals.brief(goal)})
+
     def _owned_session(self, chat_id: int, sid: str):
         s = store.get_session(sid) if sid else None
         return s if s and s["chat_id"] == chat_id else None
@@ -914,7 +936,7 @@ class Handler(BaseHTTPRequestHandler):
                 permission_mode=None,
                 width=0, sel=[], surface="miniapp", chat_id=chat_id,
                 project=project if browser.within_base(project) else None,
-                run_job_id=run_job_id)
+                run_job_id=run_job_id, sent_by="miniapp")
         elif op in ("pause", "resume", "clear_done"):
             getattr(queue_manager, op)(sid)
         elif op in ("remove", "bump", "cancel", "retry"):
@@ -927,13 +949,12 @@ class Handler(BaseHTTPRequestHandler):
         self._json(queue_manager.snapshot(sid))
 
     def _api_goal(self, chat_id: int, qs):
-        """The session's objective, for the chat header's goal pill (read-only:
-        the model owns the verdict — see goals.py)."""
-        from bridge import goals
+        """The session's objective, for the chat header's goal strip (the model
+        owns the verdict — see goals.py)."""
         s = self._owned_session(chat_id, qs.get("session", [""])[0])
         if not s:
             return self._json({"error": "not found"}, 404)
-        self._json({"goal": goals.get(s["id"]), "max_iter": goals.MAX_ITER})
+        self._json({"goal": goals.brief(goals.get(s["id"])), "max_iter": goals.MAX_ITER})
 
     # --- static (SPA) --------------------------------------------------------
     def _serve_static(self, path: str):

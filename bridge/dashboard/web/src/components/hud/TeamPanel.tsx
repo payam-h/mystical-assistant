@@ -1,21 +1,19 @@
-import { useState, type ReactNode } from "react";
-import { CornerUpLeft, Download, Eye, File as FileIcon, Forward, Image as ImageIcon, Laptop, Layers, MessageSquare, Send, Users, X } from "lucide-react";
-import type { Received, Share, TeamOverview, Teammate } from "../../api";
-import { initials } from "../../lib/rivendelltasks";
-import { useClock12 } from "../../lib/surfaces";
-import { KIND_LABEL, byPresence, foldSent, personTint, presence, relationLine, seen, sentAgo, sentBefore, sentStatus, shareFacts, type SentTone } from "../../lib/team";
+import { useEffect, useState, type ReactNode } from "react";
+import { CornerUpLeft, Download, Eye, File as FileIcon, Forward, Image as ImageIcon, Layers, MessageSquare, RefreshCw, Users, X } from "lucide-react";
+import type { Received, Receiving, RivendellTask, TeamOverview, Teammate } from "../../api";
+import { api } from "../../api";
+import { initials, splitTitle } from "../../lib/rivendelltasks";
+import { hhmm, useClock12 } from "../../lib/surfaces";
+import { byDay, teamFeed, type FeedItem } from "../../lib/teamfeed";
+import { KIND_LABEL, byPresence, onWhat, personTint, presence, relationLine, sentBefore, shareFacts } from "../../lib/team";
 import { ImageLightbox } from "../ImageLightbox";
+import { Bar } from "./MoveDock";
 
 const UI = "var(--ui-font, inherit)";
 const MONO = "var(--mono)";
 const mix = (c: string, pct: number) => `color-mix(in srgb, ${c} ${pct}%, transparent)`;
-const TONE: Record<SentTone, string> = { ok: "var(--ok)", purple: "var(--purple)", warn: "var(--warn)", dim: "var(--txl)", err: "var(--err)" };
 const KIND_ICON = { session: MessageSquare, picture: ImageIcon, file: FileIcon } as const;
-const SEEN_ROWS = 3;       // SEEN shows this many, the rest behind "N more"
-const toolBtn = {
-  appearance: "none", cursor: "pointer", background: "transparent", color: "var(--txm)",
-  border: `1px solid ${mix("var(--acc)", 20)}`, fontFamily: "inherit", fontSize: "var(--t95)", lineHeight: 1.3, padding: "2px 6px",
-} as const;
+const EARLIER_ROWS = 6;    // EARLIER shows this many, the rest behind "N more"
 
 /** A teammate's picture from Rivendell (their photo or a Middle-earth one), else
  *  their initials in their colour, with a presence dot when it is known. A
@@ -46,8 +44,8 @@ export function Avatar({ id, name, src, size = 26, state }: { id: string; name: 
 
 const btnStyle = (pri?: boolean) => ({
   appearance: "none", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, height: 26, padding: "0 10px",
-  boxSizing: "border-box", borderRadius: 7, border: `1px solid ${mix("var(--acc)", pri ? 52 : 22)}`,
-  background: pri ? mix("var(--acc)", 15) : "transparent", color: pri ? "var(--txh)" : "var(--txm)", fontFamily: UI,
+  boxSizing: "border-box", borderRadius: 7, border: `1px solid ${pri ? "var(--acc)" : "transparent"}`, ...(pri ? {} : { padding: "0 6px 0 0" }),
+  background: "transparent", color: pri ? "var(--acc)" : "var(--txm)", fontFamily: UI,
   fontSize: "var(--t95)", fontWeight: 600, letterSpacing: ".06em", whiteSpace: "nowrap", textDecoration: "none",
 }) as const;
 
@@ -55,87 +53,77 @@ function Btn({ icon, label, pri, onClick, title }: { icon: ReactNode; label: str
   return <button type="button" onClick={onClick} title={title} style={btnStyle(pri)}>{icon}{label}</button>;
 }
 
-/** A small rounded tag beside a card's kind, or on a SEEN row: SENT BACK, UPDATE · V2, V3. */
+/** A small tag beside a card's kind: SENT BACK, UPDATE · V2. Coloured text, no fill (flat, as TASKS). */
 export const Pill = ({ children, c }: { children: ReactNode; c: string }) => (
   <span style={{
-    flex: "none", display: "inline-flex", alignItems: "center", gap: 4, padding: "1px 6px", borderRadius: 999, whiteSpace: "nowrap",
-    border: `1px solid ${mix(c, 45)}`, background: mix(c, 10), color: c, fontFamily: MONO, fontSize: "var(--t8)", letterSpacing: 1,
+    flex: "none", display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap",
+    color: c, fontFamily: MONO, fontSize: "var(--t8)", letterSpacing: 1,
   }}>{children}</span>
 );
 
-const Sect = ({ label, right, top = 12 }: { label: string; right?: ReactNode; top?: number }) => (
-  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: "var(--t9)", letterSpacing: 1.5, color: "var(--txl)", padding: `${top}px 12px 6px` }}>
-    {label}<span style={{ letterSpacing: 0.5, fontFamily: MONO }}>{right}</span>
+/** A day in the STREAM: its name in small caps, a hairline to the edge. */
+const Day = ({ label }: { label: string }) => (
+  <div className="caps" style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 12px 4px", fontSize: "var(--t9)", fontWeight: 700, letterSpacing: 2, color: "var(--txl)" }}>
+    {label}<span style={{ flex: 1, height: 1, background: mix("var(--line)", 60) }} />
   </div>
 );
 
-/** The TEAM tab (bridge/team.py): what teammates sent you, who has Mystical on,
- *  who's away, how far your own sends got, and SEEN: what was sent to you that you
- *  opened or continued, one quiet line each until you remove it or it expires.
- *  App owns the data (it polls, and the rail badge and the session menu read it
- *  too). SEND on a teammate sends the session you have open: `sessionTitle` is
- *  null when it isn't yours to send. */
-export function TeamPanel({ data, fail, sessionTitle, onRefresh, onSendTo, onOpen, onContinue, onContinueYours, onDismiss, step }: {
+/** The TEAM tab (bridge/team.py), C · STREAM: who's here as faces you tap to send
+ *  the session you have open (the task they're on under each: WHO'S ON WHAT, read
+ *  off this repo's Rivendell tasks, or every project's when no project links it),
+ *  then one timeline split by day: shares still coming in, what they sent you (a
+ *  card while it waits for you), how far your own sends got, what you opened or
+ *  continued. Flat, as TASKS since rivendell-tab-v3: no fills, a share to you is
+ *  the one left rule. App owns the team data (it polls, and the rail badge and
+ *  the session menu read it too); the task list is read here, once a minute while
+ *  showing. `sessionTitle` is null when the open session isn't yours to send.
+ *  Design: .mystical/design-drafts/team-flat (C · STREAM). */
+export function TeamPanel({ data, fail, project, sessionTitle, onRefresh, onSendTo, onOpen, onContinue, onNewSession, onContinueYours, onDismiss, step }: {
   data: TeamOverview | null;
   fail: string | null;
+  project: string | null;
   sessionTitle: string | null;
   onRefresh: () => void;
   onSendTo: (t: Teammate) => void;
   onOpen: (r: Received) => void;
-  onContinue: (r: Received) => void;
+  onContinue: (r: Received) => void;         // CONTINUE HERE: a session, as yours with its history; else into a new one
+  onNewSession: (r: Received) => void;       // NEW SESSION FROM IT: a new session, their work attached, the prompt drafted
   onContinueYours: (r: Received) => void;     // a newer state of a thread you have: into your session in it
   onDismiss: (r: Received) => void;
   step?: { id: string; text: string } | null;    // CLONE & INSTALL's progress, on the share it is for
 }) {
   const h12 = useClock12();
   const now = Date.now() / 1000;
-  const [hov, setHov] = useState<string | null>(null);
+  const [hov, setHov] = useState<string | null>(null);   // the EARLIER line the pointer or focus is on
   const [zoom, setZoom] = useState<string | null>(null);
   const [allSeen, setAllSeen] = useState(false);
   const roster = [...(data?.roster ?? [])].sort(byPresence);
-  const on = roster.filter((t) => t.online);
-  const away = roster.filter((t) => !t.online);
-  const face = (id: string) => roster.find((t) => t.id === id)?.avatarUrl;
-  const fresh = (data?.inbox ?? []).filter((r) => !seen(r));
-  const old = (data?.inbox ?? []).filter(seen);
-
-  const mate = (t: Teammate) => (
-    <div key={t.id} onMouseEnter={() => setHov(t.id)} onMouseLeave={() => setHov(null)} style={{
-      display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", margin: "0 6px", borderRadius: 8,
-      background: hov === t.id ? mix("var(--acc)", 7) : "transparent",
-    }}>
-      <Avatar id={t.id} name={t.name} src={t.avatarUrl} size={28} state={t.online ? "on" : "away"} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontFamily: UI, fontSize: "var(--t12)", fontWeight: 500, color: t.online ? "var(--txh)" : "var(--txm)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</div>
-        <div style={{ marginTop: 2, fontFamily: MONO, fontSize: "var(--t9)", color: t.online ? "var(--ok)" : "var(--txl)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{presence(t, now, h12)}</div>
-      </div>
-      {hov === t.id && sessionTitle ? (
-        <Btn icon={<Send size={11} strokeWidth={2} />} label="SEND" pri onClick={() => onSendTo(t)} title={`Send “${sessionTitle}” to ${t.name}`} />
-      ) : t.device && (
-        <span title={`${t.name} shares ${t.device.name} with you for device runs`} style={{
-          flex: "none", display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 5,
-          border: "1px solid var(--line2)", fontFamily: MONO, fontSize: "var(--t8)", letterSpacing: 0.5, color: t.online ? "var(--txd)" : "var(--txl)",
-        }}><Laptop size={10} strokeWidth={2} />MAC</span>
-      )}
-    </div>
-  );
+  const faceOf = (id: string) => roster.find((t) => t.id === id)?.avatarUrl;
+  const feed = data ? teamFeed(data, now) : { today: [], earlier: [] };
+  const [tasks, setTasks] = useState<RivendellTask[]>([]);
+  useEffect(() => {
+    if (!project) return;
+    let alive = true;
+    const read = () => api.rivendellTasks(project).then((r) => { if (alive) setTasks(r.tasks); }).catch(() => {});
+    read();
+    const t = setInterval(read, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [project]);
 
   const card = (r: Received) => {
     const f = shareFacts(r.kind, r.meta);
-    const c = personTint(r.from.id || r.from.name);
     const thread = typeof r.meta.thread === "string" ? r.meta.thread : undefined;
     const rel = relationLine(r, now, r.relation === "back" ? sentBefore(data?.outbox ?? [], thread, r.from.id)?.last : null, h12);
     return (
       <div key={r.id} style={{
-        margin: "0 10px 8px", padding: "10px 10px 10px 11px", borderRadius: 10,
-        border: `1px solid ${mix("var(--acc)", 30)}`, background: "color-mix(in srgb, var(--acc) 5%, var(--panel2))",
+        margin: "2px 12px 10px", padding: "4px 0 6px 10px", borderLeft: "2px solid var(--acc)",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <Avatar id={r.from.id || r.from.name} name={r.from.name} src={face(r.from.id)} size={22} />
-          <span style={{ fontFamily: UI, fontSize: "var(--t115)", fontWeight: 500, color: "var(--txh)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.from.name}</span>
-          <span style={{ fontFamily: MONO, fontSize: "var(--t9)", color: "var(--txl)", whiteSpace: "nowrap" }}>{sentAgo(r.sent, now) || ""}</span>
+          <Avatar id={r.from.id || r.from.name} name={r.from.name} src={faceOf(r.from.id)} size={22} />
+          <span style={{ minWidth: 0, fontFamily: UI, fontSize: "var(--t115)", color: "var(--txm)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            <b style={{ color: "var(--txh)", fontWeight: 600 }}>{r.from.name}</b> sent you{r.at ? ` · ${stamp(r.at)}` : ""}
+          </span>
           <span style={{ flex: 1 }} />
-          <i title="new" style={{ flex: "none", width: 7, height: 7, borderRadius: "50%", background: "var(--acc)", boxShadow: `0 0 8px ${mix("var(--acc)", 60)}` }} />
           <button type="button" title="Dismiss — it leaves your list; nothing ran" onClick={() => onDismiss(r)} style={{
             appearance: "none", cursor: "pointer", display: "grid", placeItems: "center", width: 22, height: 22, flex: "none", border: 0, borderRadius: 6,
             background: "transparent", color: "var(--txl)", padding: 0,
@@ -153,7 +141,7 @@ export function TeamPanel({ data, fail, sessionTitle, onRefresh, onSendTo, onOpe
           </button>
         )}
         {r.note && (
-          <div style={{ marginTop: 7, padding: "1px 0 1px 9px", borderLeft: `2px solid ${mix(c, 45)}`, fontFamily: UI, fontSize: "var(--t11)", lineHeight: 1.45, color: "var(--txm)", overflowWrap: "anywhere" }}>{r.note}</div>
+          <div style={{ marginTop: 7, fontStyle: "italic", fontFamily: UI, fontSize: "var(--t11)", lineHeight: 1.45, color: "var(--txm)", overflowWrap: "anywhere" }}>{r.note}</div>
         )}
         <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 10px", fontFamily: MONO, fontSize: "var(--t9)", color: "var(--txl)" }}>
           {f.project && <span style={{ color: "var(--info)", fontFamily: UI }}>{f.project}</span>}
@@ -177,33 +165,21 @@ export function TeamPanel({ data, fail, sessionTitle, onRefresh, onSendTo, onOpe
               <Download size={11} strokeWidth={2} />DOWNLOAD
             </a>
           )}
-          {r.yours ? (
+          <Btn icon={<Forward size={11} strokeWidth={2} />} label={!r.yours && step?.id === r.id ? step.text : "CONTINUE HERE"} pri={!r.yours}
+            onClick={() => onContinue(r)}
+            title={r.kind === "session" ? "Their session as yours: its history stays and you type the next prompt"
+              : "A new session of yours with it attached, the prompt left for you to send"} />
+          {r.yours && (
             <Btn icon={<CornerUpLeft size={11} strokeWidth={2} />} label={step?.id === r.id ? step.text : "CONTINUE IN YOURS"} pri onClick={() => onContinueYours(r)}
               title={`Your session “${r.yours.title}”: what's new attached, the prompt left for you to send`} />
-          ) : (
-            <Btn icon={<Forward size={11} strokeWidth={2} />} label={step?.id === r.id ? step.text : "CONTINUE HERE"} pri onClick={() => onContinue(r)}
-              title="Your own session: their work attached, the prompt left for you to send" />
           )}
         </div>
-        {r.yours && (
-          <button type="button" onClick={() => onContinue(r)} style={{
+        {r.kind === "session" && (
+          <button type="button" onClick={() => onNewSession(r)} style={{
             appearance: "none", border: 0, background: "transparent", padding: "6px 0 0", cursor: "pointer", fontFamily: UI, fontSize: "var(--t105)",
             color: "var(--txl)", textDecoration: "underline", textDecorationColor: mix("var(--txl)", 40), textUnderlineOffset: 3,
-          }}>or start a new session with it</button>
+          }}>or start a new session from it</button>
         )}
-      </div>
-    );
-  };
-
-  const sent = (s: Share) => {
-    const st = sentStatus(s, now);
-    return (
-      <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", minWidth: 0 }}
-        title={`${s.title} → ${s.to.name}${s.queued ? (s.error ? ` · not sent: ${s.error}` : " · goes when its running turn ends") : ""}`}>
-        <span style={{ flex: "none", color: "var(--txl)", display: "flex" }}><Send size={11} strokeWidth={2} /></span>
-        <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontFamily: UI, fontSize: "var(--t11)", color: "var(--txm)" }}>{s.title}</span>
-        <Avatar id={s.to.id} name={s.to.name} src={face(s.to.id)} size={16} />
-        <span style={{ flex: "none", minWidth: 72, textAlign: "right", fontFamily: MONO, fontSize: "var(--t8)", letterSpacing: 0.8, color: TONE[st.tone] }}>{st.text}</span>
       </div>
     );
   };
@@ -215,40 +191,78 @@ export function TeamPanel({ data, fail, sessionTitle, onRefresh, onSendTo, onOpe
     onOpen(r);
   };
 
-  // One quiet line, as YOU SENT's are. Hovered or focused, its stamp gives way to
-  // CONTINUE HERE and remove (dismiss: your copy goes).
-  const seenRow = (r: Received) => {
-    const Icon = KIND_ICON[r.kind];
-    const key = `seen:${r.id}`;
-    const busy = step?.id === r.id ? step.text : null;
-    const ago = sentAgo(r.sent, now);
+  const stamp = (at: number) => !at ? "" : new Date(at * 1000).toDateString() === new Date(now * 1000).toDateString()
+    ? hhmm(at, h12) : new Date(at * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
+
+  // One line per event; the verb or title is the line's own words, `who` leads in bold. A line
+  // from the inbox (opened or continued) keeps its old actions: click reopens, hover offers
+  // CONTINUE HERE and remove (your copy goes).
+  const line = (it: Extract<FeedItem, { kind: "line" }>) => {
+    const r = it.r, key = it.id;
+    const busy = r && step?.id === r.id ? step.text : null;
+    const rest = it.text.startsWith(it.who) ? it.text.slice(it.who.length) : it.text;
+    const text = <><b>{it.who}</b>{rest}</>;
+    const col = it.tone === "ok" ? "var(--ok)" : it.tone === "warn" ? "var(--warn)" : it.tone === "err" ? "var(--err)" : "var(--txl)";
     return (
-      <div key={r.id} onClick={() => reopen(r)} onMouseEnter={() => setHov(key)} onMouseLeave={() => setHov(null)}
-        onFocus={() => setHov(key)} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setHov(null); }}
-        title={`${r.title} · from ${r.from.name}${ago ? ` · sent ${ago === "now" ? "just now" : `${ago} ago`}` : ""}`}
-        style={{ display: "flex", alignItems: "center", gap: 8, padding: 6, margin: "0 6px", minWidth: 0, borderRadius: 8, cursor: "pointer",
-                 background: hov === key ? mix("var(--acc)", 7) : "transparent" }}>
-        <span style={{ flex: "none", color: "var(--txl)", display: "flex" }}><Icon size={11} strokeWidth={2} /></span>
-        <button type="button" style={{
-          flex: 1, minWidth: 0, appearance: "none", border: 0, padding: 0, background: "transparent", cursor: "pointer", textAlign: "left",
-          whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontFamily: UI, fontSize: "var(--t11)", color: hov === key ? "var(--txh)" : "var(--txm)",
-        }}>{r.title}</button>
-        {(r.version ?? 1) > 1 && <Pill c="var(--txl)">V{r.version}</Pill>}
-        <Avatar id={r.from.id || r.from.name} name={r.from.name} src={face(r.from.id)} size={16} />
-        {hov === key && !busy ? (
-          <span style={{ flex: "none", minWidth: 72, display: "flex", justifyContent: "flex-end", gap: 2 }}>
+      <div key={key} className="tf-line" data-act={r ? "" : undefined} title={`${it.text}${it.tip ? ` · ${it.tip}` : ""} · ${stamp(it.at)}`}
+        onClick={r ? () => reopen(r) : undefined} onMouseEnter={() => setHov(key)} onMouseLeave={() => setHov(null)}
+        onFocus={() => setHov(key)} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setHov(null); }}>
+        <span className="tf-tm">{hhmm(it.at, h12)}</span>
+        {r ? <button type="button" className="tf-tx tf-btn">{text}</button> : <span className="tf-tx">{text}</span>}
+        {r && hov === key && !busy ? (
+          <span className="tf-r" style={{ display: "flex", gap: 2 }}>
             {r.yours
               ? <RowBtn label={`Continue in yours: “${r.yours.title}”`} color="var(--acc)" onClick={() => onContinueYours(r)}><CornerUpLeft size={12} strokeWidth={2} /></RowBtn>
               : <RowBtn label="Continue here" color="var(--acc)" onClick={() => onContinue(r)}><Forward size={12} strokeWidth={2} /></RowBtn>}
             <RowBtn label="Remove: your copy goes" color="var(--txl)" onClick={() => onDismiss(r)}><X size={12} strokeWidth={2} /></RowBtn>
           </span>
         ) : (
-          <span style={{ flex: "none", minWidth: 72, textAlign: "right", fontFamily: MONO, fontSize: "var(--t8)", letterSpacing: 0.8,
-                         color: busy ? "var(--txm)" : r.continued ? "var(--purple)" : "var(--ok)" }}>
-            {busy ?? (r.continued ? "CONTINUED" : "OPENED")}
-          </span>
+          <span className="tf-r" style={{ color: it.status ? col : "var(--txl)" }}>{busy ?? it.status ?? ""}</span>
         )}
       </div>
+    );
+  };
+  const feedRow = (it: FeedItem) => it.kind === "share" ? card(it.r) : line(it);
+
+  /** A share still arriving (bridge/team.py receiving): its bytes, then its turns filed. The tab
+   *  looks again each second while one is here (App), so the bar moves as it comes. */
+  const incoming = (r: Receiving) => (
+    <div key={r.id} title={`${r.title} · from ${r.from}`} style={{ margin: "2px 12px 10px", padding: "2px 0 2px 10px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+        <span style={{ flex: "none", color: "var(--purple)", display: "flex" }}><Download size={11} strokeWidth={2} /></span>
+        <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontFamily: UI, fontSize: "var(--t115)", color: "var(--txh)" }}>{r.title}</span>
+        <span style={{ flex: "none", fontFamily: MONO, fontSize: "var(--t8)", letterSpacing: 0.8, color: "var(--txm)" }}>
+          {r.stage === "filing" ? "FILING" : "COMING IN"} {r.pct}%
+        </span>
+      </div>
+      <div style={{ marginTop: 8, display: "flex" }}>
+        <Bar style="sweep" pct={r.pct} color="var(--purple)" h={2} />
+      </div>
+      <div style={{ marginTop: 6, fontFamily: UI, fontSize: "var(--t105)", color: "var(--txl)" }}>
+        from {r.from}{r.stage === "filing" ? " · writing its turns" : ""}
+      </div>
+    </div>
+  );
+
+  /** A teammate as a face to tap: it sends them the open session (the send sheet).
+   *  Under it, the task they're on, else when they were on. */
+  const face = (t: Teammate) => {
+    const w = onWhat(t, tasks);
+    const st = w.task?.implementation?.status;
+    const busy = st === "IN_PROGRESS" || st === "PENDING";
+    const name = t.name.trim().split(/\s+/)[0] || t.name;
+    const send = sessionTitle ? `Send “${sessionTitle}” to ${name}` : `${name}: open a session of yours to send it`;
+    const at = t.lastSeenAt ? Date.parse(t.lastSeenAt) / 1000 : NaN;
+    const sub = w.task ? `${w.task.key || splitTitle(w.task.name).title}${busy ? ` · ${st === "PENDING" ? "queued" : "running"}` : ""}`
+      : Number.isNaN(at) ? "not linked" : `${t.online ? "on" : "off"} · ${stamp(at)}`;
+    return (
+      <button key={t.id} type="button" className="tf-face" disabled={!sessionTitle} onClick={() => onSendTo(t)} aria-label={send}
+        title={`${send}\n${t.name} · ${presence(t, now, h12)}${w.task ? `\n${w.task.key ? `${w.task.key} ` : ""}${splitTitle(w.task.name).title}${w.n > 1 ? ` (+${w.n - 1} more)` : ""}` : ""}${t.device ? `\nshares ${t.device.name} (Mac)` : ""}`}
+        data-away={t.online ? undefined : ""}>
+        <Avatar id={t.id} name={t.name} src={t.avatarUrl} size={38} state={t.online ? "on" : "away"} />
+        <b>{name}</b>
+        <small style={{ color: busy ? "var(--acc)" : undefined }}>{sub}</small>
+      </button>
     );
   };
 
@@ -257,57 +271,35 @@ export function TeamPanel({ data, fail, sessionTitle, onRefresh, onSendTo, onOpe
     if (fail === "not found") return <Empty title="The bridge needs a restart" text="This dashboard is newer than the running bridge, which can't show the team yet." />;
     if (fail) return <Empty title="Couldn't read the team" text={fail} />;
     if (!data) return [100, 100, 60].map((w, i) => <div key={i} style={{ height: 30, margin: "8px 12px", width: `calc(${w}% - 24px)`, background: mix("var(--acc)", 7) }} />);
+    const shown = [...feed.today, ...(allSeen ? feed.earlier : feed.earlier.slice(0, EARLIER_ROWS))];
+    const days = byDay(shown, now);
+    const coming = data.receiving ?? [];
+    if (coming.length && days[0]?.label !== "Today") days.unshift({ label: "Today", items: [] });
     return (
       <>
-        {fresh.length > 0 && <><Sect label="SENT TO YOU" right={fresh.length} top={10} />{fresh.map(card)}</>}
-        {data.error ? (
-          <Empty title="No roster right now" text={data.error} />
-        ) : (
-          <>
-            <Sect label="ON NOW" right={on.length} top={fresh.length ? 12 : 10} />
-            {on.length ? on.map(mate) : (
-              <>
-                <div style={{ padding: "4px 12px 2px", fontFamily: UI, fontSize: "var(--t115)", color: "var(--txm)" }}>Nobody else is on right now.</div>
-                <div style={{ padding: "3px 12px 12px", fontFamily: UI, fontSize: "var(--t105)", lineHeight: 1.45, color: "var(--txl)", maxWidth: 262 }}>
-                  A session you send now waits in Rivendell, and reaches them the moment their Mystical comes back.
-                </div>
-              </>
-            )}
-            {away.length > 0 && <><Sect label="AWAY" right={away.length} />{away.map(mate)}</>}
-            {data.outbox.length > 0 && <><Sect label="YOU SENT" top={14} />{foldSent(data.outbox).slice(0, 3).map(sent)}</>}
-            {!roster.length && <Empty title="No teammates yet" text="Everyone on your Rivendell shows here once they're added to it." />}
-          </>
-        )}
-        {old.length > 0 && (
-          <>
-            <Sect label="SEEN" right={old.length} top={16} />
-            {(allSeen ? old : old.slice(0, SEEN_ROWS)).map(seenRow)}
-            {old.length > SEEN_ROWS && (
-              <button type="button" onClick={() => setAllSeen((v) => !v)} style={{
-                display: "block", width: "100%", textAlign: "left", padding: "7px 12px", border: 0, background: "transparent", cursor: "pointer",
-                fontFamily: "inherit", fontSize: "var(--t95)", letterSpacing: ".1em", color: "var(--txl)",
-              }}>{allSeen ? "show less ↑" : `${old.length - SEEN_ROWS} more ↓`}</button>
-            )}
-          </>
+        {!data.error && roster.length > 0 && <div className="tf-faces">{roster.map(face)}</div>}
+        {data.error && <Empty title="No roster right now" text={data.error} />}
+        {!data.error && !roster.length && !days.length && <Empty title="No teammates yet" text="Everyone on your Rivendell shows here once they're added to it." />}
+        {days.map((d, i) => (
+          <div key={`${i}-${d.label}`}>
+            <Day label={d.label} />
+            {i === 0 && d.label === "Today" && coming.map(incoming)}
+            {d.items.map(feedRow)}
+          </div>
+        ))}
+        {feed.earlier.length > EARLIER_ROWS && (
+          <button type="button" onClick={() => setAllSeen((v) => !v)} className="tf-fold">{allSeen ? "show less ↑" : `${feed.earlier.length - EARLIER_ROWS} more ↓`}</button>
         )}
       </>
     );
   };
 
   return (
-    <div className="panel" style={{ border: `1px solid ${mix("var(--acc)", 16)}`, background: "color-mix(in srgb, var(--panel) 86%, transparent)", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px" }}>
-        <span style={{ fontSize: "var(--t105)", letterSpacing: 2.5, color: "var(--txl)" }}>TEAM</span>
-        <button style={toolBtn} title="refresh" onClick={onRefresh}>⟳</button>
+    <div className="gp tf" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+      <div className="tf-to">
+        <span>{sessionTitle ? <>Tap a face to send <b>{sessionTitle}</b></> : "Open a session of yours to send it"}</span>
+        <button className="gp-ib" title="refresh" aria-label="refresh" onClick={onRefresh}><RefreshCw size={13} /></button>
       </div>
-      <div style={{ height: 1, background: "linear-gradient(90deg,var(--acc),transparent)" }} />
-      {data && !data.error && (
-        <div className="swapin" style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px 2px", fontSize: "var(--t95)", color: "var(--purple-h)", minWidth: 0 }}>
-          <span style={{ color: "var(--purple)", flex: "none" }}>◆</span>
-          <span>Rivendell</span>
-          <span style={{ marginLeft: "auto", flex: "none", color: on.length ? "var(--ok)" : "var(--txl)" }}>{on.length} ON NOW</span>
-        </div>
-      )}
       <div className="mscroll" style={{ flex: 1, minHeight: 0, padding: "4px 0 10px" }}>{body()}</div>
       {zoom && <ImageLightbox src={zoom} onClose={() => setZoom(null)} />}
     </div>

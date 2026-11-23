@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ListChecks, BookOpen, Timer, Palette, Bookmark,
-  FolderTree, Gauge, GitBranch, GitFork, GraduationCap, ListOrdered, Users,
-  Puzzle,
+  Activity, FolderTree, Gauge, GitBranch, GitFork, GraduationCap, House, Scale, Users,
+  Puzzle,   // fork: plugins
 } from "lucide-react";
 import {
   api,
@@ -9,6 +9,7 @@ import {
   AUTH_REQUIRED,
   TOKEN,
   type CardAnswer,
+  type CouncilBrief,
   type DashState,
   type EffortLevel,
   type EnrichedSession,
@@ -27,8 +28,11 @@ import {
   type ShareKind,
   type TeamOverview,
   type InstallStep,
+  type Need,
+  type NewProjectBody,
+  type NewProjectNote,
 } from "./api";
-import { modelOptions, latestPerFamily, runPicks, snapModel, DEFAULT_SLOT, loginUsage, spendingSlot } from "./models";
+import { modelOptions, latestPerFamily, runPicks, snapModel, DEFAULT_SLOT, loginUsage, spendingSlot, chipWindow, loginWindows } from "./models";
 import type { ProfilesInfo } from "./lib/profiles";
 import { agentLabel, agentPickers, NO_PICKS, sendPicks, setAgentLabels } from "./lib/agents";
 import { latestActivity } from "./lib/multi";
@@ -44,7 +48,7 @@ import { ckId, turnRows } from "./lib/checkpoints";
 import type { TranscriptNav } from "./components/Transcript";
 import { useTelemetry } from "./lib/telemetry";
 import { isJob, jobGroup, JOBS_NAME, JOBS_REL, oneShot } from "./lib/jobs";
-import { ago, forgetLegacyTints, legacyTints, projectMark, projectName, putProjectMark, setProjectMarks, setProjectNames, setSelfProject,
+import { ago, fmtReset, forgetLegacyTints, legacyTints, projectMark, projectName, putProjectMark, setProjectMarks, setProjectNames, setSelfProject,
          useProjectTints } from "./lib/surfaces";
 import { noteStyling } from "./lib/stylerun";
 import { offerUsageSharing } from "./components/hud/UsageSharing";
@@ -68,11 +72,14 @@ import {
 } from "./lib/theme";
 import { useHostVitals, useWeather } from "./lib/ambient";
 import { nativeCtxItems } from "./lib/nativeCtx";
+import { revealFile, revealItems } from "./lib/revealfile";
 import { copySelection, cutSelection, editorFor, pasteInto, selectedText } from "./lib/editorctx";
 import { redo, selectAll, undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
 import { useAiFeatures } from "./lib/ai";
-import { useExtPanes, useIntegrations } from "./lib/integrations";
+import { carryPresets } from "./lib/flowruns";
+import { changeFlows } from "./lib/flowsettings";
+import { useExtPanes, useIntegrations } from "./lib/integrations";   // fork: plugins (useExtPanes)
 import type { Integration } from "./api";   // fork: plugins
 import { PluginPane, PluginGroupPane } from "./components/hud/PluginPane";   // fork: plugins
 import { useSessionPins, useStickyObj, useStickySet } from "./lib/prefs";
@@ -83,12 +90,13 @@ import { recall, remember, type Anchor } from "./lib/scrollmem";
 import { lastOpen, rememberOpen } from "./lib/lastopen";
 import { branchForSession } from "./lib/issuebranch";
 import { pushFailedDraft } from "./lib/pushfailed";
-import { syncBadge, syncOf } from "./lib/gitsync";
+import { needsFetch, syncBadge, syncOf } from "./lib/gitsync";
 import { chime, pushGranted } from "./lib/push";
 import { isLinuxApp, isMacApp, isNativeApp, linuxWindow, macAppearance, macDrag, useMacSettings } from "./lib/mac";
 import { watchWco } from "./lib/wco";
 import { switchWorkspace, useWorkspaces, workspaceOf } from "./lib/workspaces";
 import { WorkspaceButton } from "./components/hud/WorkspaceButton";
+import { TicketMapCard } from "./components/hud/TicketMap";
 import { chatToMarkdown } from "./lib/chatmd";
 import { ChatImagesScope } from "./lib/chatimages";
 import { distinctDirs, fileRefCandidates, resolveFileRef } from "./lib/filepath";
@@ -100,36 +108,45 @@ import { JobBar } from "./components/JobBar";
 import { DeviceRunPlate } from "./components/DeviceRunPlate";
 import { SuggestNewSessionCard } from "./components/SuggestNewSessionCard";
 import { CommandPalette, type Command } from "./components/CommandPalette";
+import { ShortcutSheet } from "./components/ShortcutSheet";
+import { chord } from "./lib/chord";
+import { inField, nextNeed, pressed, SHORTCUTS, typing } from "./lib/shortcuts";
 import { Brand, LinuxClose, LinuxRailHead, RightCap, Strip } from "./components/hud/Strip";
-import { PaletteButton } from "./components/hud/PaletteButton";
-import { UpdateButton } from "./components/hud/UpdateButton";
+import { HomePanel, HomeSky } from "./components/hud/HomePanel";
+import { skyFor } from "./lib/home";
 import { ChangelogButton } from "./components/hud/ChangelogButton";
-import { LiveButton } from "./components/hud/LiveButton";
 import { RivendellTasks } from "./components/hud/RivendellTasks";
 import { TeamPanel } from "./components/hud/TeamPanel";
+import { RivendellTab, type RvLens } from "./components/hud/RivendellTab";
 import { UsagePanel } from "./components/hud/UsagePanel";
-import { stepRow, TurnsPanel } from "./components/hud/TurnsPanel";
+import { SessionPanel, stepRow } from "./components/hud/SessionPanel";
 import { TeamSendSheet, type SendWhat } from "./components/TeamSendSheet";
 import { BackPill, TeamBar } from "./components/TeamBar";
 import { ProjectPick } from "./components/ProjectPick";
 import { setLightboxSend } from "./components/ImageLightbox";
 import type { ProjectGroup } from "./components/hud/ProjectsPanel";
 import { FilesPanel, requestFileFind } from "./components/hud/FilesPanel";
-import { BranchesPanel, branchMenu } from "./components/hud/BranchesPanel";
+import { BranchesPanel, branchMenu, type BranchView } from "./components/hud/BranchesPanel";
+import { useAutoClean, useBranches } from "./components/hud/useBranches";
+import { branchActivity, branchTree, landable, shownRows } from "./lib/branchrows";
 import { LearnPanel, READ_KEY } from "./components/hud/LearnTab";
-import { RightPanel, type PanelTab } from "./components/RightPanel";
+import { RailRing, RightPanel, useSettling, type PanelTab } from "./components/RightPanel";
+import { arrange, moveTo, toggleHidden } from "./lib/rail";
 import { SavedViews } from "./components/SavedViews";
 import { DesignBoards, DesignPane } from "./components/DesignPane";
 import { AutomationsPanel } from "./components/AutomationsPanel";
 import { WorkPanel } from "./components/WorkPanel";
-import { workCall, workGet } from "./lib/readapi";
+import { workGet } from "./lib/readapi";
+import { codeWords } from "./lib/completewords";
 import { DocsPanel } from "./components/DocsPanel";
 import { GitPanel } from "./components/hud/GitPanel";
+import { CouncilPanel } from "./components/hud/CouncilPanel";
+import { hero as councilHero, railTile, tileKey } from "./lib/council";
 import { LANE_WORD, resolve, SessionsPanel, type PromptFlag } from "./components/hud/SessionsPanel";
 import { Terminal } from "./components/hud/Terminal";
 import type { View } from "./components/hud/ViewTabs";
-import { shellCols } from "./lib/shell";
-import { notify, PillHost, setLinks, setNeeds, setNoticeEnv, setNoticeSound } from "./components/hud/Notifications";
+import { rbody, rightBodyW, shellCols } from "./lib/shell";
+import { notify, PillHost, setLinks, setNeeds, setNoticeEnv, setNoticeSound, useNeeds } from "./components/hud/Notifications";
 import { MoveDock } from "./components/hud/MoveDock";
 import { openSettings } from "./lib/opensettings";
 import { isDeviceRun } from "./lib/devicerun";
@@ -154,7 +171,13 @@ import { AgentsPill } from "./components/AgentsPill";
 import { GoalPill } from "./components/GoalPill";
 import { WaitPill } from "./components/WaitPill";
 import { useSessionQueue } from "./components/design/useSessionQueue";
+import { flowQueued } from "./lib/route";
+import { flowChip, flowGlobals, flowView, runningFlow } from "./lib/flowview";
+import { useFlowSettings } from "./lib/flowsettings";
+import { useFlow } from "./lib/useFlow";
+import { lastCheckOf } from "./lib/kinds";
 import { Spinner } from "./components/ui";
+import { useStableFn } from "./lib/stablefn";   // fork: perf
 
 
 // One size for every right-rail icon — the rail's buttons are 38px. At 15px
@@ -250,6 +273,9 @@ function omit<T>(map: Record<string, T>, key: string): Record<string, T> {
 // A prompt the relevance guardrail parked, with everything needed to route it
 // later — the session and project it was written in, not whichever is open when
 // the user finally answers the card.
+/** The flow a prompt starts, and who picked it (lib/kinds sendPlan). */
+type SendFlow = { id: string; by: "you" | "guess" };
+
 interface HeldPrompt {
   sid: string;
   project?: string;
@@ -258,6 +284,16 @@ interface HeldPrompt {
   images: string[];
   reason: string;
   title: string | null;
+  noPath?: boolean;   // Esc had taken the auto pick out: the forced resend still says so
+  // A kind's run (lib/kinds): the forced resend still carries its preset and stays one-shot.
+  kind?: { picks: { model: string; perm: string; effort: string }; ponytail?: string; flow?: SendFlow };
+  typed?: string;   // what the user typed, before a kind's command went in front: Dismiss gives that back
+}
+
+/** The WORK panel with the Needs you list, so a task whose part asks shows the question. */
+function WorkTab(props: Omit<Parameters<typeof WorkPanel>[0], "asking">) {
+  const needs = useNeeds();
+  return <WorkPanel {...props} asking={needs} />;
 }
 
 export function App() {
@@ -275,6 +311,10 @@ export function App() {
   // "still loading", not "you have no projects".
   const [booted, setBooted] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
+  // The Savers trials the open session drew the saver in (its transcript's
+  // `savers`): its prompts' tag says so. Kept as is while unchanged, so a poll
+  // doesn't redraw the plates.
+  const [savers, setSavers] = useState<string[]>([]);
   const turnsRef = useRef(turns);   // for the checkpoint walk, which outlives a render
   turnsRef.current = turns;
   // What the live turn is waiting on before its first token — a status the poll
@@ -333,6 +373,7 @@ export function App() {
   // survives a session switch and the session list can flag it as a DRAFT.
   const [drafts, setDrafts] = useState<Record<string, string>>(loadDrafts);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
   // ?skipboot bypasses the intro (handy on revisits + for screenshots).
   const skipBoot = new URLSearchParams(location.search).has("skipboot");
   const [booting, setBooting] = useState(!skipBoot);
@@ -361,6 +402,12 @@ export function App() {
   // Which tab the next open lands on, when something asked for one by name
   // (lib/opensettings) — cleared on close, so the menus keep their default.
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>();
+  // The kind presets this browser kept itself go to the bridge once, where every flow's run
+  // default now lives (lib/flowruns), and leave the browser once it has answered.
+  useEffect(() => {
+    void carryPresets(settings.kindPresets, changeFlows, () => patchSettings({ kindPresets: {} })).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Ponytail is this browser's: a setting, so it survives a reload. Model, mode
   // and effort belong to the open session — its brief (the session's own picks
   // over its profile's) is the source of truth, loaded by the effect beside the
@@ -375,7 +422,8 @@ export function App() {
   // Set only when the modal is opened as a deep-link on a file (sidebar FILES).
   const [analyzeFile, setAnalyzeFile] = useState<{ path: string; branch?: string; line?: number } | null>(null);
   // Same-named files the click could have meant, waiting to be picked between.
-  const [filePick, setFilePick] = useState<{ x: number; y: number; name: string; line?: number; paths: string[] } | null>(null);
+  // `root` set: picking one shows it in the OS file manager instead of opening it.
+  const [filePick, setFilePick] = useState<{ x: number; y: number; name: string; line?: number; paths: string[]; root?: string } | null>(null);
   // Set only when something opens the modal straight onto a tab (composer MAP).
   const [analyzeTab, setAnalyzeTab] = useState<AnalyzeTab | undefined>(undefined);
   // Set only by re-run on a transcript terminal block — typed into the PTY.
@@ -411,6 +459,14 @@ export function App() {
   // a send() awaiting its relevance check must know whether you're still here.
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+  // ⌃Tab's way back: the last two sessions opened, newest first. A fresh screen
+  // in between isn't one, so A → B → fresh → B still goes back to A.
+  const recent = useRef<string[]>([]);
+  if (sessionId && sessionId !== recent.current[0]) {
+    recent.current = [sessionId, ...recent.current.filter((x) => x !== sessionId)].slice(0, 2);
+  }
+  // NEEDS YOU as the last poll had it, newest first, for ⌘J.
+  const needsRef = useRef<Need[]>([]);
   // A pick: shown now, remembered as this browser's default, and saved to the
   // open session as the three the picker shows — a fresh session would
   // otherwise keep the bridge's mode under a picker showing yours. `half` is
@@ -568,14 +624,22 @@ export function App() {
 
   // Ambient widgets.
   const host = useHostVitals();
-  const { weather, setCity, setUnit } = useWeather();
-  const [wxSettings, setWxSettings] = useState(0); // nonce — opens the weather settings editor from the context menu
+  const { weather, setPlace, setUnit } = useWeather();
   // Server-side per-session prompt queue: lets a new prompt be queued while a
   // turn is in flight (runs after it) instead of forcing a STOP first.
   const queue = useSessionQueue(sessionId);
 
   const active = activeOf(turns);
   const running = active !== null;
+  // The prompt box's FLOW chip: this session's path, read on the turn's edges (lib/useFlow).
+  const { flow: boxFlow, set: boxSet, act: flowAct } = useFlow(sessionId ?? undefined, !!ai.router,
+    `${turns.length}:${turns.at(-1)?.status ?? ""}`, running);
+  // The chip's SETTINGS values are the session's flow's NEXT and TICKETS (the FLOWS sheet).
+  const flowCfg = useFlowSettings();
+  const boxChip = useMemo(() => {
+    const g = flowGlobals(boxFlow, flowCfg, ai);
+    return flowChip(boxFlow, flowView(boxFlow, turns, boxSet, g.ticketruns), { ...ai, ...g });
+  }, [boxFlow, boxSet, turns, ai, flowCfg]);
   // A Rivendell job whose answer is the point (lib/jobs oneShot) shows its job
   // bar instead of the composer, until you ask about it or it already has a
   // follow-up. Asked-about sessions are remembered for this page's life only.
@@ -643,7 +707,7 @@ export function App() {
         if (v) tokens[k] = v;
       }
       if (!tokens["--ui-font"]) tokens["--ui-font"] = cs.fontFamily;
-      void req("/local/design-theme", { method: "POST", body: { theme: settings.theme, light: isLight(settings.theme), tokens } }).catch(() => undefined);
+      void req("/local/design-theme", { method: "POST", body: { theme: settings.theme, fam: family(settings.theme), light: isLight(settings.theme), tokens } }).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(t);
   }, [multiOn, settings.theme, settings.font]);
@@ -700,6 +764,11 @@ export function App() {
   function toggleRight() {
     setSettings((s) => ({ ...s, rightOpen: !s.rightOpen }));
   }
+  // While the column moves, the right panel and its cap stay where the open
+  // layout puts them and the moving edge sweeps over them (RightPanel.tsx):
+  // the strip leaves the cap for the chat header only once the column is shut.
+  const rightMoving = useSettling(settings.rightOpen);
+  const rightShown = settings.rightOpen || rightMoving;
   function toggleLeft() {
     setSettings((s) => ({ ...s, leftOpen: !s.leftOpen }));
   }
@@ -727,8 +796,8 @@ export function App() {
 
   // A changed file opens on the GIT tab (diff view) — an editor buffer hides
   // which lines actually changed. Clean files still open in the editor.
-  function openFileFromPanel(path: string, changed: boolean) {
-    if (sessionProject) openAnalyze(sessionProject, { path, branch: sessionBranch }, changed ? "changes" : undefined);
+  function openFileFromPanel(path: string, changed: boolean, line?: number) {
+    if (sessionProject) openAnalyze(sessionProject, { path, branch: sessionBranch, line }, changed ? "changes" : undefined);
   }
 
   // A session opened from outside the sidebar (a notification, ⌘K, NEXT UP,
@@ -981,6 +1050,7 @@ export function App() {
         staleTurns.current = false;
         setTurns((prev) => mergeDelta(held ? [] : prev, t));
         setBoot(t.boot ?? null);
+        setSavers((p) => (p.join() === (t.savers ?? []).join() ? p : t.savers ?? []));
         seqRef.current = t.next_cursor;
         // Every first fetch resets `older` — including to the zero state when
         // the server doesn't speak tail — because openSession left the previous
@@ -1062,14 +1132,15 @@ export function App() {
     }
   }, [loadOlder]);
 
-  // ⌥↑ / ⌥↓: the previous / next of your turns, the TURNS tab open or not. A
+  // ⌥↑ / ⌥↓: the previous / next of your turns, the SESSION tab open or not. A
   // turn you're halfway down takes you back to its own start first. Not inside
-  // a text field, where the same keys move the caret a paragraph.
+  // a text field, where the same keys move the caret a paragraph — but from the
+  // message box while it's empty (lib/shortcuts typing), where the cursor sits.
   useEffect(() => {
     if (view !== "chat") return;
     const onKey = (e: KeyboardEvent) => {
       if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
-      if ((e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable]:not([contenteditable='false'])")) return;
+      if (e.defaultPrevented || typing(e.target)) return;
       const to = stepRow(turnRows(turns), scrollRef.current, transcriptNav.current, e.key === "ArrowUp" ? -1 : 1);
       if (!to) return;
       e.preventDefault();
@@ -1286,6 +1357,7 @@ export function App() {
           return [id, t ? { ...st, since: t } : st] as [string, SessionStatus];
         })));
         setNeeds(r.needs);
+        needsRef.current = r.needs ?? [];
         noteStyling(r.styling);
       } catch { /* ignore */ }
     };
@@ -1385,8 +1457,9 @@ export function App() {
   // Every login with its meter (bridge accounts.with_meters). The footer and the
   // MODEL menu read the one the open session spends, and the PROFILE menu reads
   // what each profile's login has left. Polled on the usage tick below, and
-  // reloaded at once after SETTINGS ▸ ACCOUNTS changes one.
-  const loadAccounts = useCallback(() => api.accounts()
+  // reloaded at once after SETTINGS ▸ ACCOUNTS changes one. `fresh`: the PROFILE
+  // menu has the bridge re-read, through the CLI, any meter older than that (s).
+  const loadAccounts = useCallback((fresh?: number) => api.accounts(fresh)
     .then((a) => {
       setAccounts(a.accounts);
       markBoot("auth", "ok", bootCount(a.accounts.length, "ACCOUNT"));
@@ -1497,6 +1570,7 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        setSheetOpen(false);
         setPaletteOpen((v) => !v);
       } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "p" && !analyzeProject) {
         // FILES' find field, from anywhere: the way to a file now that ⊞ PROJECT
@@ -1518,6 +1592,7 @@ export function App() {
         if (ctxMenu) closeCtx();
         else if (inspectorOpen) setInspectorOpen(false);
         else if (toolsFor) setToolsFor(null);
+        else if (sheetOpen) setSheetOpen(false);
         else if (paletteOpen) setPaletteOpen(false);
         else if (settingsOpen) setSettingsOpen(false);
         else if (analyzeProject) setAnalyzeProject(null);
@@ -1526,7 +1601,65 @@ export function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ctxMenu, toolsFor, inspectorOpen, paletteOpen, settingsOpen, analyzeProject, selected?.project, activeProject]);
+  }, [ctxMenu, toolsFor, inspectorOpen, paletteOpen, sheetOpen, settingsOpen, analyzeProject, selected?.project, activeProject]);
+
+  // The keys of lib/shortcuts' table that act on this screen. Taken in the
+  // capture phase, before the message box's editor sees them: there ⌘/ would
+  // comment a line and ⌘↵ would send an empty box. None over the project window,
+  // whose editor has keys of its own (⌘/ comments a line there), and none but ⌘/
+  // and ⌘. while a dialog is up. Read through refs, so a press sees this render.
+  const covered = () => settingsOpen || paletteOpen || sheetOpen || inspectorOpen || !!toolsFor || !!ctxMenu
+    || !!document.querySelector("[role='dialog'], [aria-modal='true']");
+  const shortcutKeys = useRef<(e: KeyboardEvent) => void>(() => {});
+  shortcutKeys.current = (e) => {
+    if (e.defaultPrevented || analyzeProject || !(e.metaKey || e.ctrlKey || e.altKey)) return;
+    const c = chord(e);
+    const act = (fn: () => void) => { e.preventDefault(); fn(); };
+    // Always taken: unhandled, a Mac turns ⌘. into Cancel, which leaves full screen.
+    if (pressed(c, SHORTCUTS.stop.keys)) return act(() => void stop());
+    if (pressed(c, SHORTCUTS.sheet.keys) && (sheetOpen || paletteOpen || !covered())) {
+      return act(() => { setPaletteOpen(false); setSheetOpen((v) => !v); });
+    }
+    if (covered()) return;
+    if (pressed(c, SHORTCUTS.needs.keys)) return act(jumpToNeeds);
+    if (pressed(c, SHORTCUTS.last.keys)) return act(() => {
+      // From a session: the one before it. From a fresh screen: the one you just left.
+      const s = sessions.find((x) => x.id === recent.current[sessionId ? 1 : 0]);
+      if (s) selectSession(s);
+    });
+    if (pressed(c, SHORTCUTS.newSession.keys)) return act(() => { if (activeProject) void newSession(activeProject); });
+    if (pressed(c, SHORTCUTS.sidebar.keys)) return act(toggleLeft);
+    if (pressed(c, SHORTCUTS.panel.keys)) return act(toggleRight);
+    // ⌘1–9 and ⌘↵ go to the live Ask (ui/Keys useAskKeys); ⌘↵ only from the empty
+    // box or outside a field, since with text in the box it sends that text.
+    const ask = /^Ctrl\+([1-9])$/.exec(c)?.[1] ?? (pressed(c, SHORTCUTS.next.keys) && !typing(e.target) ? "enter" : null);
+    if (ask && !window.dispatchEvent(new CustomEvent("hud:ask-key", { detail: ask, cancelable: true }))) e.preventDefault();
+  };
+  // A letter or digit typed with no field to take it starts a message. In the
+  // bubble phase, so a menu or picker that takes letters on document goes first.
+  const typeAnywhere = useRef<(e: KeyboardEvent) => void>(() => {});
+  typeAnywhere.current = (e) => {
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || !/^[\p{L}\p{N}]$/u.test(e.key)) return;
+    if (view !== "chat" || analyzeProject || inField(e.target) || covered()
+        || (e.target as Element | null)?.closest?.("[role='menu'], [role='listbox']")) return;
+    if (!window.dispatchEvent(new CustomEvent("hud:type", { detail: e.key, cancelable: true }))) e.preventDefault();
+  };
+  useEffect(() => {
+    const keys = (e: KeyboardEvent) => shortcutKeys.current(e);
+    const letters = (e: KeyboardEvent) => typeAnywhere.current(e);
+    window.addEventListener("keydown", keys, true);
+    window.addEventListener("keydown", letters);
+    return () => { window.removeEventListener("keydown", keys, true); window.removeEventListener("keydown", letters); };
+  }, []);
+
+  // ⌘J: the next session NEEDS YOU lists, opened the way the bell opens one.
+  // shortcut: ⌘J passes Rivendell offers by (no session to open), give them a place to land if they pile up.
+  function jumpToNeeds() {
+    const id = nextNeed(needsRef.current.flatMap((n) => (n.session_id ? [n.session_id] : [])), sessionId);
+    if (!id) { notify("info", "Nothing else is waiting on you"); return; }
+    const s = sessions.find((x) => x.id === id);
+    if (s) selectSession(s); else openSession(id);
+  }
 
   // "Open SETTINGS on this tab", from anywhere (lib/opensettings.ts).
   useEffect(() => {
@@ -1540,11 +1673,14 @@ export function App() {
     return () => window.removeEventListener("hud:settings", open);
   }, []);
 
+  const [rvLens, setRvLens] = useState<RvLens>("tasks");   // which side of the RIVENDELL tab shows
   // "Show this right-rail tab", from anywhere: the changelog's Open › on a feature
   // that lives there (bridge/whatsnew.py PLACES). Settings shuts so the rail shows.
   useEffect(() => {
     const show = (e: Event) => {
-      const tab = (e as CustomEvent<unknown>).detail;
+      const was = (e as CustomEvent<unknown>).detail;
+      const tab = was === "turns" || was === "flow" ? "session" : was === "team" ? "rivendell" : was;   // tabs another took in
+      if (was === "team" || was === "rivendell") setRvLens(was === "team" ? "team" : "tasks");
       if (!RIGHT_TABS.includes(tab as RightTab)) return;
       setSettingsOpen(false);
       patchSettings({ rightTab: tab as RightTab, rightOpen: true });
@@ -1609,6 +1745,20 @@ export function App() {
     return () => window.removeEventListener("contextmenu", onCtx);
   }, []);
 
+  // The goal sheet's buttons (GoalPill): Mark done, Keep going, Edit. A bridge
+  // older than their route 404s; its ⟳ (go live) brings the route.
+  async function goalAct(action: "done" | "keep" | "edit", objective?: string) {
+    const sid = sessionId;
+    if (!sid) return;
+    try {
+      const { goal } = await api.goalAction(sid, action, objective);
+      setSessions((prev) => prev.map((s) => (s.id === sid ? { ...s, goal } : s)));
+    } catch (e) {
+      const m = (e as Error).message;
+      notify("error", /^(HTTP 404|not found)$/i.test(m) ? "Restart the bridge (⟳) to use the goal's buttons." : m);
+    }
+  }
+
   // Sends are bound to the session the prompt was written in. The relevance
   // check blocks for ~10s, and you're free to open another session meanwhile —
   // so `sid` (not the open session) decides where the run, the queue fallback,
@@ -1620,9 +1770,11 @@ export function App() {
     text: string, images: string[],
     // newAgent: the agent of a session minted for this prompt (startIn), which
     // this render's `sessions` doesn't know yet; picks: that session's own,
-    // where the composer's are still the session you left's.
-    opts?: { force?: boolean; sessionId?: string; project?: string; newAgent?: string;
-             picks?: { model: string; perm: string; effort: string } },
+    // where the composer's are still the session you left's, or a kind's preset (lib/kinds),
+    // which also carries its trim (ponytail).
+    opts?: { force?: boolean; noPath?: boolean; sessionId?: string; project?: string; newAgent?: string;
+             picks?: { model: string; perm: string; effort: string }; ponytail?: string;
+             pickOnce?: boolean; typed?: string; flow?: SendFlow },
   ): Promise<boolean> {
     const sid = opts?.sessionId ?? sessionId;
     if (!sid) return false;
@@ -1634,18 +1786,10 @@ export function App() {
     // `/goal <objective>` sets the session's objective instead of prompting; a
     // bare `/goal` clears it. The loop itself is the bridge's (bridge/goals.py) —
     // this only records what the session is for.
-    // `/work` opens the work list, and `/work run [n]` starts a run from this chat (bridge/workrun.py).
-    const workCmd = multiOn ? /^\/work(?:\s+run(?:\s+(\d+))?)?\s*$/.exec(text.trim()) : null;
-    if (workCmd) {
+    // `/work` opens the WORK panel; a task starts from its row there (bridge/worklist.py).
+    if (multiOn && /^\/work\s*$/.test(text.trim())) {
       patchSettings({ rightTab: "work", rightOpen: true });
-      if (!/\brun\b/.test(text)) return true;
-      try {
-        await workCall("run/start", sid, null, { parallel: workCmd[1] ? Number(workCmd[1]) : undefined });
-        return true;
-      } catch (e) {
-        notify("error", (e as Error).message);
-        return false;
-      }
+      return true;
     }
     const goalCmd = /^\/goal\b\s*([\s\S]*)$/.exec(text.trim());
     // An agent with no goals (caps.goals): the words go to it as written.
@@ -1653,7 +1797,7 @@ export function App() {
       try {
         const { goal } = await api.setGoal(sid, goalCmd[1].trim());
         setSessions((prev) => prev.map((s) => (s.id === sid ? { ...s, goal } : s)));
-        notify("info", goal ? `Goal set — ${goal.objective}` : "Goal cleared.");
+        notify("info", goal ? `Goal set — ${goal.title || goal.objective}` : "Goal cleared.");
         return true;
       } catch (e) {
         notify("error", (e as Error).message);
@@ -1674,12 +1818,15 @@ export function App() {
     // browser doesn't know its picks: its next turn runs on its own, never on these.
     const knobs = sendPicks(targetAgent, agentPick?.agent, opts?.newAgent !== undefined) && !briefOf(sid)?.parent_session;
     // No model or mode: a queued prompt runs on the session's when it starts,
-    // so a pick made while it waits still applies. Resolves whether the prompt
-    // got into the queue; a miss says so here.
+    // so a pick made while it waits still applies. Picks sent with the prompt
+    // (a kind's preset) are the exception: they queue with it. Resolves whether
+    // the prompt got into the queue; a miss says so here.
     const enqueue = async () => {
       const ok = await queue.enqueue({
         // An agent's effort id isn't Claude's: the session's own applies when it runs.
         text, prompt: text, images, project, effort: (!agentPick && knobs && pk.effort) || undefined,
+        ...(opts?.pickOnce && !agentPick && knobs ? { model: pk.model, permission_mode: pk.perm || undefined } : {}),
+        ...(opts?.flow ? { flow: opts.flow.id, by: opts.flow.by } : {}),
       }, sid);
       if (!ok) notify("error", `Couldn't queue the prompt in “${sessionName()}”.`);
       return ok;
@@ -1695,8 +1842,10 @@ export function App() {
       const res = await api.run({
         prompt: text, images, project,
         session_id: sid, model: (knobs && pk.model) || undefined, effort: (knobs && pk.effort) || undefined,
-        permission_mode: (knobs && pk.perm) || undefined, ponytail: ponytail || undefined,
-        force: opts?.force || undefined,
+        permission_mode: (knobs && pk.perm) || undefined, ponytail: (opts?.ponytail ?? ponytail) || undefined,
+        force: opts?.force || undefined, no_path: opts?.noPath || undefined,
+        pick_once: opts?.pickOnce || undefined,
+        ...(opts?.flow ? { flow: opts.flow.id, by: opts.flow.by } : {}),
       });
       // Held: this looks like different work from the session it would resume.
       // Nothing ran — park the prompt on the card and let the user route it.
@@ -1704,7 +1853,8 @@ export function App() {
         setHeldMap((m) => ({
           ...m,
           [sid]: { sid, project, cwd: sessions.find((s) => s.id === sid)?.cwd,
-                   text, images, reason: res.reason, title: res.suggested_title },
+                   text, images, reason: res.reason, title: res.suggested_title, noPath: opts?.noPath, typed: opts?.typed,
+                   kind: opts?.pickOnce && opts.picks ? { picks: opts.picks, ponytail: opts.ponytail, flow: opts.flow } : undefined },
         }));
         if (sessionIdRef.current !== sid)
           notify("info", `Held a prompt in “${sessionName()}” — it may be different work.`);
@@ -1714,7 +1864,7 @@ export function App() {
       // The run saved these picks to the session (/local/run); mirror that here,
       // or a session minted for this prompt reads as never-run until the next
       // poll and the picker flips to this browser's defaults meanwhile.
-      if (knobs) setSessions((prev) => prev.map((s) => (s.id === sid
+      if (knobs && !opts?.pickOnce) setSessions((prev) => prev.map((s) => (s.id === sid
         ? { ...s, model: pk.model, permission_mode: pk.perm || s.permission_mode, effort: pk.effort || null } : s)));
       liveTurns.current.add(res.job_id);
       markWorking(res.session_id || sid);
@@ -1780,7 +1930,7 @@ export function App() {
     try {
       await startIn(project, h.text,
                     { images: h.images, title: h.title ?? undefined, force: true,
-                      cwd: h.cwd ?? undefined });
+                      cwd: h.cwd ?? undefined, kind: h.kind });
     } finally {
       setHeldBusy(false);
     }
@@ -1796,15 +1946,16 @@ export function App() {
 
   /** A path the model mentioned, opened in the editor — at the line it named,
    *  if it named one. Routed through the same call the file browser uses, so it
-   *  lands on the session's own branch. */
-  async function openFileRef(path: string, line?: number, at?: { x: number; y: number }) {
+   *  lands on the session's own branch. `reveal`: shown in the OS file manager instead. */
+  async function openFileRef(path: string, line?: number, at?: { x: number; y: number }, reveal = false) {
     if (!sessionProject) { notify("info", "No project open for this session."); return; }
     // The path came out of prose, so check it against the tree we're about to
     // open it in — a file the model invented, or named from another directory,
     // would otherwise open an empty editor.
-    let target = path;
+    let target = path, root = "";
     try {
-      const { files } = await api.filesTree(sessionProject, sessionBranch);
+      const { files, root: r } = await api.filesTree(sessionProject, sessionBranch);
+      root = r ?? "";
       // A bare `App.tsx` matches one per package, so break the tie with what
       // this session has already said and done: tool summaries (a Bash command
       // with the path inside it) and the model's own prose, which names files in
@@ -1820,7 +1971,7 @@ export function App() {
         // Undecidable is a question, not an error: the candidates open as a menu
         // under the link. A toast listing them would name the right file and
         // still leave you to go find it in the tree yourself.
-        if (many.length > 1 && at) { setFilePick({ ...at, name: path, line, paths: many }); return; }
+        if (many.length > 1 && at) { setFilePick({ ...at, name: path, line, paths: many, ...(reveal ? { root } : {}) }); return; }
         notify("info", many.length > 1
           ? `Several files named ${path} — ${many.join("  ·  ")}`
           : `No such file in this branch — ${path}`);
@@ -1828,8 +1979,15 @@ export function App() {
       }
       target = hit;
     } catch { /* tree unreachable: open anyway, the editor reports its own error */ }
-    openAnalyze(sessionProject, { path: target, branch: sessionBranch, line });
+    if (reveal) void revealFile(root && `${root}/${target}`);
+    else openAnalyze(sessionProject, { path: target, branch: sessionBranch, line });
   }
+  // One identity for the transcript: Markdown is memoized, and a fresh function
+  // each render would re-parse every file-linked reply on every poll.
+  const openFileRefNow = useRef(openFileRef);
+  openFileRefNow.current = openFileRef;
+  const onOpenFile = useCallback((p: string, line?: number, at?: { x: number; y: number }) =>
+    void openFileRefNow.current(p, line, at), []);
 
   /** A line of the model's prose → a markdown blockquote in the prompt box, the
    *  way you'd quote a mail. Appended, not substituted: you quote a sentence
@@ -1860,6 +2018,15 @@ export function App() {
       if (lastTurnId) setDroppedAsks((d) => new Set(d).add(lastTurnId));
     } else void send(text, []);
   }
+  // --- fork: perf --- the transcript's handlers, one identity for the window's life
+  // (lib/stablefn): as plain functions they changed on every App render and
+  // re-rendered every visible turn's RunStream and Markdown with them.
+  const onRunCommandT = useStableFn(runCommand);
+  const onQuoteT = useStableFn(quote);
+  // (onOpenFile: upstream already keeps that one stable, see openFileRefNow above)
+  const onRespondT = useStableFn(respond);
+  const onAnswerT = useStableFn(answerAsk);
+  // --- /fork ---
   async function stop() {
     if (!active) return;
     try { await api.interrupt(active.id); } catch { /* poll reconciles */ }
@@ -1873,10 +2040,10 @@ export function App() {
   // own checkout, not in a worktree of it or a conversation already under way.
   // No project (suggestions, a bridge outside BASE_PATH) = inject into the
   // current composer, as before.
-  function feed(texts: string[], project?: string, fresh?: boolean) {
+  function feed(texts: string[], project?: string, fresh?: boolean, onSession?: (id: string) => void) {
     const text = texts.join("\n");
     if (project && (fresh || project !== sessionProject)) {
-      void startIn(project, text);
+      void startIn(project, text, { onSession });
       return;
     }
     setInject((p) => ({ text, nonce: p.nonce + 1 }));
@@ -1901,20 +2068,22 @@ export function App() {
 
   async function startIn(
     project: string, prompt: string,
-    opts?: { images?: string[]; title?: string; force?: boolean; cwd?: string },
+    opts?: { images?: string[]; title?: string; force?: boolean; cwd?: string; kind?: HeldPrompt["kind"]; onSession?: (id: string) => void },
   ): Promise<boolean> {
     openBlank(project);
     try {
       const { session } = await api.createSession(project, opts?.cwd, opts?.title);
       setSessions((prev) => [session, ...prev]);
       openSession(session.id, true);
+      opts?.onSession?.(session.id);
       toChat();
       // Its profile's picks, else this browser's: what its composer shows once
       // it opens, not the picks of the session it was started from.
       const picks = runPicks(session, { model: settings.model, perm: settings.perm, effort: settings.effort },
                              profiles?.profiles.find((p) => p.id === session.profile_id) ?? null);
       return await send(prompt, opts?.images ?? [],
-                        { sessionId: session.id, project, force: opts?.force, newAgent: session.agent ?? "claude", picks });
+                        { sessionId: session.id, project, force: opts?.force, newAgent: session.agent ?? "claude",
+                          ...(opts?.kind ? { picks: opts.kind.picks, ponytail: opts.kind.ponytail, flow: opts.kind.flow, pickOnce: true } : { picks }) });
     } catch (e) {
       setLoadingSession(false);
       notify("error", (e as Error).message);
@@ -1997,7 +2166,7 @@ export function App() {
   const [pick, setPick] = useState<{ title: string; text: string; done: (rel: string | null) => void } | null>(null);
   const pickProject = (title: string, text: string) =>
     new Promise<string | null>((done) => setPick({ title, text, done: (rel) => { setPick(null); done(rel); } }));
-  async function continueShare(id: string, kind: ShareKind = "session", into?: "yours") {
+  async function continueShare(id: string, kind: ShareKind = "session", into?: "yours" | "new") {
     if (continuing.current.has(id)) return;      // a second click while the first sets up
     continuing.current.add(id);
     try {
@@ -2023,7 +2192,7 @@ export function App() {
         const who = (plan.from ?? "A teammate").split(" ")[0];
         const rel = await pickProject(`Where should ${who}'s session continue?`,
           `It ran in ${typeof where === "string" && where ? where : "a folder"} on ${who}'s machine, a folder with no git repository, `
-          + "so there's no checkout of it here to find. Pick one of your projects; it continues there as a new session.");
+          + "so there's no checkout of it here to find. Pick one of your projects to continue it in.");
         if (!rel) { notify("info", "Nothing was continued."); return; }
         plan = await api.teamContinue(id, { project: rel });
       }
@@ -2038,6 +2207,7 @@ export function App() {
         if (!activeProject) { notify("error", "Pick a project to continue it in first."); return; }
         project = activeProject;
       }
+      let tree: string | undefined;              // the worktree their code went into
       if (branch) {
         const wt = await api.worktreeAdd(project, branch, plan.base ?? undefined);
         if (!wt.ok || !wt.path) {
@@ -2045,6 +2215,7 @@ export function App() {
           return;
         }
         await api.teamUnpack(id, wt.path).catch((e: Error) => notify("info", e.message));
+        tree = wt.path;
         if (cwd) cwd = wt.path;
       }
       if (cwd) {
@@ -2056,6 +2227,17 @@ export function App() {
           else notify("info", steps.length ? `Installed: ${steps.map(where).join(", ")}` : "Cloned. No lockfile here, so nothing was installed.");
         }, (e: Error) => notify("error", e.message));
       }
+      if (kind === "session" && into !== "new") {
+        // CONTINUE HERE: their session as yours, its history here and the composer empty. The
+        // bridge carries that history to Claude with your first prompt (bridge/team.py seed).
+        const { session } = await api.teamAdopt(id, project, tree);
+        await loadSessions();
+        openSession(session.id);
+        toChat();
+        void loadTeam();
+        return;
+      }
+      // NEW SESSION FROM IT (and a picture or a file): a new session, their work attached, the prompt drafted.
       const sid = await newSession(project, plan.draft, branch, plan.title ?? undefined);
       if (!sid) { notify("error", "Couldn't start the session; nothing was marked continued."); return; }
       setAttachFor({ sid, files: plan.attachments });
@@ -2121,15 +2303,23 @@ export function App() {
     } catch (e) { setBoot(null); setLoadingSession(false); notify("error", (e as Error).message); }
   }
 
-  async function createProject(name: string, prompt: string) {
+  /** NEW PROJECT. Resolves to the notices that wait for a yes (nothing was
+   *  done), or null once the project is open; rejects with the bridge's reason,
+   *  which the form shows beside the field that caused it. */
+  async function createProject(body: NewProjectBody): Promise<NewProjectNote[] | null> {
+    const r = await api.createProject(body);
+    if (r.confirm) return r.confirm;
+    if (!r.project) return null;
     try {
-      const r = await api.createProject(name, prompt);
+      void refreshProjects();
       await selectProject(r.project.rel);
       await loadSessions();
       if (r.session && r.job_id) markWorking(r.session.id);
       if (r.session) openSession(r.session.id);
       toChat();
+      for (const n of r.notes ?? []) notify("info", n);
     } catch (e) { notify("error", (e as Error).message); }
+    return null;
   }
 
   function openFromHistory(s: EnrichedSession) {
@@ -2205,6 +2395,7 @@ export function App() {
         // the group, not the row.
         rel, name: rel === JOBS_REL ? JOBS_NAME : rel === SHARED_REL ? SHARED_NAME : projectName(rel),
         badge: gitBadges.get(rel), sessions: ss.slice(0, 3), sessionCount: ss.length, running,
+        missing: ss.length > 0 && ss.every((s) => s.missing),
       });
     }
     // Alphabetical by path — a fixed order. Activity sorting reshuffled rows
@@ -2219,7 +2410,13 @@ export function App() {
   // rather than by HIDE, which PLUGINS deliberately ignores.
   const ws = useWorkspaces();
   const inWs = useCallback((key: string) => workspaceOf(ws.set, key) === ws.cur, [ws]);
-  const sidebarSessions = useMemo(() => sessions.filter((s) => !s.parent_session && inWs(jobGroup(s))), [sessions, inWs]);
+  const sidebarSessions = useMemo(() => sessions.filter((s) => !s.parent_session && !s.ticket_of && inWs(jobGroup(s))), [sessions, inWs]);
+  // Ticket and merge sessions fold under their super session's row instead of listing on their own.
+  const ticketKids = useMemo(() => {
+    const m = new Map<string, SessionBrief[]>();
+    for (const s of sessions) if (s.ticket_of) m.set(s.ticket_of, [...(m.get(s.ticket_of) ?? []), s]);
+    return m;
+  }, [sessions]);
 
   // HIDE keeps a project out of the sidebar. SessionsPanel drops its sessions
   // itself, as PLUGINS still lists the runs of a hidden folder or group.
@@ -2258,11 +2455,39 @@ export function App() {
   // The open session's working tree — its worktree branch when it has one.
   // A helper whose chat isn't in the list has no project of its own to report.
   const sessionProject = (selected?.parent_session && !selected.project ? null : selected?.project) ?? activeProject;
+  // What SKILL ROUTER reads besides the composer's text (Composer routeCtx), rebuilt when the
+  // turns change rather than per keystroke. None while a session loads: its turns are still the last one's.
+  // The cwd is the session's checkout, whose tickets a worktree session works on; a turn you
+  // stopped reads "done" but its flow step never finished, so it is "stopped" here.
+  const routeCwd = selected?.work_cwd || selected?.cwd || undefined;
+  const routeCtx = useMemo(() => {
+    const last = turns.at(-1);
+    return sessionProject && !loadingSession ? {
+      project: sessionProject, cwd: routeCwd, prompts: turns.slice(-6).map((t) => t.prompt),
+      lastStatus: last?.events.some((e) => e.type === "stopped") ? "stopped" : last?.status, first: turns.length === 0,
+    } : undefined;
+  }, [sessionProject, routeCwd, loadingSession, turns]);
   const sessionBranch = selected?.branch;
   // What the session wrote, for FILES' ✦ marks, relative to the tree FILES shows:
   // the worktree its shell moved into, else its run dir.
   const filesEdits = useMemo(() => sessionEdits(turns, selected?.work_cwd || selected?.cwd),
     [turns, selected?.work_cwd, selected?.cwd]);
+  // BRANCHES (lib/branchrows): one read of the open repo's branches feeds the tab,
+  // the rail tile's LAND n and auto clean-up (the tab header's broom).
+  const branchData = useBranches(sessionProject, gitNonce, settings.rightOpen && settings.rightTab === "branches");
+  const branchView = useMemo<BranchView | null>(() => {
+    if (!branchData.data) return null;
+    const who = branchActivity(sessions, statusMap, sessionProject);
+    const rows = shownRows(branchData.data.branches, branchData.data.base, sessionBranch ?? null, who.activity, branchData.prs, who.titles);
+    return { base: branchData.data.base, rows, tree: branchTree(rows), picks: branchData.data.picks ?? {}, live: who.live, byBranch: who.byBranch };
+  }, [branchData.data, branchData.prs, sessions, statusMap, sessionProject, sessionBranch]);
+  const landCount = branchView?.rows.filter(landable).length ?? 0;
+  // a branch someone used in the last half hour isn't cleaned up under them
+  const recentBranches = useMemo(() => {
+    const since = Date.now() / 1000 - 1800;
+    return new Set(sessions.filter((s) => s.project === sessionProject && s.branch && s.updated > since).map((s) => s.branch!));
+  }, [sessions, sessionProject]);
+  useAutoClean(settings.autoClean, sessionProject, branchView?.rows ?? null, recentBranches, branchData.load);
   // The MAP chip and the window's MAP tab show only where the repo's own switch
   // (SETTINGS ▸ Projects ▸ Project map) is on; re-read when SETTINGS closes.
   const [mapOn, setMapOn] = useState(false);
@@ -2333,6 +2558,65 @@ export function App() {
     return () => { live = false; clearInterval(id); };
   }, [sessionProject, sessionBranch, gitNonce]);
 
+  // What the prompt box's kinds say on their rail (lib/kinds kindFacts), besides the git
+  // status above: the session's newest check, and whether its project is linked to Claude
+  // Design, held per project and read again on each visit (null until the first answer).
+  const lastCheck = useMemo(() => lastCheckOf(turns), [turns]);
+  const [designLinks, setDesignLinks] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    if (sessionProject) api.projectSettings({ project: sessionProject })
+      .then((s) => setDesignLinks((m) => ({ ...m, [sessionProject]: !!s.design_project })), () => {});
+  }, [sessionProject]);
+
+  // The open session's council run, for the COUNCIL tile (lib/council railTile):
+  // a light read (no git), every 3 s while it reviews or fixes, else every 15 s.
+  // Held by session, so a switch never shows the last one's. While the tab is
+  // open its panel reads the run and hands each read up (onBrief), so this poll
+  // rests: one poller, not two. A read that changes nothing on the rail
+  // (lib/council tileKey) keeps the brief held, so it doesn't re-render App.
+  const [councilOf, setCouncilOf] = useState<{ sid: string; c: CouncilBrief } | null>(null);
+  const council = councilOf && councilOf.sid === sessionId ? councilOf.c : null;
+  const councilLive = council?.status === "reviewing" || council?.status === "fixing";
+  const councilOpen = settings.rightOpen && settings.rightTab === "council";
+  const keepCouncil = (sid: string, c: CouncilBrief) =>
+    setCouncilOf((p) => (p && p.sid === sid && tileKey(p.c) === tileKey(c) ? p : { sid, c }));
+  useEffect(() => {
+    if (!sessionId || councilOpen) return;
+    let live = true;
+    const tick = () => api.council(sessionId)
+      .then((c) => { if (live) keepCouncil(sessionId, c); })
+      .catch(() => { /* a bridge from before the council: the tile stays calm */ });
+    void tick();
+    const id = setInterval(tick, councilLive ? 3000 : 15000);
+    return () => { live = false; clearInterval(id); };
+  }, [sessionId, councilLive, councilOpen]);
+  const councilTile = railTile(council);
+
+  // Auto-fetch (/design-first auto-fetch): behind is only as true as the last
+  // fetch, so every status read checks whether the open tree's repo is due
+  // (lib/gitsync needsFetch) and fetches it while the window is visible. The GIT
+  // tab's readout and its rail icon show it; `at` lets any later fetch that
+  // lands, ⟳'s included, retire a failure. Keyed by project, not tree: a fetch
+  // moves refs every worktree of the repo shares, and the branch half of the
+  // tree's key can still be resolving when the first status lands.
+  const [autoFetch, setAutoFetch] = useState<{ project: string; at: number; busy: boolean; error?: string } | null>(null);
+  const fetchTried = useRef(new Map<string, number>());
+  useEffect(() => {
+    if (!sessionProject || document.hidden) return;
+    const at = Date.now() / 1000;
+    if (!needsFetch(sessionGit, at, fetchTried.current.get(sessionProject))) return;
+    fetchTried.current.set(sessionProject, at);
+    const project = sessionProject;
+    setAutoFetch({ project, at, busy: true });
+    void api.gitFetch(project, sessionBranch || undefined)
+      .then((r) => (r.ok ? "" : r.output || "Fetch failed."), (e: Error) => e.message || "Fetch failed.")
+      .then((error) => {
+        setAutoFetch((cur) => (cur?.project !== project || cur.at !== at ? cur : error ? { project, at, busy: false, error } : null));
+        setGitNonce((n) => n + 1);
+      });
+  }, [sessionGit]);
+  const treeFetch = autoFetch?.project === sessionProject ? autoFetch : null;
+
   // Unread lessons, for the LEARN tab's badge — the whole reason to open a tab
   // you are not already looking at. Every repo's, because the panel reads that
   // way too. One listdir per repo, so a slow tick is plenty.
@@ -2380,14 +2664,21 @@ export function App() {
     const id = setInterval(() => void loadTeam(), 30000);
     return () => clearInterval(id);
   }, [rivendellOn, loadTeam]);
+  // A share coming in has a bar (TeamPanel): each second until it's in, the 30 s look otherwise.
+  const coming = team?.receiving?.length ?? 0;
+  useEffect(() => {
+    if (!coming) return;
+    const id = setInterval(() => void loadTeam(), 1000);
+    return () => clearInterval(id);
+  }, [coming, loadTeam]);
   const teammates = team && !team.error ? team.roster : [];
-  const teamNew = team?.inbox.filter((r) => !seen(r)).length ?? 0;     // what SENT TO YOU shows
+  const teamNew = (team?.inbox.filter((r) => !seen(r)).length ?? 0) + coming;     // what SENT TO YOU shows, and what is coming
   // The lightbox's SEND, and a bell row for a picture or a file, reach here.
   const picTitle = useRef<string | null>(null);     // a picture sent from the lightbox is named after the open session
   picTitle.current = selected && !isReadOnly(selected.origin) && selected.title ? `${selected.title} · screenshot` : null;
   useEffect(() => {
     setLightboxSend(teammates.length ? (p) => setSendWhat({ what: { kind: "picture", ...p, title: picTitle.current ?? undefined } }) : null);
-    const show = () => patchSettings({ rightTab: "team", rightOpen: true });
+    const show = () => { setRvLens("team"); patchSettings({ rightTab: "rivendell", rightOpen: true }); };
     window.addEventListener("hud:team", show);
     return () => { window.removeEventListener("hud:team", show); setLightboxSend(null); };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- patchSettings is a setter
@@ -2417,6 +2708,10 @@ export function App() {
   const openStatus = sessionId ? statusMap.get(sessionId) : undefined;
   const limitLive = useMemo(() => (sessionId && openStatus?.state === "parked" && openStatus.kind === "limit"
     ? { session: sessionId, status: openStatus } : null), [sessionId, openStatus]);
+  // The open session answered with tasks still running in its process. A steer
+  // lands there as a follow-up turn and they keep running (runner.steer takes a
+  // turn waiting on background commands); STOP ends them.
+  const openBg = openStatus?.state === "background" ? openStatus.bg?.length ?? 0 : 0;
   const waitAction = async (action: "resume" | "cancel") => {
     if (!sessionId) return;
     try {
@@ -2427,23 +2722,27 @@ export function App() {
     }
   };
 
+  // The login the open session spends: its turn in flight's, else the one its
+  // next turn takes. The MODEL menu shows that login, so
+  // a profile pick or a fallback handover moves them at once: every login's
+  // meter is already in `accounts`. The default login still reads /local/usage,
+  // which carries its per-model caps on an older bridge too.
+  const spendSlot = spendingSlot(selected);
+  const spender = accounts.find((a) => a.slot === spendSlot) ?? null;
+  // USAGE's tile is that login's window as a ring: the PROFILE chip's window
+  // (chipWindow), printed as a number only once it runs low.
+  const usageWin = chipWindow(loginWindows(spender));
+
   // A run starting in this chat, from anywhere, opens the work list once, so you can watch it.
   // Its open items are the rail's badge.
   const [workOpen, setWorkOpen] = useState(0);
   useEffect(() => {
     if (!multiOn || !sessionId) { setWorkOpen(0); return; }
     let gone = false;
+    // The rail tile counts the tasks being built (bridge/worklist.py groups them).
     const look = () => {
-      workGet<{ items: { state: string; group: string }[]; runs?: { id: string; chat: string; state: string }[] }>(sessionId, null).then((r) => {
-        if (gone) return;
-        const run = (r.runs ?? []).find((x) => x.state === "running" && x.chat === sessionId);
-        setWorkOpen(run ? r.items.filter((i) => i.state === "doing" || i.state === "review" || i.group === "next").length : 0);
-        if (!run) return;
-        const key = `mystical.work-opened.${run.id}`;
-        if (!localStorage.getItem(key)) {
-          localStorage.setItem(key, "1");
-          patchSettings({ rightTab: "work", rightOpen: true });
-        }
+      workGet<{ items: { group: string }[] }>(sessionId, null).then((r) => {
+        if (!gone) setWorkOpen(r.items.filter((i) => i.group === "building" || i.group === "needs").length);
       }, () => { if (!gone) setWorkOpen(0); });
     };
     look();
@@ -2452,13 +2751,29 @@ export function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [multiOn, sessionId]);
 
+  // The chat's code-like words, for the composer to complete. Only on a new turn or a finished one:
+  // a streamed chunk doesn't change what's worth offering.
+  const turnsDone = turns.filter((t) => t.status !== "running").length;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const chatWords = useMemo(() => codeWords(turns), [sessionId, turns.length, turnsDone]);
+
   const waitsOnYou = turns.some((t) => t.pending.length > 0);
+  // HOME's sky follows the hour; the cap holds its top while HOME is open.
+  const [almanacAsk, setAlmanacAsk] = useState(0); // HOME's big clock bumps it: the cap's Almanac opens
+  const homeSky = skyFor(parseInt(tele.clock.slice(0, 2), 10) || 0);
   const rightTabs: PanelTab[] = [
     {
-      id: "turns", label: waitsOnYou ? "Turns (one waits on you)" : "Turns", icon: <ListOrdered {...RAIL} />, ownScroll: true,
-      ask: waitsOnYou,
+      id: "home", short: "HOME", label: "Home", icon: <House {...RAIL} />, ownScroll: true, group: "home",
+      hint: "the time, the sky and what shipped today",
+      render: () => <HomePanel clock={tele.clock} weather={weather} sky={homeSky} onClock={() => setAlmanacAsk((n) => n + 1)} onOpen={(id) => { openSession(id); toChat(); }} />,
+    },
+    // TURNS and FLOW in one: the session's turns, path, window, time and tokens.
+    {
+      id: "session", short: "SESSION", label: "Session", icon: <Activity {...RAIL} />, ownScroll: true, group: "session",
+      ask: waitsOnYou, hint: waitsOnYou ? "one waits on you" : undefined,
       render: () => (
-        <TurnsPanel key={sessionId ?? ""} sessionId={sessionId} turns={turns} scrollRef={scrollRef} nav={transcriptNav} following={atBottom}
+        <SessionPanel key={sessionId ?? ""} sessionId={sessionId} turns={turns} scrollRef={scrollRef} nav={transcriptNav} following={atBottom}
+          max={selected?.ctx_window ?? 1_000_000}
           onJump={(id, key) => { toChat(); void jumpTo(id, key); }} onLatest={() => { toChat(); jumpToBottom(); }}
           onCopy={(text) => {
             try { void navigator.clipboard?.writeText(text); notify("info", "Prompt copied."); }
@@ -2469,11 +2784,14 @@ export function App() {
             setDraft(draft.trim() ? `${draft.replace(/\s+$/, "")}\n\n${text}` : text);
             toChat();
             window.dispatchEvent(new Event("ask:focus"));
-          }} />
+          }}
+          // Behind a running turn it queues (send), so it never cuts one short.
+          onCompact={() => void send("/compact", [], { force: true, noPath: true })} />
       ),
     },
     {
-      id: "files", label: "Files", icon: <FolderTree {...RAIL} />, ownScroll: true, scope: "worktree",
+      id: "files", short: "FILES", label: "Files", icon: <FolderTree {...RAIL} />, ownScroll: true, scope: "worktree", group: "session",
+      hint: filesEdits.edited.size ? `${filesEdits.edited.size} edited this session` : undefined,
       render: () => (
         <FilesPanel
           project={sessionProject} branch={sessionBranch}
@@ -2482,6 +2800,7 @@ export function App() {
             ? (file) => setSendWhat({ what: { kind: "file", project: sessionProject, branch: sessionBranch || undefined, file } })
             : undefined}
           edited={filesEdits.edited} editing={filesEdits.now}
+          turns={turns} cwd={selected?.work_cwd || selected?.cwd}
           onOpenMystical={experimental.enabled ? () => openMysticalPanel({ project: sessionProject, session: sessionProject ? null : selected?.id }) : undefined}
           onAddToPrompt={(path) => {
             // After whatever you were writing, as TURNS' reuse does, but inline.
@@ -2493,12 +2812,14 @@ export function App() {
       ),
     },
     {
-      id: "git", label: dirtyFiles ? `Git (${dirtyFiles} changed)` : gitSync ? `Git (${gitSync})` : "Git",
+      id: "git", short: "GIT", label: "Git", group: "session",
+      hint: [dirtyFiles ? `${dirtyFiles} changed` : "", gitSync ?? "", treeFetch?.busy ? "checking origin" : ""]
+        .filter(Boolean).join(" · ") || undefined,
       icon: <GitBranch {...RAIL} />, ownScroll: true, scope: "worktree",
-      badge: dirtyFiles ? railCount(dirtyFiles) : gitSync,
+      badge: dirtyFiles ? dirtyFiles > 9 ? railCount(dirtyFiles) : `${dirtyFiles} EDITS` : gitSync, busy: !!treeFetch?.busy,
       render: () => (
         <GitPanel
-          project={sessionProject} branch={sessionBranch} git={sessionGit}
+          project={sessionProject} branch={sessionBranch} git={sessionGit} autoFetch={treeFetch}
           onGitChanged={() => setGitNonce((n) => n + 1)}
           onOpenFile={openFileFromPanel}
           onHandOff={handOffSession}
@@ -2508,12 +2829,30 @@ export function App() {
         />
       ),
     },
-    // Every branch and its next step (lib/branchrows); ⋯ and right-click hold the rest.
+    // The council on the open session's work (lib/council): its round while a run goes, its score once it passed or stopped.
     {
-      id: "branches", label: "Branches", icon: <GitFork {...RAIL} />, ownScroll: true, scope: "project",
+      id: "council", short: "COUNCIL", label: "Council", group: "session",
+      hint: council && council.status !== "idle" ? councilHero(council).pill.toLowerCase() : undefined,
+      icon: <Scale {...RAIL} />, ownScroll: true,
+      badge: councilTile.badge, tone: councilTile.tone, busy: councilTile.busy,
       render: () => (
-        <BranchesPanel project={sessionProject} branch={sessionBranch}
-          sessions={sessions} status={statusMap} nonce={gitNonce}
+        // The session's own project, never activeProject: its push must not land in another repo.
+        <CouncilPanel key={sessionId ?? ""} sid={sessionId} project={selected?.project ?? null} branch={sessionBranch}
+          busy={running || openWorking} initial={council}
+          onBrief={(c) => { if (sessionId) keepCouncil(sessionId, c); }}
+          onOpenChat={() => { toChat(); jumpToBottom(); }}
+          onSend={(text) => void send(text, [], { force: true })}
+          onPushed={() => setGitNonce((n) => n + 1)} />
+      ),
+    },
+    // Every branch under the branch it goes into, and its next step (lib/branchrows); ⋯ and right-click hold the rest.
+    {
+      id: "branches", short: "BRANCH", label: "Branches", icon: <GitFork {...RAIL} />, ownScroll: true, scope: "project", group: "project",
+      hint: landCount ? `${landCount} ready to land` : undefined,
+      badge: landCount ? `LAND ${landCount}` : undefined,
+      render: () => (
+        <BranchesPanel project={sessionProject} view={branchView} err={branchData.err} onReload={() => void branchData.load()}
+          autoClean={settings.autoClean} onAutoClean={(on) => patchSettings({ autoClean: on })}
           onOpen={(s) => { selectSession(s); toChat(); }}
           // a checkout gets a session in it; a branch without one gets a worktree first
           onNew={(r) => { if (!sessionProject) return;
@@ -2526,68 +2865,70 @@ export function App() {
     },
     // The project's docs, generated or found (components/DocsPanel).
     ...(multiOn ? [{
-      id: "docs", label: "Docs", icon: <BookOpen {...RAIL} />, scope: "project" as const,
+      id: "docs", short: "DOCS", label: "Docs", icon: <BookOpen {...RAIL} />, scope: "project" as const, group: "project",
       render: () => <DocsPanel onAsk={(text) => { void send(text, [], { force: true }); }} />,
     }] : []),
-    // The project's tasks (components/WorkPanel). Keyed by chat: "done in this chat" is relative to it.
+    // The project's tasks (components/WorkPanel). Keyed by chat: plans and Bring in are the chat's.
     ...(multiOn ? [{
-      id: "work", label: "Work list", icon: <ListChecks {...RAIL} />, scope: "project" as const, badge: workOpen ? String(workOpen) : null,
-      render: () => <WorkPanel key={sessionId ?? ""} chat={sessionId} project={sessionProject} onAsk={(text) => { void send(text, [], { force: true }); }} onOpen={(id) => { openSession(id); toChat(); }} />,
+      id: "work", short: "WORK", label: "Work", icon: <ListChecks {...RAIL} />, scope: "project" as const, group: "project", badge: workOpen ? String(workOpen) : null,
+      render: () => <WorkTab key={sessionId ?? ""} chat={sessionId} project={sessionProject} onAsk={(text) => { void send(text, [], { force: true }); }} onOpen={(id) => { openSession(id); toChat(); }} />,
     }] : []),
     // Your timers, listeners and commands that run agents (components/AutomationsPanel).
     ...(multiOn ? [{
-      id: "automations", label: "Automations", icon: <Timer {...RAIL} />,
+      id: "automations", short: "AUTO", label: "Automations", icon: <Timer {...RAIL} />, group: "project",
       render: () => <AutomationsPanel project={sessionProject} onOpen={(id) => { openSession(id); toChat(); }} />,
     }] : []),
     // What agents designed in this project (components/DesignPane).
     ...(multiOn ? [{
-      id: "design", label: "Design", icon: <Palette {...RAIL} />, scope: "project" as const,
+      id: "design", short: "DESIGN", label: "Design", icon: <Palette {...RAIL} />, scope: "project" as const, group: "project",
       // A little scrolling of its own, like the other tabs. Files open in the editor beside it.
       render: () => <DesignBoards view={openFileRef} onAsk={(text) => { void send(text, [], { force: true }); }} />,
     }] : []),
     // What you pressed SAVE on in this project's chats (components/SavedViews).
     ...(multiOn ? [{
-      id: "views", label: "Saved views", icon: <Bookmark {...RAIL} />, scope: "project" as const,
+      id: "views", short: "VIEWS", label: "Saved views", icon: <Bookmark {...RAIL} />, scope: "project" as const, group: "project",
       render: () => <SavedViews />,
     }] : []),
     // Hidden while LESSONS is off — nothing is being written.
     ...(ai.learn ? [{
-      id: "learn", label: "Learn", icon: <GraduationCap {...RAIL} />, ownScroll: true,
-      badge: unreadLessons ? railCount(unreadLessons) : null,
+      id: "learn", short: "LEARN", label: "Learn", icon: <GraduationCap {...RAIL} />, ownScroll: true, group: "project",
+      badge: unreadLessons ? railCount(unreadLessons) : null, hint: unreadLessons ? `${unreadLessons} unread` : undefined,
       render: () => (
         <LearnPanel project={sessionProject} read={lessonsRead}
           onRead={(k) => setLessonsRead((r) => new Set(r).add(k))} />
       ),
     }] : []),
     ...(rivendellOn ? [{
-      id: "rivendell", label: rivendellDown ? "Rivendell tasks — link broken" : "Rivendell tasks",
+      id: "rivendell", short: "RIVENDELL", label: "Rivendell: tasks + team", group: "project",
+      hint: rivendellDown ? "link broken" : teamNew ? `${teamNew} new from the team` : undefined,
       icon: <RivendellIcon {...RAIL} />, ownScroll: true, scope: "project" as const, alert: rivendellDown,
+      badge: teamNew ? teamNew > 9 ? railCount(teamNew) : `${teamNew} NEW` : null,
       render: () => (
-        <RivendellTasks project={sessionProject} onOpenSession={(id) => { openSession(id); toChat(); }}
-          onWorkOn={(text) => { if (sessionProject) { void newSession(sessionProject, text); toChat(); } }} />
-      ),
-    }] : []),
-    ...(rivendellOn ? [{
-      id: "team", label: teamNew ? `Team (${teamNew} new)` : "Team",
-      icon: <Users {...RAIL} />, ownScroll: true, badge: teamNew ? railCount(teamNew) : null,
-      render: () => (
-        <TeamPanel data={team} fail={teamFail}
-          sessionTitle={selected && !isReadOnly(selected.origin) ? selected.title || "this session" : null}
-          onRefresh={() => void loadTeam()}
-          onSendTo={(t) => { if (selected) setSendWhat({ what: { kind: "session", session: selected.id, title: selected.title || "session" }, to: t.id }); }}
-          onOpen={openReceived} onContinue={(r) => void continueShare(r.id, r.kind)} step={contStep}
-          onContinueYours={(r) => void continueShare(r.id, r.kind, "yours")}
-          onDismiss={(r) => void dismissShare(r.id, !!r.session && r.session === sessionId)} />
+        <RivendellTab lens={rvLens} onLens={setRvLens} teamNew={teamNew}
+          tasks={<RivendellTasks project={sessionProject} sessions={sessions} onOpenSession={(id) => { openSession(id); toChat(); }}
+            onWorkOn={(text, dir) => { const p = dir || sessionProject; if (p) { void newSession(p, text); toChat(); } }} />}
+          team={<TeamPanel data={team} fail={teamFail} project={sessionProject}
+            sessionTitle={selected && !isReadOnly(selected.origin) ? selected.title || "this session" : null}
+            onRefresh={() => void loadTeam()}
+            onSendTo={(t) => { if (selected) setSendWhat({ what: { kind: "session", session: selected.id, title: selected.title || "session" }, to: t.id }); }}
+            onOpen={openReceived} onContinue={(r) => void continueShare(r.id, r.kind)} step={contStep}
+            onNewSession={(r) => void continueShare(r.id, r.kind, "new")}
+            onContinueYours={(r) => void continueShare(r.id, r.kind, "yours")}
+            onDismiss={(r) => void dismissShare(r.id, !!r.session && r.session === sessionId)} />} />
       ),
     }] : []),
     {
-      id: "usage", label: "Usage", icon: <Gauge {...RAIL} />, ownScroll: true,
+      id: "usage", short: "USAGE", label: "Usage", group: "you", ownScroll: true,
+      icon: usageWin ? <RailRing left={usageWin.left} /> : <Gauge {...RAIL} />,
+      badge: usageWin && usageWin.left < 25 ? `${usageWin.left}%` : null, low: true,
+      hint: usageWin ? `${usageWin.left}% of the ${usageWin.tag === "WK" ? "week" : "5-hour window"} left · refills in ${fmtReset(usageWin.resets_at)}` : undefined,
       render: () => (
         <UsagePanel onOpenProject={(rel) => openAnalyze(rel)} />
       ),
     },
-    // --- fork: plugins --- the installed plugins' panes (bridge/plugins_ext.py) as their own group under
-    // USAGE behind a hairline: one tab per pane, or one tab per manifest pane.group with the panes stacked.
+    // --- fork: plugins --- the installed plugins' panes (bridge/plugins_ext.py) as their own rail group
+    // ("plugins", after USAGE's "you", so the rail draws its rule between them): one tab per pane, or one
+    // tab per manifest pane.group with the panes stacked.
     // Each tab wears the icon its manifest ships (ui/icon.svg) or a puzzle piece.
     ...((): PanelTab[] => {
       const out: PanelTab[] = [];
@@ -2598,6 +2939,7 @@ export function App() {
       }
       const seen = new Set<string>();
       const svg = (markup: string | null | undefined) => markup ? <span className="rail-svg" aria-hidden dangerouslySetInnerHTML={{ __html: markup }} /> : <Puzzle {...RAIL} />;
+      const word = (t: string | null | undefined) => (t || "").trim().split(/\s+/)[0].toUpperCase().slice(0, 9) || "PLUGIN";
       for (const p of extPanes) {
         const g = p.pane!.group;
         if (g) {
@@ -2606,6 +2948,7 @@ export function App() {
           const ps = groups.get(g.id)!;
           out.push({
             id: `plugin-group:${g.id}`, label: ps.map((x) => x.pane!.title).join(" · ") || g.title, ownScroll: true,
+            short: word(g.title || ps[0].pane!.title), group: "plugins",
             icon: svg(ps.find((x) => x.pane!.group?.icon)?.pane!.group?.icon),
             alert: ps.some((x) => !!x.broken || x.status?.ok === false),
             render: () => <PluginGroupPane key={g.id} ps={ps} />,
@@ -2613,25 +2956,40 @@ export function App() {
         } else {
           out.push({
             id: `plugin:${p.id}`, label: p.pane!.title, ownScroll: true, icon: svg(p.pane!.icon),
+            short: word(p.pane!.title), group: "plugins",
             alert: !!p.broken || p.status?.ok === false,
             ...(p.pane!.scope ? { scope: p.pane!.scope } : {}),
             render: () => <PluginPane key={p.id} p={p} />,
           });
         }
       }
-      if (out.length) out[0].sep = true;
       return out;
     })(),
     // --- /fork ---
   ];
+  // The rail as you arranged it (lib/rail). The open tab stays on it while open
+  // even if you hid it, so a deep link to it (⌘P, the clock menu's Usage, a
+  // changelog Open ›) never lands on some other tab.
+  const railTabs = arrange(rightTabs, settings.rightOrder, settings.rightHidden.filter((id) => id !== settings.rightTab));
+  const railKeys = railTabs.map((t) => t.id).join();
+  // ⌥1–9: the rail's tabs in its own order, as a click on the tile (the open one
+  // shuts). Not inside a text field, where ⌥+digit types a character (¡™£, or a
+  // bracket on some keyboard layouts) — the empty message box excepted, as for ⌥↑.
+  useEffect(() => {
+    const ids = railKeys.split(",");
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || !/^Digit[1-9]$/.test(e.code)) return;
+      if (e.defaultPrevented || typing(e.target)) return;
+      const id = ids[Number(e.code.slice(5)) - 1];
+      if (!id) return;
+      e.preventDefault();
+      pickRightTab(id);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- pickRightTab is a setter
+  }, [railKeys]);
 
-  // The login the open session spends: its turn in flight's, else the one its
-  // next turn takes. The MODEL menu shows that login, so
-  // a profile pick or a fallback handover moves them at once: every login's
-  // meter is already in `accounts`. The default login still reads /local/usage,
-  // which carries its per-model caps on an older bridge too.
-  const spendSlot = spendingSlot(selected);
-  const spender = accounts.find((a) => a.slot === spendSlot) ?? null;
   const spentUsage = spendSlot === DEFAULT_SLOT ? usage : spender ? loginUsage(spender) : null;
   // Model picker options — the live list served from /local/state (Models API).
   const modelOpts = useMemo(() => modelOptions(state?.models), [state?.models]);
@@ -2703,7 +3061,7 @@ export function App() {
   }, [view, ai]);
 
   const commands: Command[] = [
-    { id: "new-chat", label: "New chat", group: "Session", icon: "+", run: () => activeProject && void newSession(activeProject) },
+    { id: "new-chat", label: "New chat", group: "Session", icon: "+", keys: SHORTCUTS.newSession.keys, run: () => activeProject && void newSession(activeProject) },
     ...(isReadOnly(selected?.origin) ? [] : [
       { id: "compact", label: "Compact context (/compact)", group: "Session", icon: "▢", run: () => void send("/compact", []) }]),
     { id: "copy-chat", label: "Copy chat as markdown", group: "Session", icon: "⧉", run: () => {
@@ -2719,9 +3077,10 @@ export function App() {
       ? [{ id: "view-next", label: "Go to Next up", group: "View", icon: "◈", run: () => setView("next") }]
       : []),
     { id: "analyze", label: "Analyze active project", group: "Project", icon: "⊞", run: () => activeProject && openAnalyze(activeProject) },
-    { id: "right-panel", label: settings.rightOpen ? "Collapse right panel" : "Expand right panel", group: "View", icon: "▥", run: toggleRight },
-    { id: "left-panel", label: settings.leftOpen ? "Fold the sidebar to its rail" : "Unfold the sidebar", group: "View", icon: "▤", run: toggleLeft },
+    { id: "right-panel", label: settings.rightOpen ? "Collapse right panel" : "Expand right panel", group: "View", icon: "▥", keys: SHORTCUTS.panel.keys, run: toggleRight },
+    { id: "left-panel", label: settings.leftOpen ? "Fold the sidebar to its rail" : "Unfold the sidebar", group: "View", icon: "▤", keys: SHORTCUTS.sidebar.keys, run: toggleLeft },
     { id: "settings", label: "Dashboard settings…", group: "Display", icon: "⚙", run: () => setSettingsOpen(true) },
+    { id: "shortcuts", label: "Keyboard shortcuts", group: "Help", icon: "⌨", keys: SHORTCUTS.sheet.keys, run: () => setSheetOpen(true) },
     { id: "replay-boot", label: "Replay boot intro", group: "Display", icon: "↻", run: replayBoot },
     { id: "inspector", label: "HTTP inspector…", group: "Session", icon: "◫", run: () => setInspectorOpen(true) },
     ...modelOpts.map((m) => ({
@@ -2752,6 +3111,50 @@ export function App() {
     // An edit box has its own Copy, so the selection rows would only repeat it.
     const items: CtxItem[] = nativeCtx.top.length && ctxMenu.type !== "editor" ? [...nativeCtx.top, { divider: true }] : [];
     const copy = (t: string) => { try { void navigator.clipboard?.writeText(t); } catch { /* ignore */ } };
+    if (ctxMenu.type === "railtab") {
+      // The rail customised from here (/design-first rail-ctx-customize, A · IN THE
+      // MENU, 2026-11-16): this tile, a show/hide checklist of every tab, the look.
+      // Switches and the checklist keep the menu open so one visit trims the rail.
+      const id = ctxMenu.id;
+      const hidden = settings.rightHidden;
+      const ids = rightTabs.map((t) => t.id);
+      const shown = railTabs.map((t) => t.id);
+      const at = shown.indexOf(id);
+      // The open tab stays on the rail while it's open (railTabs), so hiding it
+      // moves you to the first other tab rather than doing nothing you can see.
+      const flip = (tab: string) => {
+        const next = toggleHidden(ids, hidden, tab);
+        const away = next.includes(tab) && tab === settings.rightTab ? shown.find((t) => !next.includes(t)) : undefined;
+        patchSettings({ rightHidden: next, ...(away && { rightTab: away as RightTab }) });
+      };
+      const move = (to: number) => patchSettings({ rightOrder: moveTo(shown, at, to) });
+      // The rail's own background opens this menu too, with no tile under it: no THIS TILE rows.
+      if (id) {
+        items.push({ section: "THIS TILE" });
+        if (!hidden.includes(id) && toggleHidden(ids, hidden, id).includes(id))
+          items.push({ icon: "⊘", label: `Hide ${ctxMenu.label.split(":")[0]}`, onClick: () => flip(id) });
+        // Both moves stay and dim at the ends: a row that vanished would put the other under the pointer.
+        items.push({ icon: "↑", label: "Move up", keep: true, disabled: at <= 0, onClick: () => move(at - 1) },
+          { icon: "↓", label: "Move down", keep: true, disabled: at < 0 || at >= shown.length - 1, onClick: () => move(at + 1) });
+        items.push({ icon: "★", label: "Open here on start", keep: true, on: settings.rightStart === id,
+          onClick: () => patchSettings({ rightStart: settings.rightStart === id ? "" : id }) });
+        items.push({ divider: true });
+      }
+      items.push({ section: "ON THE RAIL", hint: "click to show/hide" }, {
+        checks: rightTabs.map((t) => {
+          const on = !hidden.includes(t.id);
+          return { label: t.label.split(":")[0], on, locked: on && !toggleHidden(ids, hidden, t.id).includes(t.id), onClick: () => flip(t.id) };
+        }) });
+      const sw = (icon: string, label: string, key: "railNames" | "railReadouts" | "railRules", hint?: string): CtxItem =>
+        ({ icon, label, hint, keep: true, on: settings[key], onClick: () => patchSettings({ [key]: !settings[key] }) });
+      items.push({ divider: true }, { section: "LOOK" },
+        sw("Aa", "Names under icons", "railNames"), sw("!", "Readouts", "railReadouts", "ASK ↑2"), sw("—", "Group rules", "railRules"));
+      const custom = !!(settings.rightOrder.length || hidden.length || settings.rightStart
+        || !settings.railNames || !settings.railReadouts || !settings.railRules);
+      items.push({ divider: true }, { icon: "↺", label: "Reset the rail", hint: "order, shown tabs, look", disabled: !custom,
+          onClick: () => patchSettings({ rightOrder: [], rightHidden: [], rightStart: "", railNames: true, railReadouts: true, railRules: true }) });
+      items.push({ divider: true });   // the Dashboard ▸ tail that follows isn't part of LOOK
+    }
     if (ctxMenu.type === "session") {
       const s = sessions.find((x) => x.id === ctxMenu.id);
       const pinned = pins.has(ctxMenu.id);
@@ -2766,6 +3169,8 @@ export function App() {
       // fork-based duplicate don't reach them (the bridge refuses them too).
       const onAgent = !!s?.agent && s.agent !== "claude";
       if (!readOnly) items.push({ icon: "▸", label: "Attach & resume", onClick: () => s && openSession(s.id) });
+      if (!readOnly && s?.missing) items.push({ icon: "⇉", label: "Move to project…",
+        hint: "its folder is gone", onClick: () => void moveToProject([s]) });
       items.push(lc === null
         ? { icon: "⊘", label: "Abandon session", danger: true,
             hint: "gave up — hides it, HISTORY tags it abandoned",
@@ -2861,6 +3266,9 @@ export function App() {
       ] });
       items.push({ divider: true });
     } else if (ctxMenu.type === "project") {
+      const gone = sessions.filter((x) => x.project === ctxMenu.id && x.missing && !isReadOnly(x.origin));
+      if (gone.length) items.push({ icon: "⇉", label: `Move its ${gone.length === 1 ? "session" : `${gone.length} sessions`} to a project…`,
+        hint: "its folder is gone", onClick: () => void moveToProject(gone) });
       items.push({ icon: "⊞", label: "Analyze project", onClick: () => openAnalyze(ctxMenu.id) });
       // The chat header's project name opens this menu; its DESIGN SYSTEM link
       // folded in here, and lands on the repo's row in SETTINGS ▸ Projects.
@@ -2908,18 +3316,13 @@ export function App() {
       items.push({ icon: "⊙", label: "Copy session title", onClick: () => copy(selected?.title || "session") });
       items.push({ icon: "↥", label: "Scroll to top", onClick: () => { if (scrollRef.current) scrollRef.current.scrollTop = 0; } });
       items.push({ divider: true });
-    } else if (ctxMenu.type === "weather") {
-      // The clock's menu — a plain click on the clock opens it too — so it
-      // carries what used to sit around the clock in the strip: usage (the
-      // rail's USAGE tab), the clock & weather settings.
-      const other = weather.unit === "F" ? "C" : "F";
-      items.push({ icon: "▤", label: "Usage", onClick: () => patchSettings({ rightTab: "usage", rightOpen: true }) });
-      items.push({ icon: "✎", label: "Clock & weather…", onClick: () => setWxSettings((n) => n + 1) });
-      items.push({ icon: "°", label: `Use °${other} (${other === "F" ? "Fahrenheit" : "Celsius"})`, onClick: () => void setUnit(other === "F" ? "fahrenheit" : "celsius") });
-      items.push({ divider: true });
     } else if (ctxMenu.type === "branch") {
       // a BRANCHES row: the panel builds its items, the same list its ⋯ opens
       items.push(...(branchMenu.items?.(ctxMenu.id) ?? []));
+    } else if (ctxMenu.type === "file") {
+      // a file named in a reply (Markdown's FileRefSpan), looked up in the session's tree when picked
+      const row = revealItems(() => void openFileRef(ctxMenu.id, undefined, { x: ctxMenu.x, y: ctxMenu.y }, true));
+      if (row.length) items.push(...row, { divider: true });
     } else if (ctxMenu.type === "editor" && editorFor(ctxMenu.id)) {
       // The prompt box and the EDITOR body are CodeMirror, a contenteditable the
       // browser-menu exemption misses (lib/editorctx). The registry hands back
@@ -2954,6 +3357,7 @@ export function App() {
         if (act.def) items.push({ icon: "↗", label: "Go to definition", hint: "⌘-click · F12", onClick: act.def });
         if (act.peek) items.push({ icon: "◫", label: "Peek definition", hint: "⌥F12", onClick: act.peek });
         if (act.refs) items.push({ icon: "≡", label: "Find all references", hint: "⇧F12", onClick: act.refs });
+        items.push(...revealItems(ed.file?.()));
         if (sel) {
           const from = v.state.selection.main.from;
           items.push({ icon: "❞", label: "Send selection to chat", hint: "quotes path:line into the prompt",
@@ -2969,8 +3373,7 @@ export function App() {
     // Dashboard-wide rows. When you right-clicked *something* — a card, a turn,
     // a file — these five are never the reason, so they collapse to one row and
     // stop pushing that thing's own options off the bottom. On bare surface,
-    // where there is nothing else, they are the menu — and under the clock,
-    // whose menu is the dashboard's own.
+    // where there is nothing else, they are the menu.
     const globals: CtxItem[] = [
       { icon: "⊕", label: "Command palette", hint: "⌘K", onClick: () => setPaletteOpen(true) },
       { icon: "⚙", label: "Dashboard settings", onClick: () => setSettingsOpen(true) },
@@ -2979,7 +3382,7 @@ export function App() {
         hint: "picks up code on disk; running turns resume",
         onClick: () => void restartBridge() },
     ];
-    if (ctxMenu.type === "surface" || ctxMenu.type === "weather") items.push(...globals);
+    if (ctxMenu.type === "surface") items.push(...globals);
     else items.push({ icon: "⌗", label: "Dashboard", children: globals });
     // The browser-level block (back/reload/print) is never the reason you opened
     // the menu — it goes behind one row.
@@ -2987,7 +3390,9 @@ export function App() {
       items.push({ divider: true }, { icon: "⌾", label: "Browser", children: nativeCtx.page });
     return items;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ctxMenu, nativeCtx, sessions, turns, pins, analyzeProject, activeProject, selected, weather, setUnit, relocTargets, ai, plugins, hiddenProjects]);
+  }, [ctxMenu, nativeCtx, sessions, turns, pins, analyzeProject, activeProject, selected, relocTargets, ai, plugins, hiddenProjects,
+      settings.rightHidden, settings.rightOrder, settings.rightStart, settings.railNames, settings.railReadouts, settings.railRules,
+      settings.rightTab, railKeys]);
 
   /** Your own name for a session. */
   async function renameSession(id: string, current: string) {
@@ -3070,6 +3475,26 @@ export function App() {
     }
   }
 
+  /** MOVE TO PROJECT: sessions whose project folder is gone (moved, renamed, deleted), into the
+   *  project you pick, their folder and the paths in their transcripts with them. Until then a
+   *  run in one is refused rather than borrowing the open project's folder. */
+  async function moveToProject(list: SessionBrief[]) {
+    if (!list.length) return;
+    const from = list[0].project;
+    const rel = await pickProject(list.length === 1 ? `Where should “${list[0].title || "this session"}” go?`
+      : `Where should these ${list.length} sessions go?`,
+      `Their folder ${from} isn't there any more: it moved, was renamed, or was deleted. `
+      + "Pick the project they belong to now; they continue there.");
+    if (!rel) return;
+    let moved = 0;
+    for (const s of list) {
+      try { await api.moveSession(s.id, rel); moved++; }
+      catch (e) { notify("error", `${s.title || "A session"}: ${(e as Error).message}`); }
+    }
+    await loadSessions();
+    if (moved) notify("info", `Moved ${moved === 1 ? "it" : `${moved} sessions`} to ${projectName(rel)}.`);
+  }
+
   async function relocateSession(id: string, project: string, branch: string) {
     try {
       const r = await api.relocateSession(id, project, branch);
@@ -3118,16 +3543,11 @@ export function App() {
   }
 
   const td = themeDef(settings.theme);
+  const homeOpen = settings.rightTab === "home" && rightShown;
   // One cluster, two homes: the right column's cap while the panel is open,
   // the chat header's end while it's folded to the rail (see Strip.tsx).
   const strip = (
-    <Strip
-      clock={tele.clock}
-      weather={weather}
-      onSetCity={setCity}
-      onSetUnit={setUnit}
-      openSettings={wxSettings}
-    />
+    <Strip clock={tele.clock} weather={weather} accounts={accounts} clocks={settings.clocks} hideClock={homeOpen} openAlmanac={almanacAsk} />
   );
 
   return (
@@ -3171,8 +3591,9 @@ export function App() {
                 edge, and ⌘K sits at the foot of the rail. */}
             <div
               className="hudgrid grid min-h-0 flex-1"
-              data-rbare={settings.rightOpen ? undefined : ""}
-              style={{ gridTemplateColumns: inDesign ? `0 ${designChat}px 7px minmax(0,1fr)` : shellCols(settings.rightOpen, settings.leftOpen), gridTemplateRows: "minmax(0,1fr)", minWidth: 0 }}
+              data-rbare={rightShown ? undefined : ""}
+              style={{ gridTemplateColumns: inDesign ? `0 ${designChat}px 7px minmax(0,1fr)` : shellCols(settings.rightOpen, settings.leftOpen), gridTemplateRows: "minmax(0,1fr)", minWidth: 0,
+                       ...(settings.rightW ? { "--rbody": rbody(settings.rightW) } : {}) } as CSSProperties}
             >
               {/* LEFT — no scroller here: SessionsPanel owns the only scroll. */}
               <div className="shellcol flex min-h-0 min-w-0 flex-col" hidden={inDesign} style={{ display: inDesign ? "none" : undefined, borderRight: "1px solid var(--border)" }}>
@@ -3180,7 +3601,7 @@ export function App() {
                   workspace={<WorkspaceButton news={wsNews} onManage={() => { setSettingsTab("workspaces"); setSettingsOpen(true); }} />} />
                 <SessionsPanel
                   folded={!settings.leftOpen} onUnfold={() => patchSettings({ leftOpen: true })} workspace={ws.cur}
-                  sessions={sidebarSessions} groups={visibleGroups} hidden={hiddenProjects} status={statusMap} done={doneIds}
+                  sessions={sidebarSessions} ticketKids={ticketKids} groups={visibleGroups} hidden={hiddenProjects} status={statusMap} done={doneIds}
                   show={showKinds} onShow={setShowKinds}
                   flags={promptFlags} pins={pins}
                   selectedSessionId={sessionId} booting={!booted}
@@ -3190,7 +3611,7 @@ export function App() {
                   onAnalyze={(rel) => openAnalyze(rel)}
                   onNewSession={(rel) => void newSession(rel)}
                   onWorktreeSession={(rel, branch, create, parent) => void worktreeSession(rel, branch, create, parent)}
-                  onCreateProject={(name, prompt) => void createProject(name, prompt)}
+                  onCreateProject={createProject}
                 />
               </div>
 
@@ -3201,7 +3622,7 @@ export function App() {
                 teamMe={team?.inbox.find((r) => r.id === selected?.team?.share)?.relation === "back"
                   ? team?.outbox.find((o) => !o.queued)?.from.id ?? null : null}
                 branch={selected?.branch} model={model} turnCount={turns.length} turns={turns}
-                activeId={active?.id ?? null} onRespond={respond}
+                activeId={active?.id ?? null} onRespond={onRespondT}
                 scrollRef={scrollRef} contentRef={contentRef}
                 atBottom={atBottom} onJumpBottom={jumpToBottom}
                 onJumpTo={(id, seq) => {
@@ -3209,6 +3630,7 @@ export function App() {
                   void jumpTo(id, seq != null ? revealKey(0, seq) : undefined);
                 }}
                 gridMain={gridMain}
+                statusAll={statusMap} superTitle={selected?.ticket_of ? sessions.find((x) => x.id === selected.ticket_of)?.title ?? undefined : undefined}
                 onOpenFromHistory={(s) => void openFromHistory(s)}
                 onStartNext={(it) => void startIn(it.project, it.prompt,
                   { title: it.title, cwd: it.cwd, force: true })}
@@ -3222,12 +3644,12 @@ export function App() {
                 hasOlder={older.has} olderLoading={older.loading} onLoadOlder={() => void loadOlder()}
                 renderFrom={older.from}
                 navRef={transcriptNav} restoringRef={restoreTo} correctingRef={correctingRef}
-                onRunCommand={runCommand}
-                onQuote={quote}
+                onRunCommand={onRunCommandT}
+                onQuote={onQuoteT}
                 // A reply to a question asked in prose (answerAsk); none once it's dismissed.
-                onAnswer={lastTurnId && droppedAsks.has(lastTurnId) ? undefined : answerAsk}
+                onAnswer={lastTurnId && droppedAsks.has(lastTurnId) ? undefined : onAnswerT}
                 askDocked={!!dock && !(selected && (isDeviceRun(selected.origin) || isTeam(selected.origin)))}
-                onOpenFile={openFileRef}
+                onOpenFile={onOpenFile}
                 run={sessionRun}
                 onOpenRun={sessionProject ? () => openAnalyze(sessionProject, undefined, "terminal") : undefined}
                 onDropFiles={(f) => composerFiles.current?.(f)}
@@ -3235,14 +3657,17 @@ export function App() {
                 // behind a running turn. force skips the relevance hold: the PR
                 // is this session's own work.
                 onSendText={(text) => void send(text, [], { force: true })}
+                onSteerText={(text) => { void queue.steer(text, []).then((ok) => { if (!ok) void send(text, [], { force: true }); }, () => void send(text, [], { force: true })); }}
+                onStopTurn={() => void stop()}
+                paused={queue.paused} onTogglePause={queue.togglePause}
                 onArchive={() => { if (sessionId) void archiveOpen(sessionId); }}
                 // RESOLVE IN A NEW SESSION: a fresh session in this session's own
                 // checkout (its worktree, else the project), the prompt as its first turn.
                 onStartHere={(text) => { if (sessionProject) void startIn(sessionProject, text, { cwd: selected?.cwd ?? undefined, force: true }); }}
                 // Folded to the rail, the right column can't carry the cluster —
                 // the chat header takes it.
-                chrome={settings.rightOpen ? undefined : strip}
-                limit={limitLive} logins={accounts}
+                chrome={rightShown ? undefined : strip}
+                limit={limitLive} logins={accounts} status={openStatus} savers={savers}
                 composer={selected && isDeviceRun(selected.origin) ? (
                   // A teammate's device run: read only, so the plate stands where
                   // the composer would. `ended` is its one turn's last event (the
@@ -3256,6 +3681,7 @@ export function App() {
                     row={team?.inbox.find((r) => r.id === selected.team?.share) ?? null}
                     onContinueYours={() => { if (selected.team) void continueShare(selected.team.share, "session", "yours"); }}
                     onContinue={() => { if (selected.team) void continueShare(selected.team.share); }}
+                    onNewSession={() => { if (selected.team) void continueShare(selected.team.share, "session", "new"); }}
                     step={contStep && contStep.id === selected.team?.share ? contStep.text : null}
                     onDismiss={() => { if (selected.team) void dismissShare(selected.team.share, true); }} />
                 ) : (
@@ -3270,9 +3696,10 @@ export function App() {
                         onStartNew={() => void heldStartNew(held)}
                         onContinue={() => {
                           setHeldMap((m) => omit(m, held.sid));
-                          void send(held.text, held.images, { force: true, sessionId: held.sid });
+                          void send(held.text, held.images, { force: true, noPath: held.noPath, sessionId: held.sid,
+                            ...(held.kind ? { ...held.kind, pickOnce: true } : {}) });
                         }}
-                        onDismiss={() => { feed([held.text]); setHeldMap((m) => omit(m, held.sid)); }}
+                        onDismiss={() => { feed([held.typed ?? held.text]); setHeldMap((m) => omit(m, held.sid)); }}
                       />
                     )}
                     {jobBar && !dockLive && selected?.job ? (
@@ -3284,7 +3711,10 @@ export function App() {
                           /^(HTTP 404|not found)$/i.test(e.message) ? "restart the bridge to run jobs again from here" : e.message)}
                       />
                     ) : (
+                    <>
+                    {sessionId && <TicketMapCard key={sessionId} sessionId={selected?.ticket_of ?? sessionId} except={selected?.ticket_of ? sessionId : undefined} status={statusMap} onOpenSession={(id) => openSession(id)} />}
                     <Composer
+                      words={chatWords}
                       pills={
                         // Inside the composer's box, not on the bare panel above
                         // it: a lone pill on its own strip read as a layout slip.
@@ -3295,9 +3725,12 @@ export function App() {
                               chatTitle={gridMain?.title || "its chat"} onBack={() => openSession(selected.parent_session!)} />
                           )}
                           {sessionId && cameBack[sessionId] && <BackPill text={cameBack[sessionId]} />}
-                          <AgentsPill sessionId={sessionId} running={running} hud={settings} />
+                          <AgentsPill sessionId={sessionId} running={running} hud={settings} bg={openStatus} />
                           <GoalPill
                             goal={sessions.find((s) => s.id === sessionId)?.goal}
+                            turns={turns} running={running}
+                            held={queue.paused || queue.queued.length > 0 || !!openWait?.on}
+                            onAct={(a, objective) => void goalAct(a, objective)}
                             onClear={() => void send("/goal", [])}
                           />
                           {openWait?.on && (
@@ -3328,11 +3761,18 @@ export function App() {
                       onModel={setModel} onEffort={setEffort}
                       perm={permMode} onPerm={setPermMode} ponytail={ponytail} onPonytail={setPonytail}
                       showPonytail={ai.ponytail}
-                      onSend={(t, i) => void send(t, i)} onStop={() => void stop()}
+                      // A kind's preset rides with its prompt, and never becomes this browser's picks.
+                      onSend={(t, i, noPath, run, typed, flow) => void send(t, i, { ...(noPath ? { noPath: true } : {}), ...(run ? { typed, flow } : {}),
+                        ...(run ? { picks: { model: snapModel(run.model, state?.models) ?? run.model, perm: run.perm, effort: run.effort }, ponytail: run.ponytail, pickOnce: true } : {}) })}
+                      onStop={() => void stop()}
+                      git={sessionGit?.is_repo ? sessionGit : null} lastCheck={lastCheck}
+                      designLinked={sessionProject ? designLinks[sessionProject] ?? null : null}
                       // An agent turn can't be steered unless the bridge says this one can
                       // (caps.steer, Settings ▸ Experimental): SEND queues instead.
                       onSteer={!steerable ? undefined : (t, i) => void queue.steer(t, i).then((ok) => { if (!ok) void send(t, i); })}
                       onCompact={(instr) => void send(instr ? `/compact ${instr}` : "/compact", [])}
+                      autocompact={selected?.autocompact}
+                      onAutocompact={!sessionId ? undefined : (v) => void api.setAutocompact(sessionId, v).then(() => void loadSessions(), (e) => notify("error", `Auto-compact not saved: ${(e as Error).message}`))}
                       queued={queue.queued.map((q) => ({ id: q.id, text: q.text }))}
                       paused={queue.paused} onTogglePause={queue.togglePause}
                       onCancelQueued={(id) => queue.remove(id)}
@@ -3341,11 +3781,16 @@ export function App() {
                       project={sessionProject}
                       onOpenMap={ai.graph && mapOn && sessionProject ? () => openAnalyze(sessionProject, undefined, "map") : undefined}
                       fileSink={composerFiles}
+                      bg={openBg} onAccounts={loadAccounts}
+                      routing={ai.router} flowQueued={flowQueued(queue.items)} smartZone={boxChip?.opts.smartzone.on ?? ai.smartzone} routeCtx={routeCtx} helper={!!selected?.parent_session}
+                      flowChip={boxChip} runningFlow={runningFlow(boxFlow)} onFlow={(a) => void flowAct(a).catch((e) => notify("error", (e as Error).message))}
+                      onRouteFresh={sessionProject ? (t) => void newSession(sessionProject, t, selected?.branch, undefined, routeCwd) : undefined}
                       placeholder={selected && isJob(selected) && oneShot(selected.job)
                         ? "ask about this — the answer stays here; Rivendell already has its copy"
-                        : openWait ? `message ${agentPick ? agentPick.label.toLowerCase() : "claude"} — sending ends the wait…`
+                        : openWait?.on ? `message ${agentPick ? agentPick.label.toLowerCase() : "claude"} — sending ends the wait…`
                         : selected?.parent_session ? `message ${selected.title || "this helper"}…` : undefined}
                     />
+                    </>
                     )}
                   </>
                 )}
@@ -3361,24 +3806,35 @@ export function App() {
                   <DesignPane key={designBoard} board={designBoard} onClose={() => setDesignBoard(null)}
                     chrome={isLinuxApp() ? <LinuxClose /> : undefined}
                     // Into the running turn when there is one, the way the composer's SEND does.
-                    onSend={(text) => { void queue.steer(text, []).then((ok) => { if (!ok) void send(text, [], { force: true }); }, () => void send(text, [], { force: true })); }} />
+                    // A question waiting on you is answered by your feedback: the card goes, and the agent
+                    // reads the feedback as its answer. A steer would sit behind the card until you answered it.
+                    onSend={(text) => {
+                      const ask = active?.pending.find((p) => p.kind === "question");
+                      const steer = () => { void queue.steer(text, []).then((ok) => { if (!ok) void send(text, [], { force: true }); }, () => void send(text, [], { force: true })); };
+                      if (!ask) return steer();
+                      const answers = (ask.questions ?? []).map((q, i) => ({ header: q.header, labels: [], notes: i === 0 ? text : undefined }));
+                      void respond(ask.request_id, { answers }).then((ok) => { if (ok === false) steer(); });
+                    }} />
                 </>
               ) : (
-              <div style={{ display: "grid", gridTemplateRows: "auto minmax(0,1fr)", minHeight: 0, minWidth: 0 }}>
-                <RightCap onOpenSettings={() => setSettingsOpen(true)} railTop={isLinuxApp() ? <LinuxClose /> : undefined}>
-                  {settings.rightOpen && strip}
+              <div style={{ display: "grid", gridTemplateRows: "auto minmax(0,1fr)", minHeight: 0, minWidth: 0,
+                // Moving, the column is a window onto the open layout pinned to
+                // the rail: cap and panel keep their open width, the edge sweeps,
+                // nothing inside slides or reflows. Only then — the strip's
+                // popovers hang past this column at rest, so it can't clip always.
+                ...(rightMoving && { gridTemplateColumns: `calc(${rightBodyW} + 48px)`, justifyContent: "end", overflow: "hidden" }) }}>
+                <RightCap onOpenSettings={() => setSettingsOpen(true)} railTop={isLinuxApp() ? <LinuxClose /> : undefined} sky={homeOpen ? <HomeSky sky={homeSky} top={0} /> : undefined}>
+                  {rightShown && strip}
                 </RightCap>
                 <RightPanel
-                  tabs={rightTabs} activeId={settings.rightTab}
-                  open={settings.rightOpen} onTab={pickRightTab}
+                  tabs={railTabs} activeId={settings.rightTab}
+                  onReorder={(ids) => patchSettings({ rightOrder: ids })}
+                  onResize={(w) => patchSettings({ rightW: w })}
+                  names={settings.railNames} readouts={settings.railReadouts} rules={settings.railRules}
+                  open={settings.rightOpen} shown={rightShown} onTab={pickRightTab}
                   project={sessionProject} branch={sessionBranch}
                   railHead={isLinuxApp() ? <LinuxRailHead onOpenSettings={() => setSettingsOpen(true)} /> : undefined}
-                  railFoot={<>
-                    <LiveButton onFeed={feed} />
-                    <ChangelogButton onFeed={feed} />
-                    <UpdateButton onFeed={feed} variant="rail" />
-                    <PaletteButton onPalette={() => setPaletteOpen(true)} />
-                  </>}
+                  railFoot={<ChangelogButton onFeed={feed} />}
                 />
               </div>
               )}
@@ -3410,6 +3866,7 @@ export function App() {
               />
             )}
             <CommandPalette open={paletteOpen} commands={commands} onClose={() => setPaletteOpen(false)} />
+            <ShortcutSheet open={sheetOpen} sendKey={settings.sendKey} onClose={() => setSheetOpen(false)} />
             {toolsFor && (
               <ToolsModal
                 title={sessions.find((s) => s.id === toolsFor)?.title || "session"}
@@ -3448,16 +3905,19 @@ export function App() {
                     ? (texts, rel) => { setSettingsOpen(false); setSettingsTab(undefined); feed(texts, rel); }
                     : undefined,
                 }}
+                weather={weather} onSetUnit={setUnit} onSetPlace={setPlace}
                 onClose={() => { setSettingsOpen(false); setSettingsTab(undefined); }} />
             )}
-            {ctxMenu && <ContextMenu ctx={ctxMenu} items={ctxItems} closing={ctxClosing} onClose={closeCtx} />}
+            {ctxMenu && <ContextMenu ctx={ctxMenu} items={ctxItems} closing={ctxClosing} onClose={closeCtx}
+              width={ctxMenu.type === "railtab" ? 288 : undefined} />}
             {filePick && (
               <ContextMenu
                 ctx={{ x: filePick.x, y: filePick.y, type: "file", id: "", label: filePick.name }}
                 items={distinctDirs(filePick.paths).map((dir, i) => ({
                   icon: "▤", label: dir,
                   onClick: () => {
-                    if (sessionProject)
+                    if (filePick.root !== undefined) void revealFile(filePick.root && `${filePick.root}/${filePick.paths[i]}`);
+                    else if (sessionProject)
                       openAnalyze(sessionProject, { path: filePick.paths[i], branch: sessionBranch, line: filePick.line });
                   },
                 }))}

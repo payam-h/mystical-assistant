@@ -1,7 +1,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { Decoration, EditorView, WidgetType, keymap, placeholder as cmPlaceholder, type DecorationSet } from "@codemirror/view";
+import { Decoration, EditorView, WidgetType, keymap, placeholder as cmPlaceholder, tooltips, type DecorationSet } from "@codemirror/view";
 import { Compartment, EditorState, MapMode, Prec, StateEffect, StateField } from "@codemirror/state";
-import { defaultKeymap, history, historyKeymap, insertNewlineAndIndent } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentLess, indentMore, insertNewlineAndIndent } from "@codemirror/commands";
+import { acceptCompletion, autocompletion, closeCompletion, completionStatus, moveCompletionSelection, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import { insertNewlineContinueMarkup, markdown, markdownLanguage } from "@codemirror/lang-markdown";
@@ -10,6 +11,8 @@ import { drawnAtCaret, dropSpot, fillSpot, holdSpot, imageEmbeds, openEmbed, set
 import { minimalChange } from "../lib/embeds";
 import { registerEditor } from "../lib/editorctx";
 import { leadCommand } from "../lib/slash";
+import { isDiskPath, rank, wordAt, type Symbol } from "../lib/completewords";
+import { startCompletion } from "@codemirror/autocomplete";
 import type { SlashCommand } from "../api";
 import { EmbedPopover } from "./EmbedPopover";
 import { useMultiOn } from "../lib/multistore";
@@ -31,10 +34,20 @@ import { useMultiOn } from "../lib/multistore";
 //
 // The API mirrors the textarea it replaced (value / onChange / caret / keydown),
 // so the composer's @-mentions, /commands and Ctrl+R need no second path.
+//
+// Completing words (lib/completewords): code-like words this chat used, and the project's files, in
+// CodeMirror's list. Tab takes one, the arrows move, Escape closes, and Enter still sends: it's a
+// chat box first. With no list open, Tab indents the line (or every selected line) and Shift+Tab
+// takes it back, which nests a Markdown list. That traps Tab, so CodeMirror's own way out stands:
+// Escape, then Tab moves focus on, and Ctrl+M (Shift+Alt+M on a Mac) turns tab trapping off.
 
 export type MarkdownInputHandle = {
   focus(): void;
   setSelectionRange(from: number, to: number): void;
+  /** Insert `s` in front of the text, the caret staying with the text it was in. */
+  prepend(s: string): void;
+  /** Focus and type `s` at the caret, as if typed here (a letter typed elsewhere, App). */
+  type(s: string): void;
   /** Hold the caret's place for an image still uploading (lib/cmembeds). */
   holdSpot(): number | null;
   /** Its markdown goes where the place was held, as one undo step. */
@@ -69,6 +82,14 @@ const mdHighlight = HighlightStyle.define([
 ]);
 
 const mdTheme = EditorView.theme({
+  // The completion list (autocompletion above): the composer's own lists' look, in CodeMirror's tooltip.
+  ".cm-tooltip.cm-mi-complete": { background: "var(--panel)", border: "1px solid color-mix(in srgb, var(--acc) 26%, transparent)", borderRadius: "var(--prad, 6px)", boxShadow: "0 -8px 26px var(--shadow-pop, rgba(0,0,0,.35))", overflow: "hidden" },
+  ".cm-mi-complete > ul": { fontFamily: "'JetBrains Mono',monospace", fontSize: "var(--t12)", maxHeight: "210px", minWidth: "180px", maxWidth: "min(460px, 80vw)" },
+  ".cm-tooltip.cm-tooltip-autocomplete.cm-mi-complete > ul > li": { display: "flex", alignItems: "baseline", gap: "8px", padding: "4px 10px", color: "var(--tx)", borderLeft: "2px solid transparent" },
+  ".cm-tooltip.cm-tooltip-autocomplete.cm-mi-complete > ul > li[aria-selected]": { background: "color-mix(in srgb, var(--acc) 12%, transparent)", color: "var(--txb)", borderLeftColor: "var(--acc)" },
+  ".cm-mi-complete .cm-completionLabel": { whiteSpace: "nowrap" },
+  ".cm-mi-complete .cm-completionMatchedText": { textDecoration: "none", color: "var(--acc)" },
+  ".cm-mi-complete .cm-completionDetail": { marginLeft: "auto", paddingLeft: "12px", fontStyle: "normal", color: "var(--txd)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   "&": { backgroundColor: "transparent", color: "var(--txb)", fontSize: "var(--t13)", maxHeight: "min(500px, 50vh)" },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "'JetBrains Mono',monospace", lineHeight: "1.5", overflow: "auto" },
@@ -120,6 +141,8 @@ class CmdWidget extends WidgetType {
     add("sg", this.name.slice(i + 1));
     return el;
   }
+  // A mousedown reaches the editor's handler (onCmdClick); every other event stays the widget's.
+  ignoreEvent(e: Event) { return e.type !== "mousedown"; }
 }
 
 const cmdDeco = StateField.define<DecorationSet>({
@@ -132,10 +155,47 @@ const cmdDeco = StateField.define<DecorationSet>({
   provide: (f) => [EditorView.decorations.from(f), EditorView.atomicRanges.of((v) => v.state.field(f))],
 });
 
+// The skill router's suggestion (lib/route ghostFor): the same segment, outlined, drawn in
+// front of the text but not in it, so what you send stays what you typed until Tab takes
+// it. A widget at 0 with side -1, so typing at the start never pushes it along. Its
+// suggested argument is the editor's own placeholder (the `ph` effect below).
+type Ghost = { name: string; desc: string; arg: string };
+const setGhost = StateEffect.define<Ghost | null>();
+
+/** CmdWidget's segment, outlined (.cmdseg.ghost). eq is CmdWidget's: same name and desc, same DOM.
+ *  aria-hidden keeps it out of the accessibility tree: it isn't in the doc, so a screen reader
+ *  mustn't take it for typed text (the composer's caption line announces it). */
+class GhostWidget extends CmdWidget {
+  toDOM() {
+    const el = super.toDOM();
+    el.classList.add("ghost");
+    el.setAttribute("aria-hidden", "true");
+    return el;
+  }
+}
+
+const ghostDeco = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update: (v, tr) => {
+    for (const e of tr.effects) {
+      if (e.is(setGhost)) {
+        const g = e.value;
+        return g ? Decoration.set(Decoration.widget({ widget: new GhostWidget(g.name, g.desc), side: -1 }).range(0)) : Decoration.none;
+      }
+    }
+    return v.map(tr.changes);
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
 type Props = {
   value: string;
   /** The bridge's command list, so a leading /command draws as one. */
   commands?: SlashCommand[];
+  /** The router's suggestion, drawn outlined in front of the text (lib/route ghostFor). */
+  ghost?: Ghost | null;
+  /** A mousedown on any /command segment, solid or ghost. The editor keeps its caret and focus. */
+  onCmdClick?: () => void;
   onChange: (text: string, caret: number) => void;
   onCaret: (caret: number) => void;
   /** Runs before the editor's own keys; preventDefault() to take the key. */
@@ -148,6 +208,13 @@ type Props = {
   /** Whose images: what a local address in the text resolves against. */
   imageSession?: string | null;
   imageProject?: string | null;
+  /** What to offer completing a word (lib/completewords): the chat's words, newest first, and its files. */
+  words?: string[];
+  files?: string[];
+  /** Names the project's code defines (bridge/complete.py). */
+  symbols?: Symbol[];
+  /** Entries on disk for a path being typed: ~/, /, ./ or ../ (bridge/complete.py). */
+  diskPaths?: (prefix: string) => Promise<{ text: string; name: string; dir: boolean }[]>;
 };
 
 export const MarkdownInput = forwardRef<MarkdownInputHandle, Props>(function MarkdownInput(props, ref) {
@@ -176,6 +243,8 @@ export const MarkdownInput = forwardRef<MarkdownInputHandle, Props>(function Mar
           Prec.highest(EditorView.domEventHandlers({
             keydown: (e) => {
               if (e.isComposing) return false;
+              // An open completion list keeps its keys, as the composer's own lists do (it never opens with one of them: wordAt).
+              if (completionStatus(viewRef.current!.state) === "active" && ["Tab", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Escape"].includes(e.key)) return false;
               // Before the composer's keys, for which an Enter is a send.
               if (e.key === "Enter" && e.altKey) {
                 const at = drawnAtCaret(viewRef.current!.state);
@@ -188,8 +257,62 @@ export const MarkdownInput = forwardRef<MarkdownInputHandle, Props>(function Mar
               cb.current.onPaste(e);
               return e.defaultPrevented;
             },
+            // Taking the event (true) is what keeps the click from moving the caret or
+            // blurring the editor; focus() covers a click on a segment of an unfocused one.
+            // A right-click and a Mac ctrl+click (a mousedown with button 0) are the context menu's.
+            mousedown: (e, v) => {
+              if (e.button !== 0 || e.ctrlKey || !(e.target as Element).closest(".cmdseg")) return false;
+              cb.current.onCmdClick?.();
+              v.focus();
+              return true;
+            },
           })),
           newlineKeys,
+          autocompletion({
+            override: [async (ctx: CompletionContext): Promise<CompletionResult | null> => {
+              const line = ctx.state.doc.lineAt(ctx.pos);
+              const at = wordAt(line.text, ctx.pos - line.from);
+              if (!at) return null;
+              const from = line.from + at.from;
+              if (isDiskPath(at.word) && cb.current.diskPaths) {
+                // A short pause first, so a fast typist doesn't send a request per letter.
+                await new Promise((r) => setTimeout(r, 90));
+                if (ctx.aborted) return null;
+                const found = await cb.current.diskPaths(at.word).catch(() => []);
+                if (ctx.aborted || !found.length) return null;
+                return {
+                  from, filter: false,
+                  options: found.map((p, i) => ({
+                    label: p.text, displayLabel: p.name, type: p.dir ? "folder" : "file", boost: -i,
+                    // A folder goes on to its own entries.
+                    apply: (view: EditorView, _c: unknown, a: number, b: number) => {
+                      view.dispatch({ changes: { from: a, to: b, insert: p.text }, selection: { anchor: a + p.text.length } });
+                      if (p.dir) setTimeout(() => startCompletion(view), 0);
+                    },
+                  })),
+                };
+              }
+              const opts = rank(at.word, cb.current.words ?? [], cb.current.files ?? [], 40, cb.current.symbols ?? []);
+              if (!opts.length) return null;
+              return {
+                from, filter: false,
+                options: opts.map((o) => ({ label: o.label, detail: o.detail, type: o.kind === "file" ? "file" : o.kind === "symbol" ? "function" : "variable", boost: o.boost })),
+              };
+            }],
+            // Above the line, as the composer sits at the window's foot, and the composer's own lists open upward too.
+            defaultKeymap: false, icons: false, maxRenderedOptions: 8, closeOnBlur: true, interactionDelay: 0, aboveCursor: true,
+            tooltipClass: () => "cm-mi-complete",
+          }),
+          // On the page, not in the composer's box, which clips what overflows it.
+          tooltips({ parent: document.body, position: "fixed" }),
+          Prec.high(keymap.of([
+            { key: "Tab", run: (v) => (completionStatus(v.state) === "active" ? acceptCompletion(v) : indentMore(v)), shift: indentLess },
+            { key: "ArrowDown", run: moveCompletionSelection(true) },
+            { key: "ArrowUp", run: moveCompletionSelection(false) },
+            { key: "PageDown", run: moveCompletionSelection(true, "page") },
+            { key: "PageUp", run: moveCompletionSelection(false, "page") },
+            { key: "Escape", run: closeCompletion },
+          ])),
           keymap.of([...defaultKeymap, ...historyKeymap]),
           markdown({ base: markdownLanguage, codeLanguages: languages }),
           syntaxHighlighting(mdHighlight),
@@ -198,6 +321,7 @@ export const MarkdownInput = forwardRef<MarkdownInputHandle, Props>(function Mar
           ph.current.of(cmPlaceholder(cb.current.placeholder)),
           cmdList,
           cmdDeco,
+          ghostDeco,
           images.current.of([]),
           mdTheme,
           EditorView.updateListener.of((u) => {
@@ -244,14 +368,23 @@ export const MarkdownInput = forwardRef<MarkdownInputHandle, Props>(function Mar
     });
   }, [props.value]);
 
+  // While a ghost shows, the placeholder is its suggested argument (none if it has none), so the
+  // two never stack. CM's placeholder is aria-hidden and click-through, shows only in an empty doc,
+  // goes in the first keystroke's own transaction, and leaves the caret in front of it.
   useEffect(() => {
-    viewRef.current?.dispatch({ effects: ph.current.reconfigure(cmPlaceholder(props.placeholder)) });
-  }, [props.placeholder]);
+    const g = props.ghost;
+    viewRef.current?.dispatch({ effects: ph.current.reconfigure(g ? (g.arg ? cmPlaceholder(g.arg) : []) : cmPlaceholder(props.placeholder)) });
+  }, [props.placeholder, !!props.ghost, props.ghost?.arg]);
 
   useEffect(() => {
     viewRef.current?.dispatch({ effects: setCmds.of(props.commands ?? []) });
   }, [props.commands]);
 
+  // ghostFor returns a new object each render; its name and desc are what the segment shows.
+  const ghost = props.ghost;
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: setGhost.of(ghost ?? null) });
+  }, [ghost?.name, ghost?.desc]);
   useEffect(() => {
     viewRef.current?.dispatch({ effects: images.current.reconfigure(multiOn ? imageEmbeds() : []) });
   }, [multiOn]);
@@ -262,6 +395,19 @@ export const MarkdownInput = forwardRef<MarkdownInputHandle, Props>(function Mar
 
   useImperativeHandle(ref, () => ({
     focus: () => viewRef.current?.focus(),
+    prepend: (s) => {
+      const v = viewRef.current;
+      if (!v) return;
+      // A cursor at 0 stays in front of an insert at 0 unless the selection is mapped forward.
+      const changes = v.state.changes({ from: 0, insert: s });
+      v.dispatch({ changes, selection: v.state.selection.map(changes, 1) });
+    },
+    type: (s) => {
+      const v = viewRef.current;
+      if (!v) return;
+      v.focus();
+      v.dispatch(v.state.replaceSelection(s), { scrollIntoView: true, userEvent: "input.type" });
+    },
     holdSpot: () => (viewRef.current ? holdSpot(viewRef.current) : null),
     fillSpot: (id, markdown) => { if (viewRef.current) fillSpot(viewRef.current, id, markdown); },
     dropSpot: (id) => { if (viewRef.current) dropSpot(viewRef.current, id); },
@@ -275,7 +421,8 @@ export const MarkdownInput = forwardRef<MarkdownInputHandle, Props>(function Mar
 
   return (
     <>
-      <div ref={hostRef} data-ctx-type="editor" data-ctx-id="composer" data-ctx-label="prompt" style={{ flex: 1, minWidth: 0 }} />
+      <div ref={hostRef} data-ctx-type="editor" data-ctx-id="composer" data-ctx-label="prompt"
+        data-empty={props.value === "" ? "" : undefined} style={{ flex: 1, minWidth: 0 }} />
       {pop !== null && viewRef.current && (
         <EmbedPopover view={viewRef.current} pos={pop} scope={{ session: props.imageSession, project: props.imageProject }}
           onClose={() => setPop(null)} />

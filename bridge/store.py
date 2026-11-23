@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   title_source      TEXT DEFAULT 'auto',
   fallback_policy   TEXT,
   goal              TEXT,
+  council           TEXT,
   lifecycle         TEXT,
   fork_from         TEXT,
   ctx_tokens        INTEGER,
@@ -68,7 +69,9 @@ CREATE TABLE IF NOT EXISTS turns (
   tok_cache_w INTEGER,
   tok_cache_r INTEGER,
   effort      TEXT,
-  permission_mode TEXT
+  permission_mode TEXT,
+  sent_by     TEXT,
+  sent_why    TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_turns_session ON turns(session_id, seq);
 CREATE INDEX IF NOT EXISTS ix_turns_status ON turns(status);
@@ -196,6 +199,9 @@ def init() -> None:
         # because the three fields are only ever read and written together.
         if "goal" not in scols:
             c.execute("ALTER TABLE sessions ADD COLUMN goal TEXT")
+        # Council run as JSON (see bridge/council.py); NULL = never run.
+        if "council" not in scols:
+            c.execute("ALTER TABLE sessions ADD COLUMN council TEXT")
         # Why a session is hidden: done | abandoned | backlog (NULL = active).
         # Old rows carry archived=1 with no reason — backfill them as 'done'.
         if "lifecycle" not in scols:
@@ -286,6 +292,12 @@ def init() -> None:
         for col in ("effort", "permission_mode"):
             if col not in cols:
                 c.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
+        # Who sent the prompt when it wasn't typed in the dashboard: 'telegram',
+        # 'miniapp', or 'mystical:<kind>' for the bridge's own prompts, with the
+        # sender's one-line why. NULL = you, or a turn from before this.
+        for col in ("sent_by", "sent_why"):
+            if col not in cols:
+                c.execute(f"ALTER TABLE turns ADD COLUMN {col} TEXT")
         # (Old DBs may carry a dead last_auto_resume column from the retired
         # auto-resume cooldown — harmless, never read.)
         # Multi-agent chats (bridge/channel.py): a helper's link to its chat and
@@ -364,7 +376,9 @@ def upsert_native_session(claude_sid: str, chat_id: int, project: str, cwd: str,
     (native.scan folds a worktree cwd into its parent repo), so rows indexed
     before that fold existed heal themselves instead of keeping a sidebar group
     per branch. Nothing lets you move a native row to another project by hand,
-    so there is no human choice here to clobber."""
+    so there is no human choice here to clobber. A cwd that no longer exists
+    re-derives nothing: main_checkout can't fold a removed worktree, so it would
+    re-file the row under a dir that's gone, and the lists hide those."""
     now = updated if updated is not None else time.time()
     # fork: a bridge session that went on under a new Claude id carries this uuid in claude_session_id
     # on a row with another id: update that row. Everything else is one atomic UPSERT on the id — two
@@ -380,7 +394,8 @@ def upsert_native_session(claude_sid: str, chat_id: int, project: str, cwd: str,
                 "THEN ? ELSE title END, "
                 "origin=CASE WHEN origin IN ('vscode','terminal') THEN ? ELSE origin END "
                 "WHERE id=?",
-                (now, cwd, project, title, origin, existing["id"]))
+                (now, cwd, project if os.path.isdir(cwd) else existing["project"],
+                 title, origin, existing["id"]))
             return get_session(existing["id"])
         c.execute(
             "INSERT INTO sessions(id,chat_id,project,claude_session_id,title,"
@@ -393,11 +408,13 @@ def upsert_native_session(claude_sid: str, chat_id: int, project: str, cwd: str,
             "ON CONFLICT(id) DO UPDATE SET "
             "updated=MAX(sessions.updated, excluded.updated), "
             "cwd=COALESCE(sessions.cwd, excluded.cwd), "
-            "project=excluded.project, "
+            # a cwd that is gone keeps the row's project (see the docstring)
+            "project=CASE WHEN ? THEN excluded.project ELSE sessions.project END, "
             "title=CASE WHEN sessions.title IS NULL OR sessions.title='' OR sessions.title LIKE '<%' "
             "THEN excluded.title ELSE sessions.title END, "
             "origin=CASE WHEN sessions.origin IN ('vscode','terminal') THEN excluded.origin ELSE sessions.origin END",
-            (claude_sid, chat_id, project, claude_sid, title, now, now, origin, cwd, None))
+            (claude_sid, chat_id, project, claude_sid, title, now, now, origin, cwd, None,
+             os.path.isdir(cwd)))
     return get_session(claude_sid)
 
 
@@ -426,9 +443,10 @@ def latest_session(chat_id: int, project: str) -> dict | None:
     # Unfiltered: resuming a project must find its latest session even if idle.
     # Except a teammate's device run or a session a teammate sent: they are read
     # only (bridge/device_view.py, bridge/team.py), so the bot and a run sent with
-    # no session never carry one on.
+    # no session never carry one on. Nor a ticket set's sessions (bridge/tickets.py):
+    # each works one ticket or the merge, and while a set built your messages landed there.
     rows = list_sessions(chat_id, project, max_age_secs=None)
-    return next((r for r in rows if not (r["origin"] or "").startswith(("device-run:", "team:"))), None)
+    return next((r for r in rows if not (r["origin"] or "").startswith(("device-run:", "team:", "ticket"))), None)
 
 
 def list_sessions_all(chat_id: int, include_archived: bool = False,
@@ -637,6 +655,14 @@ def set_work_cwd(session_id: str, path: "str | None") -> None:
     stores."""
     with closing(_connect()) as c:
         c.execute("UPDATE sessions SET work_cwd=? WHERE id=?", (path, session_id))
+
+
+def rehome(session_id: str, project: str, cwd: str) -> None:
+    """File a session under the tree it moved into once the dir it started in is
+    gone: that tree becomes its project and cwd, and the detour ends."""
+    with closing(_connect()) as c:
+        c.execute("UPDATE sessions SET project=?, cwd=?, work_cwd=NULL WHERE id=?",
+                  (project, cwd, session_id))
 
 
 def set_ref(session_id: str, ref: str) -> None:
@@ -958,6 +984,21 @@ def set_goal(session_id: str, goal: dict | None) -> None:
                   (json.dumps(goal) if goal else None, session_id))
 
 
+def get_council(session_id: str) -> dict | None:
+    """This session's council run state, or None if it has none."""
+    with closing(_connect()) as c:
+        row = c.execute("SELECT council FROM sessions WHERE id=?",
+                        (session_id,)).fetchone()
+    return parse_goal(row["council"]) if row else None
+
+
+def set_council(session_id: str, council: dict | None) -> None:
+    """Replace this session's council state; None clears it."""
+    with closing(_connect()) as c:
+        c.execute("UPDATE sessions SET council=? WHERE id=?",
+                  (json.dumps(council) if council else None, session_id))
+
+
 def set_cwd(session_id: str, cwd: str | None) -> None:
     with closing(_connect()) as c:
         c.execute("UPDATE sessions SET cwd=? WHERE id=?", (cwd, session_id))
@@ -1013,10 +1054,24 @@ def latest_turn_id(session_id: str) -> "str | None":
     return row["id"] if row else None
 
 
+def running_turn_id(session_id: str) -> "str | None":
+    with closing(_connect()) as c:
+        row = c.execute("SELECT id FROM turns WHERE session_id=? AND status='running' "
+                        "ORDER BY seq DESC LIMIT 1", (session_id,)).fetchone()
+    return row["id"] if row else None
+
+
 def turn_prompt(turn_id: str) -> "str | None":
     with closing(_connect()) as c:
         row = c.execute("SELECT prompt FROM turns WHERE id=?", (turn_id,)).fetchone()
     return row["prompt"] if row else None
+
+
+def recent_turns(session_id: str, limit: int) -> list[dict]:
+    """The session's newest turns, newest first: id and prompt."""
+    with closing(_connect()) as c:
+        return [dict(r) for r in c.execute("SELECT id, prompt FROM turns WHERE session_id=? "
+                                           "ORDER BY seq DESC LIMIT ?", (session_id, limit))]
 
 
 def set_lifecycle(session_id: str, state: str | None) -> None:
@@ -1055,7 +1110,8 @@ def prompt_history(limit: int = 200) -> list[str]:
 def start_turn(session_id: str, turn_id: str, prompt: str,
                attachments: list[str] | None, model: str | None = None,
                runtime: str | None = None, sha: str | None = None,
-               effort: str | None = None, permission_mode: str | None = None) -> None:
+               effort: str | None = None, permission_mode: str | None = None,
+               sent_by: str | None = None, sent_why: str | None = None) -> None:
     now = time.time()
     with closing(_connect()) as c:
         c.execute("BEGIN IMMEDIATE")
@@ -1063,16 +1119,18 @@ def start_turn(session_id: str, turn_id: str, prompt: str,
                         (session_id,)).fetchone()["n"]
         c.execute(
             "INSERT INTO turns(id,session_id,seq,prompt,attachments,status,cost,"
-            "elapsed,started,model,runtime,sha,effort,permission_mode) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "elapsed,started,model,runtime,sha,effort,permission_mode,sent_by,sent_why) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (turn_id, session_id, seq, prompt, json.dumps(attachments or []),
              "running", None, None, now, model, runtime, sha or None, effort,
-             permission_mode))
+             permission_mode, sent_by, sent_why))
         c.execute("UPDATE sessions SET updated=? WHERE id=?", (now, session_id))
         cur = c.execute("SELECT title FROM sessions WHERE id=?", (session_id,)).fetchone()
         if cur is not None and not cur["title"]:
+            # paths.NO_PATH is the bridge's order, not the user's words: never the name.
+            title = prompt.strip().removeprefix("No path for this message.").strip()
             c.execute("UPDATE sessions SET title=?, title_source='auto' WHERE id=?",
-                      (prompt.strip()[:60] or "New chat", session_id))
+                      (title[:60] or "New chat", session_id))
         c.execute("COMMIT")
 
 
@@ -1122,25 +1180,25 @@ def import_transcript(session_id: str, turns: list[dict], events: list[dict]) ->
         if have:
             c.execute("COMMIT")
             return False
-        for t in turns:
-            tok = t.get("tokens") or {}
-            c.execute(
-                "INSERT INTO turns(id,session_id,seq,prompt,attachments,status,cost,"
-                "elapsed,started,model,tok_in,tok_out,tok_cache_w,tok_cache_r) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (t["id"], session_id, t["seq"], t.get("prompt", ""),
-                 json.dumps(t.get("attachments") or []), t.get("status", "done"),
-                 t.get("cost"), t.get("elapsed"), t.get("started") or time.time(),
-                 t.get("model"),
-                 # NULL, not 0, when the transcript never reported usage.
-                 tok.get("in"), tok.get("out"),
-                 tok.get("cache_w"), tok.get("cache_r")))
-        for e in events:
-            payload = {k: v for k, v in e.items() if k not in ("seq", "turn_id")}
-            c.execute("INSERT INTO events(session_id,turn_id,seq,type,payload,ts) "
-                      "VALUES(?,?,?,?,?,?)",
-                      (session_id, e["turn_id"], e["seq"], e.get("type", ""),
-                       json.dumps(payload), e.get("ts") or time.time()))
+        # executemany: a teammate's whole session can be tens of thousands of events
+        # (bridge/team.py), and this holds the write lock while it runs.
+        c.executemany(
+            "INSERT INTO turns(id,session_id,seq,prompt,attachments,status,cost,"
+            "elapsed,started,model,tok_in,tok_out,tok_cache_w,tok_cache_r) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(t["id"], session_id, t["seq"], t.get("prompt", ""),
+              json.dumps(t.get("attachments") or []), t.get("status", "done"),
+              t.get("cost"), t.get("elapsed"), t.get("started") or time.time(),
+              t.get("model"),
+              # NULL, not 0, when the transcript never reported usage.
+              (t.get("tokens") or {}).get("in"), (t.get("tokens") or {}).get("out"),
+              (t.get("tokens") or {}).get("cache_w"), (t.get("tokens") or {}).get("cache_r"))
+             for t in turns])
+        c.executemany(
+            "INSERT INTO events(session_id,turn_id,seq,type,payload,ts) VALUES(?,?,?,?,?,?)",
+            [(session_id, e["turn_id"], e["seq"], e.get("type", ""),
+              json.dumps({k: v for k, v in e.items() if k not in ("seq", "turn_id")}),
+              e.get("ts") or time.time()) for e in events])
         c.execute("COMMIT")
     return True
 
@@ -1179,11 +1237,12 @@ def duplicate(session_id: str) -> dict | None:
             idmap[t["id"]] = uuid.uuid4().hex
             c.execute(
                 "INSERT INTO turns(id,session_id,seq,prompt,attachments,status,cost,"
-                "elapsed,started,model,runtime,sha,effort,permission_mode) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "elapsed,started,model,runtime,sha,effort,permission_mode,sent_by,sent_why) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (idmap[t["id"]], copy["id"], t["seq"], t["prompt"], t["attachments"],
                  t["status"], t["cost"], t["elapsed"], t["started"], t["model"],
-                 t["runtime"], t["sha"], t["effort"], t["permission_mode"]))
+                 t["runtime"], t["sha"], t["effort"], t["permission_mode"],
+                 t["sent_by"], t["sent_why"]))
         for e in c.execute("SELECT * FROM events WHERE session_id=? ORDER BY seq",
                            (session_id,)).fetchall():
             c.execute("INSERT INTO events(session_id,turn_id,seq,type,payload,ts) "
@@ -1194,9 +1253,46 @@ def duplicate(session_id: str) -> dict | None:
     return get_session(copy["id"])
 
 
-def relocate(session_id: str, new_cwd: str) -> int:
+def copy_turns(src_id: str, dst_id: str, rewrite: "tuple[str, str] | None" = None) -> dict:
+    """Copy one session's turns and events into another, each turn under a new id
+    (turn ids are the rows' keys, and name the turn's upload folder). `rewrite`
+    (old, new) is replaced in the events' payloads: the folder their pictures were
+    linked into. Returns {old turn id: new}. Used by CONTINUE HERE (bridge/team.py),
+    whose copy is an ordinary session of yours, so no claude id comes along."""
+    with closing(_connect()) as c:
+        c.execute("BEGIN IMMEDIATE")
+        turns = c.execute("SELECT * FROM turns WHERE session_id=? ORDER BY seq", (src_id,)).fetchall()
+        events = c.execute("SELECT * FROM events WHERE session_id=? ORDER BY seq", (src_id,)).fetchall()
+        idmap = {t["id"]: uuid.uuid4().hex for t in turns}
+        c.executemany(
+            "INSERT INTO turns(id,session_id,seq,prompt,attachments,status,cost,elapsed,started,"
+            "model,runtime,sha,effort,permission_mode,sent_by,sent_why) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(idmap[t["id"]], dst_id, t["seq"], t["prompt"], t["attachments"], t["status"], t["cost"],
+              t["elapsed"], t["started"], t["model"], t["runtime"], t["sha"], t["effort"],
+              t["permission_mode"], t["sent_by"], t["sent_why"]) for t in turns])
+        old, new = rewrite or ("", "")
+        c.executemany(
+            "INSERT INTO events(session_id,turn_id,seq,type,payload,ts) VALUES(?,?,?,?,?,?)",
+            [(dst_id, idmap.get(e["turn_id"], e["turn_id"]), e["seq"], e["type"],
+              e["payload"].replace(old, new) if old else e["payload"], e["ts"]) for e in events])
+        c.execute("COMMIT")
+    return idmap
+
+
+def turn_statuses(session_id: str) -> "list[tuple[int, str]]":
+    """(seq, status) of each of a session's turns, oldest first: what a transcript would
+    say about them, without reading its events."""
+    with closing(_connect()) as c:
+        return [(r["seq"], r["status"]) for r in c.execute(
+            "SELECT seq, status FROM turns WHERE session_id=? ORDER BY seq", (session_id,))]
+
+
+def relocate(session_id: str, new_cwd: str, project: "str | None" = None) -> int:
     """Point a session at a different directory and rewrite the old path wherever
     it appears in prompts and event payloads, so the model never sees the move.
+    `project` moves it to that project too (MOVE TO PROJECT, for a session whose
+    project folder is gone).
 
     Returns the number of rows rewritten. Plain string substitution on the old cwd
     — the paths in a transcript are literal, and anything cleverer would have to
@@ -1209,8 +1305,8 @@ def relocate(session_id: str, new_cwd: str) -> int:
     with closing(_connect()) as c:
         c.execute("BEGIN IMMEDIATE")
         # work_cwd goes too: it named a detour from the *old* checkout.
-        c.execute("UPDATE sessions SET cwd=?, work_cwd=NULL, updated=? WHERE id=?",
-                  (new, time.time(), session_id))
+        c.execute("UPDATE sessions SET cwd=?, work_cwd=NULL, project=COALESCE(?, project), updated=? "
+                  "WHERE id=?", (new, project, time.time(), session_id))
         n = 0
         # No old cwd, or a no-op move: retarget the session and stop. Substituting
         # an empty string would splice `new` between every character.
@@ -1313,6 +1409,34 @@ def week_failures(chat_id: int, since: float, until: float) -> list[dict]:
     return out
 
 
+def day_tool_events(chat_id: int, since: float, until: float = float("inf")) -> list[dict]:
+    """Every `tool` and `tool_done` event in [since, until) in one chat's sessions,
+    oldest first, each with its session's project: what wins.py reads a day's
+    wins from. Narrowed through sessions.updated first (indexed with chat_id),
+    since events carry no index on ts and the table runs to six figures."""
+    with closing(_connect()) as c:
+        rows = c.execute(
+            "SELECT e.session_id, e.turn_id, e.type, e.payload, e.ts, s.project "
+            "FROM events e JOIN sessions s ON s.id = e.session_id "
+            "WHERE s.chat_id=? AND s.updated >= ? AND e.ts >= ? AND e.ts < ? "
+            "AND e.type IN ('tool','tool_done') ORDER BY e.ts, e.seq",
+            (chat_id, since, since, until)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def day_turn_spans(chat_id: int, since: float, until: float = float("inf")) -> list[dict]:
+    """Start and wall seconds of one chat's turns started in [since, until), with
+    their project: the stretches wins.py calls work. A turn still running has
+    no elapsed yet; the caller reaches it to now."""
+    with closing(_connect()) as c:
+        rows = c.execute(
+            "SELECT t.started, t.elapsed, s.project FROM turns t "
+            "JOIN sessions s ON s.id = t.session_id "
+            "WHERE s.chat_id=? AND t.started >= ? AND t.started < ? ORDER BY t.started",
+            (chat_id, since, until)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def week_by_project(chat_id: int, since: float, until: float) -> list[dict]:
     """Per-project aggregates over turns started in [since, until): sessions
     touched (not created — an old session worked on this week counts), turns,
@@ -1351,14 +1475,63 @@ def week_by_day(chat_id: int, since: float, until: float) -> list[dict]:
             "GROUP BY day ORDER BY day", (chat_id, since, until)).fetchall()]
 
 
+def week_by_hour(chat_id: int, since: float, until: float) -> list[list[int]]:
+    """Turn counts as a 7x24 grid: rows Monday..Sunday, columns local hour.
+    Local time for the same reason as week_by_day."""
+    grid = [[0] * 24 for _ in range(7)]
+    with closing(_connect()) as c:
+        for r in c.execute(
+                "SELECT CAST(strftime('%w', t.started, 'unixepoch', 'localtime') AS INT) AS wd, "
+                "CAST(strftime('%H', t.started, 'unixepoch', 'localtime') AS INT) AS hr, "
+                "COUNT(t.id) AS n "
+                "FROM turns t JOIN sessions s ON s.id = t.session_id "
+                "WHERE s.chat_id=? AND t.started >= ? AND t.started < ? "
+                "GROUP BY wd, hr", (chat_id, since, until)):
+            grid[(r["wd"] + 6) % 7][r["hr"]] = r["n"]  # SQLite Sunday=0 -> row 6
+    return grid
+
+
 def turn_metrics(session_id: str) -> list[dict]:
     """Per-turn status, wall time and token spend — the numbers a breakdown adds
     up. Ordered by seq so a caller can attribute per turn as well as per session."""
     with closing(_connect()) as c:
         return [dict(r) for r in c.execute(
-            "SELECT seq, status, elapsed, started, tok_in, tok_out, tok_cache_w, "
+            "SELECT id, seq, status, elapsed, started, tok_in, tok_out, tok_cache_w, "
             "tok_cache_r FROM turns WHERE session_id=? ORDER BY seq",
             (session_id,)).fetchall()]
+
+
+_EDITS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
+
+def first_turn_metrics(session_id: str) -> "dict | None":
+    """A session's first turn as a Savers trial scores it (bridge/savers.py):
+    whether it errored, its tokens, the words of its last answer, and the tool
+    calls it made before its first edit (None when it never edited). None until
+    that turn has finished."""
+    with closing(_connect()) as c:
+        t = c.execute("SELECT id, status, tok_in, tok_out, tok_cache_w, tok_cache_r FROM turns "
+                      "WHERE session_id=? ORDER BY seq LIMIT 1", (session_id,)).fetchone()
+        if t is None or t["status"] == "running":
+            return None
+        rows = c.execute("SELECT type, payload FROM events WHERE session_id=? AND turn_id=? "
+                         "AND type IN ('tool','result') ORDER BY seq",
+                         (session_id, t["id"])).fetchall()
+    before, edited, words = 0, False, 0
+    for r in rows:
+        try:
+            p = json.loads(r["payload"])
+        except (TypeError, ValueError):
+            continue
+        if r["type"] == "tool" and not edited:
+            edited = p.get("name") in _EDITS
+            before += 0 if edited else 1
+        elif r["type"] == "result":
+            words = len(str(p.get("result") or "").split())
+    toks = [t[k] for k in ("tok_in", "tok_out", "tok_cache_w", "tok_cache_r")]
+    return {"error": t["status"] == "error", "words": words,
+            "tokens": sum(x or 0 for x in toks) if any(x is not None for x in toks) else None,
+            "tools_before_edit": before if edited else None}
 
 
 def last_turn(session_id: str) -> "dict | None":
@@ -1413,6 +1586,18 @@ def running_session_ids(chat_id: int) -> list[str]:
     return [r["session_id"] for r in rows]
 
 
+def running_in(path: str) -> bool:
+    """Whether a running turn works inside `path`: in its session's checkout, or in
+    the worktree its shell moved into (work_cwd). The dashboard won't remove a
+    worktree out from under one."""
+    want = os.path.realpath(path).rstrip(os.sep) + os.sep
+    with closing(_connect()) as c:
+        rows = c.execute("SELECT s.cwd, s.work_cwd FROM turns t JOIN sessions s ON s.id=t.session_id "
+                         "WHERE t.status='running'").fetchall()
+    return any((os.path.realpath(p).rstrip(os.sep) + os.sep).startswith(want)
+               for r in rows for p in (r["cwd"], r["work_cwd"]) if p)
+
+
 def claim_orphaned_turns() -> list[dict]:
     """Turns left 'running' at startup were orphaned by a restart: a run whose
     Claude child died while the bridge was going down skips finish_turn
@@ -1443,16 +1628,19 @@ def _outcome_signals(c, session_id: str, turn_ids: set) -> dict:
     and can never hit SQLite's variable limit; the events table is keyed on
     session_id, so it is the same index either way."""
     sig = {t: {"errors": [], "has_text": False, "stopped": False,
-               "has_result": False, "result_empty": False, "result_text": ""}
+               "has_result": False, "result_empty": False, "result_text": "",
+               "credits": False}
            for t in turn_ids}
     for r in c.execute(
             "SELECT turn_id,type,payload FROM events WHERE session_id=? AND "
-            "type IN ('error','stopped','result','text') ORDER BY seq", (session_id,)):
+            "type IN ('error','stopped','result','text','ratelimit') ORDER BY seq", (session_id,)):
         s = sig.get(r["turn_id"])
         if s is None:
             continue
         if r["type"] == "text":
             s["has_text"] = True
+        elif r["type"] == "ratelimit":
+            s["credits"] = json.loads(r["payload"]).get("error_code") == "credits_required"
         elif r["type"] == "stopped":
             s["stopped"] = True
         elif r["type"] == "error":
@@ -1534,12 +1722,6 @@ def create_member(chat: dict, *, name: str, cwd: str, profile_id: "str | None",
     return get_session(s["id"])
 
 
-def set_parent_session(session_id: str, chat_id: str) -> None:
-    """Move a helper under another chat, when a run's manager is replaced (bridge/workrun.py)."""
-    with closing(_connect()) as c:
-        c.execute("UPDATE sessions SET parent_session=? WHERE id=?", (chat_id, session_id))
-
-
 def members_of(chat_id: str) -> list:
     """The helpers of a chat, oldest first."""
     with closing(_connect()) as c:
@@ -1557,6 +1739,17 @@ def member_counts(ids: list) -> dict:
         rows = c.execute(f"SELECT parent_session, COUNT(*) AS n FROM sessions "
                          f"WHERE parent_session IN ({marks}) GROUP BY parent_session", ids).fetchall()
     return {r["parent_session"]: r["n"] for r in rows}
+
+
+def helper_parents(ids: list) -> dict:
+    """helper session id -> (its chat's id, the helper's name), for the ids that are helpers."""
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    with closing(_connect()) as c:
+        rows = c.execute(f"SELECT id, parent_session, title FROM sessions "
+                         f"WHERE id IN ({marks}) AND parent_session IS NOT NULL", list(ids)).fetchall()
+    return {r["id"]: (r["parent_session"], r["title"] or "helper") for r in rows}
 
 
 def set_member(session_id: str, member: dict) -> None:
@@ -1626,7 +1819,7 @@ def turns_of(session_id: str) -> list:
     """A session's turns, oldest first, with what a history needs."""
     with closing(_connect()) as c:
         return [dict(r) for r in c.execute(
-            "SELECT id, seq, prompt, status, started, runtime, model FROM turns "
+            "SELECT id, seq, prompt, status, started, runtime, model, permission_mode FROM turns "
             "WHERE session_id=? ORDER BY started, seq", (session_id,)).fetchall()]
 
 

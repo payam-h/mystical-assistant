@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Code2, FlaskConical, GitCommitVertical, GraduationCap, ListTodo, Palette, PenLine,
-  Play, Puzzle, Scissors, ShieldQuestion, Sparkles, Waypoints, Workflow, type LucideIcon,
+  Code2, FlaskConical, Gauge, GitCommitVertical, GraduationCap, ListTodo, MessagesSquare,
+  Palette, PenLine, Play, Puzzle, Route, Scale, Scissors, ShieldQuestion, SkipForward, Sparkles,
+  ShieldCheck, Ticket, Wand2, Waypoints, Workflow, type LucideIcon,
 } from "lucide-react";
 import {
   api, type AiFeature, type CatalogSkill, type InstalledSkill, type SkillCategory, type SkillScope, type SkillsInfo,
 } from "../../api";
-import { setAiFeatures } from "../../lib/ai";
+import { setAiFeatures, useGraphify } from "../../lib/ai";
 import { PluginsView } from "./PluginsView";
 
 /* The extras and the skills — two kinds of card, one card grammar.
@@ -35,6 +36,14 @@ const EXTRA_ICONS: Record<string, LucideIcon> = {
   ponytail: Scissors,
   graph: Waypoints,
   commitmsg: GitCommitVertical,
+  router: Route,
+  autopick: Wand2,
+  nextstep: SkipForward,
+  ticketruns: Ticket,
+  ticketapprove: ShieldCheck,
+  mergereview: Scale,
+  smartzone: Gauge,
+  grillcards: MessagesSquare,
 };
 
 const CAT_ICON: Record<SkillCategory, LucideIcon> = {
@@ -78,12 +87,17 @@ function Toggle({ on, busy, onClick, label }: { on: boolean; busy?: boolean; onC
 
 // ---- the extras --------------------------------------------------------------
 
-function ExtraCard({ f, busy, err, open, onToggle, onInfo }: {
+/** SKILL PATHS and its six switches: set in the FLOWS sheet and SETTINGS' own Flows fold now, so not extras' cards. */
+export const FLOW_SWITCHES = new Set(["router", "autopick", "nextstep", "ticketruns", "ticketapprove", "mergereview", "smartzone"]);
+
+function ExtraCard({ f, busy, err, open, onToggle, onInfo, install }: {
   f: AiFeature; busy: boolean; err?: string; open: boolean; onToggle: () => void; onInfo: () => void;
+  install?: { busy: boolean; run: () => void };   // the tool it runs on is missing: Install stands where the switch was
 }) {
   const Icon = EXTRA_ICONS[f.key] ?? Sparkles;
   return (
-    <div className="aim-x" data-on={f.enabled || undefined} data-busy={busy || undefined}>
+    <div className="aim-x" data-on={(f.enabled && !install) || undefined} data-busy={busy || undefined}
+      data-sub={f.parent ? "" : undefined}>
       <div className="aim-xhd">
         <span className="aim-xic"><Icon size={14} strokeWidth={1.7} aria-hidden /></span>
         <b>{sentence(f.label)}</b>
@@ -91,13 +105,19 @@ function ExtraCard({ f, busy, err, open, onToggle, onInfo }: {
           <button type="button" className="aim-xinfo" aria-expanded={open} aria-label={`about ${f.label}`} onClick={onInfo}>i</button>
         )}
         <span style={{ flex: 1, minWidth: 8 }} />
-        <Toggle on={f.enabled} busy={busy} onClick={onToggle} label={f.label} />
+        {install ? (
+          <button type="button" className="aim-xbtn" disabled={install.busy} onClick={install.run}
+            title="install graphify on this machine and switch this on">{install.busy ? "Installing…" : "Install"}</button>
+        ) : (
+          <Toggle on={f.enabled} busy={busy} onClick={onToggle} label={f.label} />
+        )}
       </div>
       <div className="aim-xhint">{f.hint}</div>
       {open && f.about && <div className="aim-xaside">{f.about}</div>}
       {err && <div className="aim-xerr">{err}</div>}
       <div className="aim-xfoot">
-        <span>{f.cost}</span>
+        {/* what Install is for, on the line the cost holds: a status in the hint would resize the card when it lands */}
+        <span>{!install ? f.cost : install.busy ? "installing graphify…" : "needs graphify, not on this machine yet"}</span>
         {f.tokens && <em>{f.tokens}</em>}
       </div>
     </div>
@@ -115,6 +135,8 @@ function ExtrasGrid() {
   // Which card's ⓘ is unfolded — the grid stretches rows so the cost lines
   // align, and one open aside would stretch its neighbours into mostly gap.
   const [openKey, setOpenKey] = useState<string | null>(null);
+  const gfy = useGraphify();
+  const missing = (f: AiFeature) => f.key === "graph" && gfy.installed === false;
 
   useEffect(() => {
     void api.aiFeatures()
@@ -138,22 +160,31 @@ function ExtrasGrid() {
     }
   }
 
-  const on = rows?.filter((f) => f.enabled).length ?? 0;
+  // A sub-switch (the skill router's six) is drawn, and counted, only while its parent is on.
+  const all = rows ?? [];
+  // A grandchild (APPROVE BEFORE BUILD under TICKETS under the router) needs every ancestor on.
+  const visible = (f: AiFeature): boolean => {
+    const p = f.parent ? all.find((x) => x.key === f.parent) : undefined;
+    return !f.parent || (!!p && p.enabled && visible(p));
+  };
+  const shown = all.filter((f) => visible(f) && !FLOW_SWITCHES.has(f.key));
+  const on = shown.filter((f) => f.enabled && !missing(f)).length;
   return (
     <>
       <div className="aim-sub" data-sec="MODEL-SPENDING EXTRAS">
         <b>Extras that spend model calls</b>
-        {rows && rows.length > 0 && <span className="aim-count">{on} of {rows.length} on</span>}
+        {rows && rows.length > 0 && <span className="aim-count">{on} of {shown.length} on</span>}
         <span className="aim-hint">calls you didn't type — each has its switch</span>
       </div>
       {rows === null && <div className="aim-hint">Reading the feature switches…</div>}
       {rows?.length === 0 && <div className="aim-hint">This bridge is running a build without the extras. Restart it.</div>}
       {rows && rows.length > 0 && (
-        <div className="aim-xgrid" data-open={openKey ? "" : undefined}>
-          {rows.map((f) => (
-            <ExtraCard key={f.key} f={f} busy={busy === f.key} err={err?.key === f.key ? err.msg : undefined}
+        <div className="aim-xgrid" data-open={shown.some((f) => f.key === openKey) ? "" : undefined}>
+          {shown.map((f) => (
+            <ExtraCard key={f.key} f={f} busy={busy === f.key} err={err?.key === f.key ? err.msg : (missing(f) && gfy.error) || undefined}
               open={openKey === f.key} onToggle={() => void toggle(f)}
-              onInfo={() => setOpenKey(openKey === f.key ? null : f.key)} />
+              onInfo={() => setOpenKey(openKey === f.key ? null : f.key)}
+              install={missing(f) ? { busy: gfy.installing, run: () => { if (!f.enabled) void toggle(f); gfy.install(); } } : undefined} />
           ))}
         </div>
       )}
@@ -162,37 +193,6 @@ function ExtrasGrid() {
 }
 
 // ---- the skills --------------------------------------------------------------
-
-function SkillCard({ s, busy, onRemove, onUpdate }: {
-  s: InstalledSkill;
-  busy: boolean;
-  onRemove: (() => void) | null;   // catalog skills only — a hand-written one is edited on disk
-  onUpdate: (() => void) | null;   // set when the source repo has moved on
-}) {
-  const Icon = CAT_ICON[s.category] ?? Puzzle;
-  return (
-    <div className="aim-x" data-busy={busy || undefined}>
-      <div className="aim-xhd">
-        <span className="aim-xic" style={{ color: CAT_COLOR[s.category] }}><Icon size={14} strokeWidth={1.7} aria-hidden /></span>
-        <b title={s.id}>{s.name}</b>
-        <span style={{ flex: 1, minWidth: 8 }} />
-        {onUpdate && (
-          <button type="button" className="aim-xbtn warn" disabled={busy} onClick={onUpdate} title="the source repo changed — pull the new version">↻ Update</button>
-        )}
-        {onRemove ? (
-          <button type="button" className="aim-xbtn danger" disabled={busy} onClick={onRemove} title="uninstall">✕</button>
-        ) : (
-          <span className="aim-chip dim" title="hand-written — edit it on disk">own</span>
-        )}
-      </div>
-      {s.description && <div className="aim-xhint clamp" title={s.description}>{s.description}</div>}
-      <div className="aim-xfoot">
-        <span>{catLabel(s.category)}</span>
-        <em>{s.from_catalog ? "from the catalog" : ".claude/skills"}</em>
-      </div>
-    </div>
-  );
-}
 
 function CatalogCard({ c, project, inProject, inSystem, busy, onToggle }: {
   c: CatalogSkill;
@@ -232,6 +232,33 @@ function CatalogCard({ c, project, inProject, inSystem, busy, onToggle }: {
 
 type Mode = "installed" | "catalog" | "plugins";
 
+/** One installed skill on one line (2026-11-06, A · DENSE LIST): 47 two-up cards
+ *  with clamped paragraphs ran five screens; a row reads the same facts in one. */
+function SkillRow({ s, scope, busy, onRemove, onUpdate }: {
+  s: InstalledSkill;
+  scope: SkillScope;
+  busy: boolean;
+  onRemove: (() => void) | null;
+  onUpdate: (() => void) | null;
+}) {
+  const Icon = CAT_ICON[s.category] ?? Puzzle;
+  return (
+    <div className="sk-row" data-busy={busy || undefined}>
+      <span className="sk-ic" style={{ color: CAT_COLOR[s.category] }}><Icon size={13} strokeWidth={1.7} aria-hidden /></span>
+      <b title={s.id}>{s.name}</b>
+      <span className="sk-ds" title={s.description}>{s.description}</span>
+      <span className="sk-chip">{scope === "project" ? "project" : "machine"}</span>
+      <span className="sk-chip" data-own={!s.from_catalog || undefined}>{s.from_catalog ? "catalog" : "yours"}</span>
+      <span className="sk-act">
+        {onUpdate && <button type="button" className="aim-xbtn warn" disabled={busy} onClick={onUpdate} title="the source repo changed — pull the new version">↻</button>}
+        {onRemove
+          ? <button type="button" className="sk-x" disabled={busy} onClick={onRemove} title="uninstall" aria-label={`uninstall ${s.name}`}>✕</button>
+          : <span className="sk-x" title="hand-written — edit it on disk" aria-hidden>·</span>}
+      </span>
+    </div>
+  );
+}
+
 function SkillsGrid({ project }: { project: string | null }) {
   const [info, setInfo] = useState<SkillsInfo | null>(null);
   const [err, setErr] = useState("");
@@ -239,6 +266,8 @@ function SkillsGrid({ project }: { project: string | null }) {
   const [mode, setMode] = useState<Mode>("installed");
   const [cat, setCat] = useState<SkillCategory | "all">("all");
   const [q, setQ] = useState("");
+  const [iq, setIq] = useState("");   // the installed list's own search
+  const [only, setOnly] = useState<"all" | SkillScope | "own" | SkillCategory>("all");
   // Skills we installed whose source repo has since changed — keyed "scope:id".
   const [stale, setStale] = useState<Set<string>>(new Set());
   const [checking, setChecking] = useState(false);
@@ -294,22 +323,24 @@ function SkillsGrid({ project }: { project: string | null }) {
   const counts = (info?.catalog ?? []).reduce<Record<string, number>>(
     (a, c) => ({ ...a, [c.category]: (a[c.category] ?? 0) + 1 }), {});
 
-  const group = (title: string, list: InstalledSkill[], scope: SkillScope) => (
-    <>
-      <div className="aim-glabel">{title} · {list.length}</div>
-      {list.length === 0 ? (
-        <div className="aim-hint">{scope === "project" && !project ? "No project selected." : "Nothing installed here yet."}</div>
-      ) : (
-        <div className="aim-xgrid">
-          {list.map((s) => (
-            <SkillCard key={s.id} s={s} busy={busy === `${scope}:${s.id}`}
-              onRemove={s.from_catalog ? () => void toggle(s.id, scope, true) : null}
-              onUpdate={stale.has(`${scope}:${s.id}`) ? () => void toggle(s.id, scope, false) : null} />
-          ))}
-        </div>
-      )}
-    </>
-  );
+  const all = [
+    ...(info?.project ?? []).map((sk) => ({ s: sk, scope: "project" as SkillScope })),
+    ...(info?.system ?? []).map((sk) => ({ s: sk, scope: "system" as SkillScope })),
+  ];
+  const ineedle = iq.trim().toLowerCase();
+  const rows = all
+    .filter(({ s: sk, scope }) => only === "all" || only === scope || (only === "own" ? !sk.from_catalog : sk.category === only))
+    .filter(({ s: sk }) => !ineedle || `${sk.name} ${sk.id} ${sk.description}`.toLowerCase().includes(ineedle))
+    .sort((a, b) => a.s.name.localeCompare(b.s.name, undefined, { sensitivity: "base" }));
+  const catN = all.reduce<Record<string, number>>((a, { s: sk }) => ({ ...a, [sk.category]: (a[sk.category] ?? 0) + 1 }), {});
+  const chips: { k: typeof only; label: string; n: number }[] = [
+    { k: "all", label: "All", n: all.length },
+    { k: "project", label: "This project", n: info?.project.length ?? 0 },
+    { k: "system", label: "This machine", n: info?.system.length ?? 0 },
+    { k: "own", label: "Yours", n: all.filter(({ s: sk }) => !sk.from_catalog).length },
+    ...Object.entries(catN).filter(([k]) => k !== "other").sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => ({ k: k as SkillCategory, label: catLabel(k as SkillCategory), n })),
+  ];
 
   return (
     <>
@@ -340,8 +371,25 @@ function SkillsGrid({ project }: { project: string | null }) {
               <button type="button" className="aim-xbtn warn" disabled={!!busy} onClick={() => void updateAll()}>↻ Update all</button>
             </div>
           )}
-          {group("Project", info.project, "project")}
-          {group("System", info.system, "system")}
+          <div className="sk-bar">
+            <input className="aim-search" value={iq} onChange={(e) => setIq(e.target.value)} placeholder="Find a skill" />
+            <div className="aim-chips">
+              {chips.map((c) => (
+                <button key={c.k} type="button" className="aim-chipbtn" data-on={only === c.k || undefined} onClick={() => setOnly(c.k)}>
+                  {c.label} <em>{c.n}</em>
+                </button>
+              ))}
+            </div>
+          </div>
+          {!project && <div className="aim-hint">No project selected, so only this machine's skills are listed.</div>}
+          <div className="sk-list">
+            {rows.map(({ s: sk, scope }) => (
+              <SkillRow key={`${scope}:${sk.id}`} s={sk} scope={scope} busy={busy === `${scope}:${sk.id}`}
+                onRemove={sk.from_catalog ? () => void toggle(sk.id, scope, true) : null}
+                onUpdate={stale.has(`${scope}:${sk.id}`) ? () => void toggle(sk.id, scope, false) : null} />
+            ))}
+            {rows.length === 0 && <div className="aim-hint" style={{ padding: "12px 14px" }}>No installed skill matches.</div>}
+          </div>
         </>
       )}
 

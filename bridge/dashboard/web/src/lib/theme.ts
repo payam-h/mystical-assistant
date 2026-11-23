@@ -15,11 +15,14 @@
 // `data-theme` names the colouring and `data-fam` the family; CRT effects
 // (scanlines / sweep / glow) belong to AURORA and default on when you pick it.
 
+import type { KindId, KindRun } from "./kinds";
 import { toIndicator, type Indicator } from "./indicator";
 import { toIntro, type Intro } from "./intro";
+import { HEAD_DEFAULT, toHead, type HeadLook } from "./headlook";
 import { NYAN_KEYS, type NyanMode, type NyanSound } from "./nyan";
 import { TONES, type ToneKey } from "./push";
 import { toChatBg, type ChatBg } from "./toolwidget";
+import { RIGHT_W, startTab } from "./rail";
 
 export type ThemeKey =
   | "aqua" | "green" | "amber" | "magenta" | "blueprint" | "void"
@@ -339,7 +342,8 @@ export const THEME_TOKEN_KEYS: string[] = Array.from(
   new Set(THEME_DEFS.flatMap((t) => Object.keys(t.pal))),
 ).map((k) => `--${k}`);
 
-export const RIGHT_TABS = ["turns", "files", "git", "branches", "learn", "rivendell", "team", "usage", "work"] as const;
+// docs/automations/design/views joined 2026-11-16 so "Open here on start" (and a reload) can land on them.
+export const RIGHT_TABS = ["home", "session", "files", "git", "council", "branches", "learn", "rivendell", "usage", "work", "docs", "automations", "design", "views"] as const;
 export type RightTab = (typeof RIGHT_TABS)[number];
 
 export { INDICATORS, type Indicator } from "./indicator";
@@ -352,6 +356,17 @@ export interface HudSettings {
   rightOpen: boolean; // right sidebar expanded
   leftOpen: boolean; // sessions column expanded; folded, it is the project rail
   rightTab: RightTab; // which sidebar tab it opens on
+  // The rail as you arranged it (lib/rail.ts): tab ids in your drag order, the
+  // ones you hid, and the panel width you dragged (0 = the layout's own).
+  rightOrder: string[];
+  rightHidden: string[];
+  rightW: number;
+  // From a tile's right-click menu: the tab it opens on at load ("" = the last
+  // one open), and the rail's look: names under icons, readouts, group rules.
+  rightStart: string;
+  railNames: boolean;
+  railReadouts: boolean;
+  railRules: boolean;
   indicator: Indicator; // which working-indicator form is live
   nyan: NyanMode; // which cat, when indicator === "nyan"
   nyanSound: NyanSound; // "match" = the picked cat's own track
@@ -386,49 +401,33 @@ export interface HudSettings {
   // right, replies capped short of the far edge, the header shrunk to a pill of
   // readouts, and model/permission/effort folded into one popover over SEND.
   layout: ChatLayout;
-  // COMPACT's composer shell (COMPOSER_STYLES).
-  composer: ComposerStyle;
+  // SETTINGS ▸ CHAT ▸ HEADER: the header island's shape, fade and glass (lib/headlook).
+  head: HeadLook;
+  // Per-kind overrides of the prompt box's run knobs (lib/kinds); a kind not here uses its own defaults.
+  kindPresets?: Partial<Record<KindId, Partial<KindRun>>>;
   // Which key sends from the composer. "enter": Enter sends, Shift+Enter is a
   // newline. "ctrl-enter": Enter is a newline, Ctrl/Cmd+Enter sends.
   sendKey: SendKey;
-  // What Enter does while a turn runs. "steer": the message folds into the
-  // running turn at its next tool step (Alt+Enter queues). "queue": it waits
-  // for the turn to end (Alt+Enter steers).
+  // The Almanac's world clocks (components/hud/Almanac.tsx), at most two.
+  clocks: WorldClock[];
+  // BRANCHES: landed branches nothing holds any more clean up by themselves
+  // (lib/branchrows autoClean); the broom in the tab's header turns it off.
+  autoClean: boolean;
+  // fork: where the prompt box's NOW|NEXT switch starts while a turn runs.
+  // "steer" starts on NOW (the message folds into the running turn at its next
+  // tool step); "queue" on NEXT (it waits for the turn to end). Alt+Enter the other.
   busyEnter: BusyEnter;
-  // Claude's messages between steps stay in the flow, each with the steps
-  // after it folded under one line — how Claude Code reads. Off, they sit
-  // inside the WORK box with the steps.
-  stepNotes: boolean;
 }
 
 export type BusyEnter = "steer" | "queue";
+
+/** A world clock: an IANA zone, and whether the header shows it beside the Clock too. */
+export interface WorldClock { zone: string; pin: boolean }
 
 export type ChatLayout = "default" | "compact";
 export type SendKey = "enter" | "ctrl-enter";
 
 export const CHAT_LAYOUTS: ChatLayout[] = ["default", "compact"];
-
-/** How COMPACT's composer carries the session (.mystical/design-drafts/
- *  prompt-box/SPEC.md). TABS: the title, branch, PR, running app and context
- *  meter as folder tabs on the box's top edge. CONSOLE: a bare command line,
- *  a place line and a settings line under it. CLASSIC: the composer as it
- *  was, the nameplate sharing one row with the tools. TABS is the default: it
- *  is the shape every chat box already has, so it costs no learning, keeps the
- *  text full width and SEND labelled, and holds its height from session to
- *  session. A STUB layout (the session as a ticket stub down the box's left)
- *  was tried and dropped: its height followed each session's content, so the
- *  box jumped on every switch. A stored "stub" falls back to TABS. DEFAULT
- *  keeps its nameplate header and never reads this. */
-export const COMPOSER_STYLES = ["tabs", "console", "classic"] as const;
-export type ComposerStyle = (typeof COMPOSER_STYLES)[number];
-
-/** `?composer=console` on the URL, like `?layout=`. */
-function urlComposer(): ComposerStyle | null {
-  try {
-    const v = new URLSearchParams(window.location.search).get("composer");
-    return COMPOSER_STYLES.includes(v as ComposerStyle) ? (v as ComposerStyle) : null;
-  } catch { return null; }
-}
 
 /** `?layout=compact` (or `default`) on the dashboard URL sets the layout and
  *  the setting remembers it — a link can switch a browser you are not sat at. */
@@ -442,12 +441,13 @@ function urlLayout(): ChatLayout | null {
 const KEY = "hud-settings";
 const DEFAULTS: HudSettings = {
   theme: "aqua", scanlines: true, sweep: true, glow: true, rightOpen: true, leftOpen: true, rightTab: "files",
+  rightOrder: [], rightHidden: [], rightW: 0, rightStart: "", railNames: true, railReadouts: true, railRules: true,
   indicator: "orbit", nyan: "original", nyanSound: "match", nyanVolume: 0.4, nyanExtra: true, intro: "shuffle",
   font: "", baseFont: 0, openResults: false, foldsOpen: false,
   model: "opus", allModels: false, effort: "", perm: "", ponytail: "",
   push: false, pushSound: true,
   pushTone: "blip", pushVolume: 0.6, chatBg: "none",
-  layout: "default", composer: "tabs", sendKey: "enter", busyEnter: "steer", stepNotes: true,
+  layout: "default", head: HEAD_DEFAULT, kindPresets: {}, sendKey: "enter", clocks: [], autoClean: true, busyEnter: "steer",
 };
 
 /** The base every size in the type scale is authored against (index.css --fs). */
@@ -489,11 +489,30 @@ export function toTheme(v: unknown): ThemeKey {
   return THEMES.includes(k as ThemeKey) ? (k as ThemeKey) : "aqua";
 }
 
+// A zone this browser can't draw would throw in every render of the header, so a
+// stored one is checked here, once.
+const knownZone = (z: string): boolean => {
+  try { new Intl.DateTimeFormat("en", { timeZone: z }); return true; } catch { return false; }
+};
+const toClocks = (v: unknown): WorldClock[] =>
+  (Array.isArray(v) ? v : [])
+    .filter((c): c is WorldClock => typeof c?.zone === "string" && knownZone(c.zone))
+    .slice(0, 2).map((c) => ({ zone: c.zone, pin: c.pin === true }));
+
+const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+
+// Tabs another took in: TURNS and FLOW went into SESSION (2026-11-08), TEAM into RIVENDELL (2026-11-10).
+// A stored order or hide list names the one that took them in once, where the first of them stood.
+const TOOK: Record<string, RightTab> = { turns: "session", flow: "session", team: "rivendell" };
+const tookIn = (ids: string[]) => [...new Set(ids.map((id) => TOOK[id] ?? id))];
+
 export function loadSettings(): HudSettings {
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const p = JSON.parse(raw) as Partial<HudSettings> & { textScale?: number };
+      const pin = TOOK[p.rightStart as string] ?? str(p.rightStart, "");
+      const rightStart = RIGHT_TABS.includes(pin as RightTab) ? pin : "";
       return {
         theme: toTheme(p.theme),
         scanlines: p.scanlines ?? true,
@@ -501,8 +520,17 @@ export function loadSettings(): HudSettings {
         glow: p.glow ?? true,
         rightOpen: p.rightOpen ?? true,
         leftOpen: p.leftOpen ?? true,
-        // "changes" was its own tab until the GIT tab took it in (2026-10-18)
-        rightTab: (p.rightTab as string) === "changes" ? "git" : RIGHT_TABS.includes(p.rightTab as RightTab) ? (p.rightTab as RightTab) : "files",
+        // "changes" was its own tab until the GIT tab took it in (2026-10-18); then TOOK
+        rightTab: startTab(rightStart,
+          (p.rightTab as string) === "changes" ? "git" : TOOK[p.rightTab as string]
+          ?? (RIGHT_TABS.includes(p.rightTab as RightTab) ? (p.rightTab as RightTab) : "files"), RIGHT_TABS),
+        rightOrder: tookIn(strs(p.rightOrder)),
+        rightHidden: tookIn(strs(p.rightHidden)),
+        rightW: typeof p.rightW === "number" && p.rightW >= RIGHT_W.min && p.rightW <= RIGHT_W.max ? p.rightW : 0,
+        rightStart,
+        railNames: p.railNames !== false,
+        railReadouts: p.railReadouts !== false,
+        railRules: p.railRules !== false,
         indicator: toIndicator(p.indicator),
         nyan: NYAN_KEYS.includes(p.nyan as string) ? (p.nyan as NyanMode) : "original",
         nyanSound:
@@ -537,10 +565,12 @@ export function loadSettings(): HudSettings {
         pushVolume: clamp01(p.pushVolume, 0.6),
         chatBg: toChatBg(p.chatBg),
         sendKey: p.sendKey === "ctrl-enter" ? "ctrl-enter" : "enter",
+        clocks: toClocks(p.clocks),
+        autoClean: p.autoClean !== false,
         busyEnter: p.busyEnter === "queue" ? "queue" : "steer",
-        stepNotes: p.stepNotes !== false,
         layout: urlLayout() ?? (CHAT_LAYOUTS.includes(p.layout as ChatLayout) ? (p.layout as ChatLayout) : "default"),
-        composer: urlComposer() ?? (COMPOSER_STYLES.includes(p.composer as ComposerStyle) ? (p.composer as ComposerStyle) : "tabs"),
+        head: toHead(p.head),
+        kindPresets: p.kindPresets && typeof p.kindPresets === "object" ? p.kindPresets : {},
       };
     }
   } catch {
@@ -549,11 +579,11 @@ export function loadSettings(): HudSettings {
   // Migrate the old single-key theme if present.
   try {
     const old = localStorage.getItem("hud-theme");
-    if (old) return { ...DEFAULTS, theme: toTheme(old), layout: urlLayout() ?? "default", composer: urlComposer() ?? "tabs" };
+    if (old) return { ...DEFAULTS, theme: toTheme(old), layout: urlLayout() ?? "default" };
   } catch {
     /* ignore */
   }
-  return { ...DEFAULTS, layout: urlLayout() ?? "default", composer: urlComposer() ?? "tabs" };
+  return { ...DEFAULTS, layout: urlLayout() ?? "default" };
 }
 
 export function saveSettings(s: HudSettings): void {

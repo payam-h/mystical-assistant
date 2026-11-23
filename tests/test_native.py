@@ -130,6 +130,7 @@ def test_scan_groups_a_worktree_session_under_its_repo():
 def test_rescan_heals_a_stale_worktree_project():
     """Rows indexed before the fold existed carry the worktree's own rel; the
     next cold scan re-derives project from cwd and folds them."""
+    os.makedirs(os.path.join(_BASE, ".worktrees", "folded", "side"), exist_ok=True)
     store.upsert_native_session("uuid-stale-wt", OWNER, "/.worktrees/folded/side",
                                 os.path.join(_BASE, ".worktrees", "folded", "side"),
                                 title="old row", origin="terminal")
@@ -138,6 +139,18 @@ def test_rescan_heals_a_stale_worktree_project():
                                 os.path.join(_BASE, ".worktrees", "folded", "side"),
                                 title="old row", origin="terminal")
     assert store.get_by_claude_session_id("uuid-stale-wt")["project"] == "/folded"
+
+
+def test_rescan_keeps_the_project_when_the_cwd_is_gone():
+    """A transcript whose first folder was a since-removed worktree can't be
+    folded, so the rescan keeps the row's project instead of re-filing it under
+    that dead dir, which every list hides."""
+    store.upsert_native_session("uuid-gone-wt", OWNER, "/folded", os.path.join(_BASE, "folded"),
+                                title="moved on", origin="terminal")
+    store.upsert_native_session("uuid-gone-wt", OWNER, "/.worktrees/folded/removed",
+                                os.path.join(_BASE, ".worktrees", "folded", "removed"),
+                                title="moved on", origin="terminal")
+    assert store.get_by_claude_session_id("uuid-gone-wt")["project"] == "/folded"
 
 
 def test_scan_labels_origin_from_entrypoint():
@@ -268,3 +281,30 @@ def test_scan_skips_a_plugins_scratch_workspace():
     _write_native("uuid-forge-old", cwd, first_user="You are one run of an automated comment-moderation pipeline")
     native.scan(chat_id=OWNER)
     assert store.get_by_claude_session_id("uuid-forge-old") is None
+
+
+def test_folders_outside_the_base_or_in_plugin_scratch_are_not_read():
+    base = native._enc(config.BASE_PATH.rstrip(os.sep))
+    assert native._may_hold_base_sessions(base + "-myproj")
+    assert native._may_hold_base_sessions(base)
+    assert not native._may_hold_base_sessions(base + "--forge-anvil")
+    assert not native._may_hold_base_sessions("-Users-someone-Library-Application-Support-Orven-forge-anvil")
+    assert native._may_hold_base_sessions("p-not-an-encoded-path")      # nothing to go on: read it
+
+
+def test_refresh_scans_off_the_request_thread(monkeypatch):
+    import threading as _t
+    started, release = _t.Event(), _t.Event()
+    monkeypatch.setattr(native, "scan", lambda chat_id=None: (started.set(), release.wait(5), 1)[-1])
+    monkeypatch.setattr(native, "_last_scan", 0.0)
+    assert native.refresh(OWNER) == 0                 # returned while the scan still runs
+    assert started.wait(5)
+    monkeypatch.setattr(native, "_last_scan", 0.0)
+    assert native.refresh(OWNER) == 0                 # a second one does not pile on
+    release.set()
+    for _ in range(100):
+        if not native._scan_running.is_set():
+            break
+        _t.Event().wait(0.01)
+    assert not native._scan_running.is_set()
+    assert native.refresh(OWNER, force=True) == 1     # force still answers inline

@@ -32,6 +32,9 @@ export interface Turn {
   model?: string | null;
   effort?: string | null;
   permission_mode?: string | null;
+  // Who sent it when you didn't type it (StoreTurn.sent_by, lib/sender).
+  sent_by?: string | null;
+  sent_why?: string | null;
   // Total tokens this turn spent, or null when it never reported usage —
   // which must read as unknown, not as free.
   tokens?: number | null;
@@ -99,9 +102,11 @@ export function mergeDelta(prev: Turn[], t: Transcript): Turn[] {
       if (ex.status !== st.status || ex.prompt !== prompt || ex.attachments !== attachments
           || ex.runtime !== st.runtime || ex.sha !== st.sha
           || ex.model !== st.model || ex.effort !== st.effort || ex.permission_mode !== st.permission_mode
+          || ex.sent_by !== st.sent_by
           || ex.outcome?.code !== st.outcome?.code || ex.elapsed !== st.elapsed || ex.sum !== sum)
         map.set(st.id, { ...ex, status: st.status, prompt, attachments, runtime: st.runtime,
                          sha: st.sha, model: st.model, effort: st.effort, permission_mode: st.permission_mode,
+                         sent_by: st.sent_by, sent_why: st.sent_why,
                          tokens: tokensOf(st), outcome: st.outcome, elapsed: st.elapsed, sum });
       if (ex.status !== st.status) touched.add(st.id);   // a turn ending clears its pending
     } else
@@ -117,6 +122,8 @@ export function mergeDelta(prev: Turn[], t: Transcript): Turn[] {
         model: st.model,
         effort: st.effort,
         permission_mode: st.permission_mode,
+        sent_by: st.sent_by,
+        sent_why: st.sent_why,
         started: st.started,
         tokens: tokensOf(st),
         outcome: st.outcome,
@@ -124,13 +131,28 @@ export function mergeDelta(prev: Turn[], t: Transcript): Turn[] {
         sum: st.sum,
       });
   }
+  // --- fork: perf --- one copy of a turn's events per delta, not one per event:
+  // the per-event `some` + spread was O(events²) on a long turn — 8.5k events on a
+  // session's first load meant ~36M element copies and as many compares, and every
+  // poll paid O(new × held). Same result: dedup by seq (within the delta too), order kept.
+  const seen = new Map<string, Set<number | undefined>>();
+  const fresh = new Map<string, RunEvent[]>();
   for (const ev of t.events) {
     const turn = map.get(ev.turn_id);
     if (!turn) continue;
-    if (turn.events.some((e) => seqOf(e) === ev.seq)) continue;
-    map.set(ev.turn_id, { ...turn, events: [...turn.events, ev] });
-    touched.add(ev.turn_id);
+    let seqs = seen.get(ev.turn_id);
+    if (!seqs) seen.set(ev.turn_id, seqs = new Set(turn.events.map(seqOf)));
+    if (seqs.has(ev.seq)) continue;
+    seqs.add(ev.seq);
+    const add = fresh.get(ev.turn_id);
+    if (add) add.push(ev); else fresh.set(ev.turn_id, [ev]);
   }
+  for (const [id, add] of fresh) {
+    const turn = map.get(id)!;
+    map.set(id, { ...turn, events: [...turn.events, ...add] });
+    touched.add(id);
+  }
+  // --- /fork ---
   for (const id of touched) {
     const turn = map.get(id)!;
     // Only a live turn can be blocked on you: once it ends nothing is listening

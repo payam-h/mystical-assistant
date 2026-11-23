@@ -30,9 +30,8 @@
     },
     {
       "key": "FORGE_SLOTS",
-      "label": "Slots (parallel tasks)",
-      "default": "1",
-      "hint": "the Forge dashboard's per-device cap applies too"
+      "label": "Slots cap on this Mac (blank = follow Forge)",
+      "hint": "blank: the SLOTS number on the Forge panel's Devices page decides (up to 16). A number here caps this Mac below it"
     },
     {
       "key": "FORGE_POLL_SEC",
@@ -48,6 +47,11 @@
       "key": "FORGE_PAUSED",
       "label": "Paused (1 = claim nothing)",
       "default": "0"
+    },
+    {
+      "key": "FORGE_PROFILE",
+      "label": "Claude profile (id)",
+      "hint": "which login runs Forge tasks; pick it in the FORGE tab. Blank = the default profile"
     },
     {
       "key": "FORGE_SESSION_TEMPLATES",

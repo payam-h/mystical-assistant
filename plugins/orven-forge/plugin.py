@@ -27,6 +27,27 @@ The two rules the Mac app learned the hard way, kept:
     NOT uploaded (so "has artifacts" keeps meaning "ran to completion").
 
 Capacity is reserved before the claim call, not after (the original double-claim bug). Stdlib only.
+
+How many slots. FORGE_SLOTS blank (the default) means "whatever the Forge panel says for this
+device": the agent offers MAX_SLOTS in x-agent-slots, and Forge's claim never hands out more than
+the device's own number there, so the panel is the one place to change it. The heartbeat answers
+with that number when the Forge server is new enough (`slots`), and the tab shows it. A number in
+FORGE_SLOTS still caps this Mac below what the panel says.
+
+Out of the way. A heavy task's session is archived the moment it is made, so the slot workspaces
+(anvil, ember, …) never turn up as projects in the sidebar; the tab's "session" link still opens
+it. A one-shot runs with --no-session-persistence: nothing reads its transcript, and they used to
+pile up at ~1,800 a day under ~/.claude/projects, which every session-list poll walked.
+
+Which Claude login a task runs on. FORGE_PROFILE names a Mystical profile (the FORGE tab's ACCOUNT
+picker writes it); blank means the bridge's default profile for the workspace. Both ways of running
+follow it: a session is bound to the profile, a one-shot gets the profile's account slot (it used to
+get none, i.e. always the machine's own login, whatever the profiles said). A picked profile that
+cannot run (removed, not Claude, its login disabled) stops claiming rather than falling back to
+another login: a task Forge hands out should not fail, or bill someone else, because of a local
+setting. Every finished task is tallied per account in <data>/usage.json (runs, failures, cost,
+seconds, by day), which is what the tab's USAGE section shows; Forge itself has no idea which login
+paid for a task.
 """
 
 from __future__ import annotations
@@ -42,8 +63,9 @@ import urllib.request
 import uuid
 from typing import Callable
 
-SLOT_NAMES = ("anvil", "ember", "bellows", "tongs", "forge", "mandrel", "swage", "chisel")
-MAX_SLOTS = 8
+SLOT_NAMES = ("anvil", "ember", "bellows", "tongs", "forge", "mandrel", "swage", "chisel",
+              "crucible", "hammer", "quench", "rasp", "scale", "flux", "hearth", "billet")
+MAX_SLOTS = 16    # what Forge's own claim accepts in x-agent-slots; the panel's per-device number decides below it
 
 
 def http(url: str, body: dict | None = None, headers: dict | None = None, method: str | None = None, timeout: int = 30, raw: bytes | None = None) -> tuple[int, object]:
@@ -130,12 +152,14 @@ class Run:
         self.sent_events = 0
         self.state = "starting"
         self.mode = "session"
+        self.account = ""                     # the login it ran on, as the usage tally names it
 
 
 class Plugin:
     def __init__(self):
         self.ctx = None
         self._stop = threading.Event()
+        self._wake = threading.Event()        # set by a finished task, or by stop()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self.runs: dict[int, Run] = {}
@@ -145,6 +169,8 @@ class Plugin:
         self.last_claim_at: float | None = None
         self.last_beat_at: float | None = None
         self.recent: list[dict] = []          # last 20 finished tasks
+        self.device_slots: int | None = None  # the Forge panel's number for this device, from the heartbeat
+        self.usage: dict = {}                 # account name -> {day -> {runs, failed, cost, seconds}}
         # injectable for tests
         self.http: Callable = http
         self.start_run: Callable | None = None   # (prompt, workdir, model, permission_mode, allowed_tools, origin, hang) -> job
@@ -154,16 +180,31 @@ class Plugin:
     # --- lifecycle ---------------------------------------------------------------------------
     def start(self, ctx) -> None:
         self.ctx = ctx
+        self._tidy_sessions()
         self._load_recent()
+        self._load_usage()
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="forge-agent", daemon=True)
         self._thread.start()
+
+    def _tidy_sessions(self) -> None:
+        """Archive Forge sessions made before they were archived at birth (once; cheap after)."""
+        try:
+            from bridge import store
+            from contextlib import closing
+            with closing(store._connect()) as c:
+                ids = [r[0] for r in c.execute("SELECT id FROM sessions WHERE archived=0 AND origin LIKE 'forge:%'")]
+            for sid in ids:
+                store.archive(sid)
+        except Exception as e:  # noqa: BLE001
+            self.ctx.log(f"tidy sessions: {e}")
 
     def stop(self) -> None:
         if self.runs:
             from bridge import plugins_ext
             raise plugins_ext.PluginError(f"{len(self.runs)} Forge task(s) still running — let them finish, then remove Forge.")
         self._stop.set()
+        self._wake.set()
         if self._thread:
             self._thread.join(timeout=5)
 
@@ -178,10 +219,19 @@ class Plugin:
         return (self._s().get("FORGE_URL") or "https://forge.imagelens.xyz").rstrip("/")
 
     def _slots(self) -> int:
+        """Tasks this Mac takes at once: the Forge panel's number for it, under FORGE_SLOTS if set."""
         try:
-            return max(1, min(MAX_SLOTS, int(self._s().get("FORGE_SLOTS") or 1)))
+            local = max(1, min(MAX_SLOTS, int(self._s().get("FORGE_SLOTS") or MAX_SLOTS)))
         except ValueError:
-            return 1
+            local = MAX_SLOTS
+        return min(local, self.device_slots) if self.device_slots else local
+
+    def _offer(self) -> int:
+        """What x-agent-slots says: this Mac's own ceiling, never the panel's number fed back to it."""
+        try:
+            return max(1, min(MAX_SLOTS, int(self._s().get("FORGE_SLOTS") or MAX_SLOTS)))
+        except ValueError:
+            return MAX_SLOTS
 
     def _agent_id(self) -> str:
         p = os.path.join(self.ctx.data_dir, "agent-id")
@@ -195,7 +245,7 @@ class Plugin:
             return aid
 
     def _headers(self) -> dict:
-        return {"x-agent-token": self._s().get("FORGE_AGENT_TOKEN", ""), "x-agent-id": self._agent_id(), "x-agent-slots": str(self._slots())}
+        return {"x-agent-token": self._s().get("FORGE_AGENT_TOKEN", ""), "x-agent-id": self._agent_id(), "x-agent-slots": str(self._offer())}
 
     def _api(self, path: str, body: dict | None = None, raw: bytes | None = None, ctype: str | None = None):
         tok = self._s().get("FORGE_AGENT_TOKEN", "")
@@ -205,6 +255,42 @@ class Plugin:
         if ctype:
             headers["Content-Type"] = ctype
         return self.http(f"{self._url()}/api{path}", body if raw is None else None, headers, "POST", raw=raw)
+
+    # --- the account ---------------------------------------------------------------------------
+    def _account(self) -> dict:
+        """The login tasks run on now: {picked, profile, name, slot, problem, options}. `profile` is
+        the profile id a session is bound to (None = unbound), `slot` the account a one-shot gets
+        (None = the machine's own login), `problem` why the picked profile cannot run."""
+        out = {"picked": str((self._s() if self.ctx else {}).get("FORGE_PROFILE") or ""), "profile": None, "name": "this Mac's login",
+               "slot": None, "problem": None, "options": []}
+        try:
+            from bridge import profiles
+            from bridge.browser import rel
+            claude = [p for p in profiles.all_profiles() if (p.get("agent") or profiles.CLAUDE) == profiles.CLAUDE]
+
+            def usable(p: dict) -> bool:
+                a = str(p.get("account") or "")
+                return not a or (a.isdigit() and profiles.claude_slot_usable(int(a)))
+
+            out["options"] = [{"id": p["id"], "name": p.get("name") or p["id"], "usable": usable(p)} for p in claude]
+            if out["picked"]:
+                p = next((x for x in claude if x["id"] == out["picked"]), None)
+                if p is None:
+                    out["problem"] = "account: the picked profile is gone or is not a Claude profile"
+                    return out
+                if not usable(p):
+                    out["problem"] = f"account: {p.get('name') or p['id']} cannot run (its login is disabled or missing)"
+            else:
+                p = profiles.get(profiles.claude_default(rel(self._workspace(0))))
+            if p:
+                a = str(p.get("account") or "")
+                out.update(profile=p["id"], name=p.get("name") or p["id"], slot=int(a) if a.isdigit() else None)
+        except Exception as e:  # noqa: BLE001 - the tab must still draw
+            if out["picked"]:           # a pick we cannot check is a pick we cannot honour
+                out["problem"] = f"account: could not read the profiles ({e})"
+            if self.ctx:
+                self.ctx.log(f"account lookup failed: {e}")
+        return out
 
     # --- the loop ----------------------------------------------------------------------------
     def _loop(self) -> None:
@@ -222,21 +308,42 @@ class Plugin:
                         self.beat()
                         last_beat = time.time()
                     if not paused:
-                        self.claim_once()
+                        self.claim_all()
                 except Exception as e:  # noqa: BLE001
                     self.last_error = str(e)[:200]
                     self.online = False
-            self._stop.wait(every)
+            self._wake.wait(every)          # a finished task wakes it early: its slot is free now
+            self._wake.clear()
+
+    def claim_all(self) -> int:
+        """Claim until the slots are full or Forge has nothing more for us. One claim per tick
+        capped a 12-slot Mac at about one task every 10 s, so with 20–40 s tasks only ~4 ever ran
+        while the queue grew (2026-11-11). Returns how many were claimed."""
+        n = 0
+        for _ in range(MAX_SLOTS):
+            if self._stop.is_set() or self.claim_once() != "claimed":
+                break
+            n += 1
+        return n
 
     def beat(self) -> None:
-        code, _ = self._api("/agent/heartbeat", {"name": self._s().get("FORGE_AGENT_NAME") or "Mystical", "version": "mystical-plugin/0.1"})
+        code, data = self._api("/agent/heartbeat", {"name": self._s().get("FORGE_AGENT_NAME") or "Mystical", "version": "mystical-plugin/0.2"})
         self.online = code < 400
+        n = data.get("slots") if isinstance(data, dict) else None
+        if isinstance(n, int) and n > 0:
+            self.device_slots = min(MAX_SLOTS, n)
         self.last_beat_at = time.time()
         if not self.online:
             self.last_error = f"heartbeat {code}"
 
     def claim_once(self) -> str:
         """One claim attempt. Returns 'full', 'empty', 'claimed' or 'error'."""
+        problem = self._account()["problem"]
+        if problem:                     # never claim what the picked login cannot run
+            self.last_error = problem
+            return "error"
+        if (self.last_error or "").startswith("account:"):
+            self.last_error = None
         with self._lock:
             if len(self.runs) + self.reserved >= self._slots():
                 return "full"
@@ -303,7 +410,8 @@ class Plugin:
                     with open(os.path.join(work, "input", fname), "wb") as f:
                         shutil.copyfileobj(r, f)
             run.mode = "session" if heavy(job, self._s().get("FORGE_SESSION_TEMPLATES", "")) else "one-shot"
-            self._output(run, f"· workspace: {os.path.basename(work)} (slot {run.slot}) · Mystical {run.mode}\n")
+            run.account = self._account()["name"]
+            self._output(run, f"· workspace: {os.path.basename(work)} (slot {run.slot}) · Mystical {run.mode} · {run.account}\n")
 
             # 2) the run
             try:
@@ -350,6 +458,7 @@ class Plugin:
             with self._lock:
                 self.runs.pop(run.slot, None)
             shutil.rmtree(work, ignore_errors=True)
+            self._wake.set()                  # claim the next one now, not at the next tick
 
     def _run_once(self, prompt: str, workdir: str, model: str | None, permission_mode: str, hang: int) -> OneShot:
         """One claude -p in the workspace: tools on, no context pack, no MCP (skip_pack with a permission mode)."""
@@ -357,17 +466,19 @@ class Plugin:
         # Tagged like the bridge's own one-shots: the session scanner (bridge/native.py) would otherwise list
         # every run — comment-moderation alone is ~1,800 a day — as a session in the sidebar.
         text, sid, cost, is_error = runner.run_blocking(config.DASH_CHAT_ID, f"{native.INTERNAL_ONESHOT_TAG}\n{prompt}", cwd=workdir, timeout=hang, model=model,
-                                                        skip_pack=True, permission_mode=permission_mode)
+                                                        skip_pack=True, permission_mode=permission_mode, account_slot=self._account()["slot"],
+                                                        extra_args=["--no-session-persistence"])
         return OneShot(text or "", sid, cost, bool(is_error))
 
     def _start_session(self, prompt: str, workdir: str, model: str | None, permission_mode: str, allowed_tools: str, origin: str, hang: int):
-        from bridge import config, profiles, runner, store
+        from bridge import config, runner, store
         from bridge.browser import rel
         session = store.create_session(config.DASH_CHAT_ID, rel(workdir), session_id=uuid.uuid4().hex, origin=origin,
-                                       cwd=workdir, permission_mode=permission_mode, profile_id=profiles.claude_default(rel(workdir)))
+                                       cwd=workdir, permission_mode=permission_mode, profile_id=self._account()["profile"])
         if model:
             store.set_run_settings(session["id"], model=model)
         store.rename(session["id"], f"Forge · {origin.split(':', 1)[-1]}")
+        store.archive(session["id"])          # a slot workspace is not a project: keep it out of the sidebar
         extra = ["--allowedTools", allowed_tools] if allowed_tools else None
         return runner.start_streaming_job(config.DASH_CHAT_ID, prompt, [], project=workdir, model=model or None,
                                           permission_mode=permission_mode, session_id=session["id"], origin=origin,
@@ -450,13 +561,62 @@ class Plugin:
 
     def _remember(self, run: Run, status: str, why: str, cost) -> None:
         self.recent.insert(0, {"task": run.task_id, "label": run.label, "slot": run.slot, "mode": run.mode, "status": status, "why": why[:200] if why else "",
-                               "cost": cost, "session": run.session_id, "seconds": int(time.time() - run.started), "at": time.time()})
+                               "cost": cost, "session": run.session_id, "seconds": int(time.time() - run.started), "at": time.time(),
+                               "account": run.account})
         self.recent = self.recent[:20]
         try:
             with open(self._recent_path(), "w", encoding="utf-8") as f:
                 json.dump(self.recent, f)
         except OSError:
             pass
+        self._tally(run, status, cost)
+
+    # --- usage per account ---------------------------------------------------------------------
+    def _usage_path(self) -> str:
+        return os.path.join(self.ctx.data_dir, "usage.json")
+
+    def _load_usage(self) -> None:
+        try:
+            with open(self._usage_path(), encoding="utf-8") as f:
+                data = json.load(f)
+            self.usage = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            self.usage = {}
+
+    def _tally(self, run: Run, status: str, cost) -> None:
+        """Count one finished task against the login it ran on, under today's date."""
+        with self._lock:
+            day = self.usage.setdefault(run.account or "unknown", {}).setdefault(time.strftime("%Y-%m-%d"), {"runs": 0, "failed": 0, "cost": 0.0, "seconds": 0})
+            day["runs"] += 1
+            day["failed"] += 0 if status == "ok" else 1
+            day["cost"] = round(day["cost"] + float(cost or 0), 6)
+            day["seconds"] += int(time.time() - run.started)
+            try:
+                tmp = self._usage_path() + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self.usage, f)
+                os.replace(tmp, self._usage_path())
+            except OSError:
+                pass
+
+    def _usage_view(self) -> list[dict]:
+        """Per account: today, the last 7 days, and everything since the tally began."""
+        today = time.strftime("%Y-%m-%d")
+        week = {time.strftime("%Y-%m-%d", time.localtime(time.time() - d * 86400)) for d in range(7)}
+
+        def total(days: dict, keep) -> dict:
+            out = {"runs": 0, "failed": 0, "cost": 0.0, "seconds": 0}
+            for d, v in days.items():
+                if keep(d):
+                    for k in out:
+                        out[k] += v.get(k) or 0
+            out["cost"] = round(out["cost"], 4)
+            return out
+
+        rows = [{"name": name, "today": total(days, lambda d: d == today), "week": total(days, lambda d: d in week),
+                 "all": total(days, lambda d: True), "since": min(days) if days else None}
+                for name, days in self.usage.items()]
+        return sorted(rows, key=lambda r: -r["all"]["runs"])
 
     # --- routes, telegram, status --------------------------------------------------------------
     def _view(self) -> dict:
@@ -466,6 +626,7 @@ class Plugin:
             "online": self.online, "slots": self._slots(), "agentId": self._agent_id() if self.ctx else None,
             "running": [{"slot": r.slot, "task": r.task_id, "label": r.label, "state": r.state, "mode": r.mode, "session": r.session_id, "seconds": int(time.time() - r.started)} for r in sorted(self.runs.values(), key=lambda r: r.slot)],
             "lastClaimAt": self.last_claim_at, "lastBeatAt": self.last_beat_at, "error": self.last_error, "recent": self.recent,
+            "account": {k: v for k, v in self._account().items() if k != "slot"}, "usage": self._usage_view(),
         }
 
     def routes(self) -> dict:
@@ -473,7 +634,17 @@ class Plugin:
             ("GET", "/state"): lambda req: (self._view(), 200),
             ("POST", "/claim"): lambda req: ({"did": self.claim_once(), **self._view()}, 200),
             ("POST", "/pause"): self._r_pause,
+            ("POST", "/account"): self._r_account,
         }
+
+    def _r_account(self, req):
+        """Pick the profile Forge tasks run on; "" goes back to the bridge's default."""
+        from bridge import plugins_ext
+        pid = str(req["body"].get("profile") or "")
+        if pid and pid not in {o["id"] for o in self._account()["options"]}:
+            return {"error": "no such Claude profile"}, 400
+        plugins_ext.save_settings("orven-forge", {"FORGE_PROFILE": pid})
+        return self._view(), 200
 
     def _r_pause(self, req):
         from bridge import plugins_ext

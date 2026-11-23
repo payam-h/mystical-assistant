@@ -1,12 +1,13 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AgentTree } from "./AgentTree";
-import { useTreeWant } from "../../lib/multistore";
+import { useMultiOn, useTreeWant } from "../../lib/multistore";
 import { ProjectTile } from "../ui/ProjectTile";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { BellRing, FolderTree, History, Hourglass, Image as ImageIcon, ListFilter, PanelLeftOpen, Plus, Puzzle, Search } from "lucide-react";
+import { BellRing, FolderTree, Hand, History, Hourglass, Image as ImageIcon, ListFilter, PanelLeftOpen, Plus, Puzzle, Search } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { SessionBrief, SessionStatus } from "../../api";
+import type { NewProjectBody, NewProjectNote, SessionBrief, SessionStatus } from "../../api";
 import { api } from "../../api";
+import { NewProjectForm } from "./NewProjectForm";
 import { ago, projectName, projectTint } from "../../lib/surfaces";
 import type { ProjectTint } from "../../lib/surfaces";
 import { dayLabel, isJob, JOB_LABEL, jobGroup, jobLabel, JOBS_REL, jobTarget } from "../../lib/jobs";
@@ -24,6 +25,8 @@ import { DeviceTile } from "../DeviceRunPlate";
 import type { ProjectGroup } from "./ProjectsPanel";
 import { RivendellQueue } from "./RivendellQueue";
 import { NewSessionPop } from "./NewSessionPop";
+import { Spinner } from "../ui";
+import { keyAttrs, SHORTCUTS } from "../../lib/shortcuts";
 
 /** A prompt of yours that hasn't run yet, flagged on the session it belongs to:
  *  unsent text in the composer, a relevance check in flight, or a held card
@@ -60,19 +63,22 @@ interface Props {
   /** Start a typed session: the form's fields, already composed into a prompt. */
   onWorktreeSession: (rel: string, branch: string, create: boolean, parent?: string) => void;
   /** Scaffold a repo and open its first session on the given prompt. */
-  onCreateProject: (name: string, prompt: string) => void;
+  onCreateProject: (body: NewProjectBody) => Promise<NewProjectNote[] | null>;
   /** Folded to the rail: one tile per project you are working in. */
   folded?: boolean;
   onUnfold?: () => void;
   /** The workspace on screen (lib/workspaces): each keeps its own expanded projects. */
   workspace?: string;
+  /** Ticket and merge sessions by their super session: off the list, folded under that row. */
+  ticketKids?: Map<string, SessionBrief[]>;
 }
 
 type Mode = "attention" | "projects" | "plugins" | "recent";
 /** Which pieces of a row's provenance it prints. Independent, because the four
  *  presets this replaced could not express the obvious wants — a sidebar that
- *  names the project but not the branch was simply not on the menu. */
-type Detail = { proj: boolean; branch: boolean; wt: boolean };
+ *  names the project but not the branch was simply not on the menu. `agents`
+ *  is no fact on the row: it is the list under it (AgentTree). */
+type Detail = { proj: boolean; branch: boolean; wt: boolean; agents: boolean; tickets: boolean };
 // "recent" is most recent: the chat you prompt goes to the top of its project
 // and the project to the top of the list. It was newest-started for a while,
 // which held rows still but sank the chat you worked in under idle ones; the
@@ -91,20 +97,38 @@ const FIELDS: { k: keyof Detail; label: string; tip: string }[] = [
   { k: "proj", label: "project name", tip: "Name the project on every row" },
   { k: "branch", label: "branch", tip: "Print the branch on every row" },
   { k: "wt", label: "worktree", tip: "Mark rows working in a worktree rather than the main checkout" },
+  { k: "agents", label: "agents", tip: "List a session's agents under its row" },
+  { k: "tickets", label: "parts", tip: "List a session's parts under its row" },
 ];
 /** PROJECTS rows sit under a header that already names the project, so that tick
- *  is not offered there — the other two tabs mix projects and need it. */
-const fieldsFor = (mode: Mode) => (mode === "projects" ? FIELDS.filter((f) => f.k !== "proj") : FIELDS);
+ *  is not offered there — the other two tabs mix projects and need it. Agents is
+ *  offered only where a list can show: with multi-agent chats on, and never in
+ *  PLUGINS (its ⎇ is hidden, but a menu left open survives the tab switch). */
+const fieldsFor = (mode: Mode, multi: boolean) => FIELDS.filter((f) =>
+  !(f.k === "proj" && mode === "projects") && !(f.k === "agents" && (!multi || mode === "plugins")) && !(f.k === "tickets" && mode === "plugins"));
 /** Detail is per tab, because each tab shows a different slice: ATTENTION mixes
  *  every project into four lanes and can't be read without the project name,
  *  while PROJECTS rows would rather spend the width on the branch. RECENT is its
- *  own stream again. */
+ *  own stream again. Agents start on wherever a menu can tick them off: off, a
+ *  chat's helpers showed nowhere at all (2026-11-21). PLUGINS never lists them. */
 const DETAIL_DEFAULT: Record<Mode, Detail> = {
-  attention: { proj: true, branch: true, wt: true },
-  projects: { proj: false, branch: true, wt: true },
-  plugins: { proj: true, branch: true, wt: true },
-  recent: { proj: true, branch: true, wt: true },
+  attention: { proj: true, branch: true, wt: true, agents: true, tickets: false },
+  projects: { proj: false, branch: true, wt: true, agents: true, tickets: false },
+  plugins: { proj: true, branch: true, wt: true, agents: false, tickets: false },
+  recent: { proj: true, branch: true, wt: true, agents: true, tickets: false },
 };
+const DETAIL_KEY = "hud-sessions-fields-2";
+/** The first load under DETAIL_KEY: the ticks saved under the old key, except an
+ *  agents tick that is off. The old key saved every default at once, so an off
+ *  there is the old default, never a choice anyone can be shown to have made. */
+function seedDetail(): Record<Mode, Detail> {
+  let old: Partial<Record<Mode, Partial<Detail>>> = {};
+  try { old = JSON.parse(localStorage.getItem("hud-sessions-fields") || "{}") ?? {}; } catch { /* ignore */ }
+  const out = {} as Record<Mode, Detail>;
+  for (const m of Object.keys(DETAIL_DEFAULT) as Mode[])
+    out[m] = { ...DETAIL_DEFAULT[m], ...old[m], agents: !!old[m]?.agents || DETAIL_DEFAULT[m].agents };
+  return out;
+}
 
 /** Rivendell jobs wear the PLUGINS lane's purple, apart from your own projects'. */
 const JOB_TINT: ProjectTint = {
@@ -177,7 +201,7 @@ const LANES: { k: LaneKey; label: string; tint: string }[] = [
 // it can resume; a ring is passive. Ring colour still tells idle (dim) from
 // live-elsewhere (info) — the lane collapses to five, the dot keeps the detail.
 // Parked wears info, not warn: nothing on it is yours to answer.
-const SV: Record<string, { lane: LaneKey; c: string; fill: boolean; t: string }> = {
+const SV: Record<string, StateView> = {
   working: { lane: "work", c: "var(--ok)", fill: true, t: "working now" },
   checking: { lane: "work", c: "var(--ok)", fill: true, t: "checking your prompt against this session" },
   awaiting: { lane: "ask", c: "var(--warn)", fill: true, t: "waiting on your answer" },
@@ -185,13 +209,18 @@ const SV: Record<string, { lane: LaneKey; c: string; fill: boolean; t: string }>
   live: { lane: "idle", c: "var(--info)", fill: false, t: "live in another window" },
   parked: { lane: "parked", c: "var(--info)", fill: true, t: "parked — resumes on its own" },
   waiting: { lane: "wait", c: "var(--purple)", fill: true, t: "waiting on another session — wakes when it finishes" },
+  // Answered, with background tasks still running in its process: the turn is
+  // done, so it rests (DONE when unopened); line 2's tag says what still runs.
+  background: { lane: "idle", c: "var(--txl)", fill: false, t: "answered — background tasks still running" },
+  // Stopped on credits_required: no reset fixes it, so it is yours, not parked.
+  credits: { lane: "ask", c: "var(--warn)", fill: true, t: "stopped — its login needs extra-usage credits", chip: "Credits" },
   idle: { lane: "idle", c: "var(--txl)", fill: false, t: "idle" },
 };
 const SV_DONE = { lane: "done" as LaneKey, c: "var(--acc)", fill: false, t: "finished a turn — not opened yet" };
 
-const BUSY_NOW = ["working", "awaiting", "asking", "checking", "parked", "waiting"];
+const BUSY_NOW = ["working", "awaiting", "asking", "checking", "parked", "waiting", "credits"];
 
-type StateView = { lane: LaneKey; c: string; fill: boolean; t: string };
+type StateView = { lane: LaneKey; c: string; fill: boolean; t: string; chip?: string }; // chip: an ask's verb other than Answer
 
 /** A state's word where there is room for one (the composer's wait pill). */
 export const LANE_WORD: Record<LaneKey, string> = {
@@ -250,9 +279,10 @@ const ATTN: { k: LaneKey; c: string; say: (n: number) => string }[] = [
 ];
 
 function SessionRow({
-  s, i, on, v, st, flag, wait, shots, branch, pinned, showDot, showProj, detail, pulse, onPin, onAttach,
+  s, i, on, v, st, flag, wait, shots, branch, pinned, showDot, showProj, detail, pulse, onPin, onAttach, tk,
 }: {
   s: SessionBrief;
+  tk?: { asks: number; done: number; total: number }; // a super session's tickets
   st?: SessionStatus;
   wait?: WaitLine;
   shots: number;     // its pictures you haven't opened (lib/seenshots)
@@ -301,11 +331,15 @@ function SessionRow({
   const branchShown = !job && !team && detail.branch && !!branch;
   const wtShown = !job && !team && detail.wt && inWorktree;
   const one = !dev && !tiles && !detail.branch && !detail.wt;
-  // The state where the age used to be: how long a turn has run or waited,
-  // the two states that are yours to act on, the age at rest (since you asked).
+  // The state where the age used to be: how long a turn has run or waited
+  // (the CLI's retry in its place while it retries, ↪ before it while Claude
+  // Code carries on a turn a restart cut), the two states that are yours to act
+  // on, the age at rest (since you asked).
   const since = st?.since;
-  const edge = v.lane === "work" ? <span style={{ color: "var(--ok)" }}>{since ? lasted(now - since) : "now"}</span>
-    : v.lane === "ask" ? edgeChip("var(--warn)", "Answer")
+  const edge = v.lane === "work" ? (st?.retry
+      ? <span style={{ color: "var(--warn)" }}>↻ retry {st.retry.attempt}{st.retry.max ? `/${st.retry.max}` : ""}</span>
+      : <span style={{ color: "var(--ok)" }}>{st?.resumed ? "↪ " : ""}{since ? lasted(now - since) : "now"}</span>)
+    : v.lane === "ask" ? edgeChip("var(--warn)", v.chip ?? "Answer")
     : v.lane === "done" ? edgeChip("var(--acc)", "New")
     : v.lane === "wait" ? (
       <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: wait?.needs ? "var(--warn)" : "var(--purple)" }}>
@@ -323,13 +357,24 @@ function SessionRow({
     <span
       role="img" aria-label={`${shots} new picture${shots === 1 ? "" : "s"}`}
       title={`${shots} new picture${shots === 1 ? "" : "s"} you haven't opened`}
-      style={{ ...(!one ? { gridRow: 2, gridColumn: -2, justifySelf: "end", margin: "-4px 0" } : { flex: "none" }),
-               display: "inline-flex", alignItems: "center", gap: 3, height: 15, padding: "0 5px 0 4px", borderRadius: 4,
+      style={{ display: "inline-flex", alignItems: "center", gap: 3, height: 15, padding: "0 5px 0 4px", borderRadius: 4,
                background: "color-mix(in srgb, var(--txl) 16%, transparent)", color: "var(--txm)", fontSize: "var(--t85)",
                fontWeight: 700, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}
     >
       <ImageIcon size={10} strokeWidth={2.4} aria-hidden style={{ flex: "none" }} />{shots > 99 ? "99+" : shots}
     </span>
+  );
+  // Background tasks an answered turn left running, in the same cell: the row
+  // rests in DONE or IDLE, and this says what still runs in its process.
+  const bgN = st?.state === "background" ? st.bg?.length ?? 0 : 0;
+  const bgTag = bgN > 0 && (
+    <span className="sess-bg" title={`answered — ${bgN} background task${bgN === 1 ? "" : "s"} still running`}>
+      <Spinner className="h-[9px] w-[9px] border-[1.5px] opacity-100" />{bgN} bg
+    </span>
+  );
+  const tags = (shotTag || bgTag) && (
+    <span style={{ ...(!one ? { gridRow: 2, gridColumn: -2, justifySelf: "end", margin: "-4px 0" } : { flex: "none" }),
+                   display: "inline-flex", alignItems: "center", gap: 6 }}>{bgTag}{shotTag}</span>
   );
   return (
     <div
@@ -415,7 +460,7 @@ function SessionRow({
         )}
       </div>
       {/* Before the state column, which theme rules know as `div:last-child`. */}
-      {!one && shotTag}
+      {!one && tags}
       {/* The pin leads: a row's first span is its title to the theme rules
           (`.sessrow > div > span:first-child`), and nothing here is one. */}
       <div style={{ display: "flex", alignItems: "center", gap: 7, height: 18, fontSize: "var(--t10)", fontWeight: 600, lineHeight: 1,
@@ -441,7 +486,7 @@ function SessionRow({
         )}
         {JobIcon && <span title={jobLabel(s.job).toLowerCase()} style={{ display: "inline-flex", color: "var(--purple)" }}><JobIcon size={12} strokeWidth={2.1} aria-hidden /></span>}
         {team && <Avatar id={team.from.id || team.from.name} name={team.from.name} size={16} />}
-        {one && shotTag}
+        {one && tags}
         {age ? (
           <span style={{ color: age.tone === "run" ? "var(--info)" : pulse ? "var(--ok)" : "var(--txl)" }}>
             {age.tone === "ok" || age.tone === "bad"
@@ -449,8 +494,41 @@ function SessionRow({
               ? <><span style={{ color: age.tone === "ok" ? "var(--ok)" : "var(--err)" }}>{age.text.slice(0, 1)}</span>{age.text.slice(1)}</>
               : age.text}
           </span>
-        ) : edge}
+        ) : <>{tk && <TicketPips tk={tk} />}{edge}</>}
       </div>
+    </div>
+  );
+}
+
+/** A super session's tickets at its row's edge: how many ask you, how many are done. */
+function TicketPips({ tk }: { tk: { asks: number; done: number; total: number } }) {
+  return (
+    <span className="tk-pips" title={`${tk.done} of ${tk.total} parts done${tk.asks ? `, ${tk.asks} asking you` : ""}`}>
+      {tk.asks > 0 && <span className="w"><Hand size={9} strokeWidth={2.4} aria-hidden />{tk.asks}</span>}
+      <span>{tk.done}/{tk.total}</span>
+    </span>
+  );
+}
+
+/** A super session's ticket sessions under its row (ROW DETAILS ▸ tickets), one line each. */
+function TicketKids({ kids, views, selectedId, onOpen }: {
+  kids: SessionBrief[]; views: (s: SessionBrief) => StateView; selectedId: string | null; onOpen: (s: SessionBrief) => void;
+}) {
+  const rows = [...kids].sort((a, b) => (a.title ?? "").localeCompare(b.title ?? ""));
+  return (
+    <div className="tk-kids" onClick={(e) => e.stopPropagation()}>
+      {rows.map((k) => {
+        const v = views(k);
+        const m = /^#(\d+)\s+(.*)$/.exec(k.title ?? "");
+        return (
+          <button key={k.id} type="button" className="tk-kid" data-on={k.id === selectedId || undefined} onClick={() => onOpen(k)} title={`${k.title ?? ""}: ${v.t}`}>
+            <i style={{ background: v.fill ? v.c : "transparent", boxShadow: v.fill ? undefined : `inset 0 0 0 1.5px ${v.c}` }} />
+            <span className="no">{m ? `#${m[1]}` : k.origin === "ticket-merge" ? "⇢" : "·"}</span>
+            <span className="t" style={{ color: v.lane === "ask" ? "var(--warn)" : undefined }}>{m ? m[2] : k.title || "merge"}</span>
+            <span className="tm">{v.lane === "work" ? "" : ago(k.updated)}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -562,7 +640,8 @@ type LaneItem =
   | { k: "day"; label: string };
 
 export function SessionsPanel(props: Props) {
-  // AgentTree's poll: the chats the last render drew. A ref filled while rendering,
+  // AgentTree's poll: the chats the last render drew a list under (none while the
+  // agents tick is off). A ref filled while rendering,
   // then settled after the commit, because the rows are built past every hook.
   const drawn = useRef<string[]>([]);
   drawn.current = [];
@@ -582,8 +661,6 @@ export function SessionsPanel(props: Props) {
   const [nsAt, setNsAt] = useState<string | null>(null);
   // New-project form — the PROJECTS mode's counterpart to NEW SESSION.
   const [npOpen, setNpOpen] = useState(false);
-  const [npName, setNpName] = useState("");
-  const [npPrompt, setNpPrompt] = useState("");
 
   // Browser state — mode + project order remembered across reloads.
   const plugins = useIntegrations();
@@ -601,12 +678,15 @@ export function SessionsPanel(props: Props) {
   // machine you work on — one repo on one branch wants less than fifteen.
   // ponytail: new key per shape change, no migration — useStickyObj merges one
   // level deep, so a stored preset string would survive as a Detail that has no
-  // fields and silently print nothing. Three ticks are cheaper to re-pick.
-  const [detailPrefs, setDetailPrefs] = useStickyObj<Record<Mode, Detail>>("hud-sessions-fields", DETAIL_DEFAULT);
+  // fields and silently print nothing. Ticks are cheaper to re-pick. A new tick
+  // is no shape change: a saved Detail without it takes its default below.
+  const [detailSeed] = useState(seedDetail);
+  const [detailPrefs, setDetailPrefs] = useStickyObj<Record<Mode, Detail>>(DETAIL_KEY, detailSeed);
   const detail = { ...DETAIL_DEFAULT[mode], ...detailPrefs[mode] };
   const toggleField = (k: keyof Detail) =>
     setDetailPrefs((p) => ({ ...p, [mode]: { ...detail, [k]: !detail[k] } }));
-  const shownFields = fieldsFor(mode).filter((f) => detail[f.k]).map((f) => f.label).join(" + ");
+  const multiOn = useMultiOn();
+  const shownFields = fieldsFor(mode, multiOn).filter((f) => detail[f.k]).map((f) => f.label).join(" + ");
   const [detailMenu, setDetailMenu] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   // ATTENTION's idle lane is the long tail — folded to four rows until asked.
@@ -732,6 +812,29 @@ export function SessionsPanel(props: Props) {
   // One state resolution per session per render — lanes, dots and counts all
   // read this map so they can never disagree.
   const views = new Map(sorted.map((s) => [s.id, resolve(status.get(s.id), done.has(s.id), flags.get(s.id))]));
+  // A super session works while any of its tickets does, and wants you when one asks, or
+  // while its set waits for Approve & build: that set has no ticket sessions yet. A ticket
+  // of yours has no session either, so it lifts the row by itself.
+  const tkOf = new Map<string, { asks: number; done: number; total: number }>();
+  for (const s of sorted) {
+    const kids = props.ticketKids?.get(s.id);
+    if (s.tickets?.status === "approve") {
+      const n = s.tickets.total;
+      if (views.get(s.id)?.lane !== "ask") views.set(s.id, { ...SV.asking, t: `${n} part${n === 1 ? " waits" : "s wait"} for your approval`, chip: "Approve" });
+      tkOf.set(s.id, { asks: 0, done: s.tickets.done, total: n });
+      continue;
+    }
+    const yours = s.tickets?.yours ?? [];
+    if (yours.length && views.get(s.id)?.lane !== "ask")
+      views.set(s.id, { ...SV.asking, t: `#${yours.join(" and #")} ${yours.length === 1 ? "is" : "are"} yours`, chip: "Go" });
+    if (!kids?.length) continue;
+    const kv = kids.map((k) => resolve(status.get(k.id), false, flags.get(k.id)));
+    const own = views.get(s.id) ?? SV.idle;
+    const asks = kv.filter((v) => v.lane === "ask").length;
+    if (asks && own.lane !== "ask") views.set(s.id, { ...SV.asking, t: `${asks} part${asks === 1 ? "" : "s"} asking you` });
+    else if (own.lane !== "ask" && own.lane !== "work" && kv.some((v) => v.lane === "work")) views.set(s.id, { ...SV.working, t: "its parts are working" });
+    tkOf.set(s.id, { asks, done: s.tickets?.done ?? 0, total: s.tickets?.total ?? kids.length });
+  }
   const laneOf = (s: SessionBrief) => views.get(s.id)?.lane ?? "idle";
   // The open chat (a new one is empty until prompted), a pin, a draft and a
   // question waiting on you list whatever the filter says.
@@ -876,14 +979,18 @@ export function SessionsPanel(props: Props) {
 
   // A WAITING row's hourglass turns amber when the session it waits on waits on you.
   const waitOf = (s: SessionBrief): WaitLine | undefined => {
-    const on = status.get(s.id)?.state === "waiting" ? status.get(s.id)?.on : undefined;
-    if (!on) return undefined;
+    const st = status.get(s.id);
+    const on = st?.state === "waiting" ? st.on : undefined;
+    // Waiting on its own helpers (no `on`): the bridge says whether one of them waits on you.
+    if (!on) return st?.state === "waiting" && st.needs ? { needs: true } : undefined;
     const t = views.get(on) ?? resolve(status.get(on), done.has(on), flags.get(on));
     return { needs: t.lane === "ask" };
   };
 
   const rowFor = (s: SessionBrief, showDot: boolean, showProj: boolean, i?: number) => {
-    drawn.current.push(s.id);
+    // AGENTS unticked: no list under a row and no poll for one, a helper that
+    // waits on you included (hidden means hidden).
+    if (detail.agents) drawn.current.push(s.id);
     return (
     <Fragment key={s.id}>
     <SessionRow
@@ -893,9 +1000,13 @@ export function SessionsPanel(props: Props) {
       pulse={(status.get(s.id)?.state ?? "idle") === "working"}
       branch={branchFor(s)}
       pinned={pins.has(s.id)} onPin={() => onTogglePin(s.id)}
-      onAttach={() => onSelectSession(s)}
+      onAttach={() => onSelectSession(s)} tk={tkOf.get(s.id)}
     />
-    <AgentTree chatId={s.id} selectedId={selectedSessionId} />
+    {detail.agents && <AgentTree chatId={s.id} selectedId={selectedSessionId} />}
+    {detail.tickets && props.ticketKids?.get(s.id) && (
+      <TicketKids kids={props.ticketKids.get(s.id)!} selectedId={selectedSessionId} onOpen={onSelectSession}
+                  views={(k) => resolve(status.get(k.id), done.has(k.id), flags.get(k.id))} />
+    )}
     </Fragment>
     );
   };
@@ -952,53 +1063,8 @@ export function SessionsPanel(props: Props) {
     setDragRel(null); setOverRel(null);
   }
 
-  // The new-project form: a repo name and the first thing to build in it, in the
-  // info tint — a project is not a session. NEW SESSION's popover opens it.
-  const npForm = (
-    <div style={{ border: "1px solid color-mix(in srgb, var(--info) 30%, transparent)", background: "linear-gradient(160deg,color-mix(in srgb, var(--info) 7%, transparent),color-mix(in srgb, var(--panel) 40%, transparent))", padding: 12, marginBottom: 11, animation: "mslide .22s ease both" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 11 }}>
-        <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--info)", flex: "none" }} />
-        <span style={{ fontSize: "var(--t9)", letterSpacing: 1.5, color: "var(--info-hi)" }}>NEW PROJECT</span>
-        <span style={{ flex: 1 }} />
-        <button
-          onClick={() => setNpOpen(false)} title="close" aria-label="close"
-          onMouseEnter={() => setHov("npclose")} onMouseLeave={() => setHov("")}
-          style={{ appearance: "none", cursor: "pointer", flex: "none", width: 24, height: 24, padding: 0, borderRadius: 7,
-                   display: "grid", placeItems: "center", border: 0,
-                   background: hov === "npclose" ? "color-mix(in srgb, var(--info) 14%, transparent)" : "transparent",
-                   color: hov === "npclose" ? "var(--info-b)" : "var(--txd)", transition: "background .15s ease, color .15s ease" }}
-        >
-          <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true">
-            <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-        </button>
-      </div>
-      <input
-        value={npName} onChange={(e) => setNpName(e.target.value)} placeholder="project-name"
-        style={{ width: "100%", boxSizing: "border-box", background: "color-mix(in srgb, var(--panel2) 60%, transparent)", border: "1px solid color-mix(in srgb, var(--info) 25%, transparent)", outline: "none", color: "var(--txb)", fontFamily: "'JetBrains Mono',monospace", fontSize: "var(--t11)", padding: "6px 9px" }} />
-      <textarea
-        value={npPrompt} onChange={(e) => setNpPrompt(e.target.value)} placeholder="starting prompt — what should Claude build first?"
-        style={{ width: "100%", boxSizing: "border-box", minHeight: 60, resize: "vertical", marginTop: 8, background: "color-mix(in srgb, var(--panel2) 60%, transparent)", border: "1px solid color-mix(in srgb, var(--acc) 18%, transparent)", outline: "none", color: "var(--txb)", fontFamily: "inherit", fontSize: "var(--t12)", lineHeight: 1.5, padding: "8px 9px" }} />
-      <div style={{ display: "flex", gap: 7, marginTop: 9 }}>
-        <button
-          onClick={() => {
-            const name = npName.trim(), prompt = npPrompt.trim();
-            if (!name || !prompt) return;
-            onCreateProject(name, prompt);
-            setNpName(""); setNpPrompt(""); setNpOpen(false);
-          }}
-          disabled={!npName.trim() || !npPrompt.trim()}
-          onMouseEnter={() => setHov("npgo")} onMouseLeave={() => setHov("")}
-          style={{ flex: 1, appearance: "none", cursor: npName.trim() && npPrompt.trim() ? "pointer" : "not-allowed", opacity: npName.trim() && npPrompt.trim() ? 1 : 0.45, border: "1px solid var(--info)", background: hov === "npgo" ? "color-mix(in srgb, var(--info) 26%, transparent)" : "color-mix(in srgb, var(--info) 16%, transparent)", color: "var(--info-b)", fontFamily: "inherit", fontSize: "var(--t10)", letterSpacing: 1.5, padding: 9, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
-        ><span style={{ color: "var(--info)" }}>▸</span>CREATE & START</button>
-        <button
-          onClick={() => setNpOpen(false)}
-          onMouseEnter={() => setHov("npcancel")} onMouseLeave={() => setHov("")}
-          style={{ appearance: "none", cursor: "pointer", border: "1px solid color-mix(in srgb, var(--acc) 20%, transparent)", background: hov === "npcancel" ? "color-mix(in srgb, var(--acc) 6%, transparent)" : "transparent", color: "var(--txd)", fontFamily: "inherit", fontSize: "var(--t10)", letterSpacing: 1.5, padding: "9px 12px" }}
-        >CANCEL</button>
-      </div>
-    </div>
-  );
+  // NEW SESSION's popover opens it.
+  const npForm = <NewProjectForm onCreate={onCreateProject} onClose={() => setNpOpen(false)} />;
 
   // The PLUGINS tab exists while Rivendell is installed, and `mode` can't be
   // "plugins" otherwise, so the pill never stands on a tab that isn't rendered.
@@ -1079,11 +1145,11 @@ export function SessionsPanel(props: Props) {
     const flyRest = Math.max(0, flyRows.length - flyVis.length);
     return (
       <div ref={railRef} className="srail" onPointerEnter={hold} onPointerLeave={() => setHeld(null)}>
-        <button className="srail-btn" aria-label="Search sessions" title="Search sessions  /"
+        <button className="srail-btn" aria-label="Search sessions" title="Search sessions" {...keyAttrs(SHORTCUTS.search.keys)}
                 onClick={() => { onUnfold?.(); requestAnimationFrame(() => searchRef.current?.focus()); }}>
           <Search size={18} strokeWidth={2} aria-hidden />
         </button>
-        <button className="srail-btn" data-acc aria-label="New session" title="New session"
+        <button className="srail-btn" data-acc aria-label="New session" title="New session" {...keyAttrs(SHORTCUTS.newSession.keys)}
                 onClick={() => { onUnfold?.(); setNsAt(""); }}>
           <Plus size={18} strokeWidth={2} aria-hidden />
         </button>
@@ -1106,7 +1172,7 @@ export function SessionsPanel(props: Props) {
           })}
         </div>
         <span className="srail-sep" />
-        <button className="srail-btn" aria-label="Unfold the sidebar" title="Unfold the sidebar" onClick={onUnfold}>
+        <button className="srail-btn" aria-label="Unfold the sidebar" title="Unfold the sidebar" {...keyAttrs(SHORTCUTS.sidebar.keys)} onClick={onUnfold}>
           <PanelLeftOpen size={18} strokeWidth={2} aria-hidden />
         </button>
         {flyG && fly && (
@@ -1208,7 +1274,7 @@ export function SessionsPanel(props: Props) {
               style={{ flex: 1, minWidth: 0, height: "100%", border: 0, outline: "none", background: "transparent", fontFamily: "'JetBrains Mono',monospace", fontSize: "var(--t115)", color: "var(--txb)" }}
             />
             <span title="Press / to jump here" style={{ flex: "none", fontSize: "var(--t9)", color: "var(--txl)" }}>/</span>
-            {/* Job rows print no project, branch or worktree, so PLUGINS has no row details to pick,
+            {/* Job rows print no project, branch or worktree and never list agents, so PLUGINS has no row details to pick,
                 and it lists every job and share whatever the filter says. */}
             {mode !== "plugins" && <span style={{ flex: "none", width: 1, height: 14, background: "color-mix(in srgb, var(--acc) 10%, transparent)" }} />}
             {mode !== "plugins" && (
@@ -1289,11 +1355,11 @@ export function SessionsPanel(props: Props) {
                               border: "1px solid color-mix(in srgb, var(--acc) 28%, transparent)", background: "var(--panel)",
                               boxShadow: "0 8px 22px var(--shadow-pop)", padding: 3, animation: "mslide .16s ease both" }}>
                   <div style={{ padding: "5px 8px 4px", fontSize: "var(--t8)", letterSpacing: ".18em", color: "var(--txl)" }}>ROW DETAILS · {mode.toUpperCase()}</div>
-                  {fieldsFor(mode).map((f) => {
+                  {fieldsFor(mode, multiOn).map((f) => {
                     const on = detail[f.k];
                     return (
                       // Ticks, not a preset list — the menu stays open so you can
-                      // set all three against the rows changing behind it.
+                      // set them all against the rows changing behind it.
                       <button
                         key={f.k} onClick={() => toggleField(f.k)} title={f.tip}
                         role="menuitemcheckbox" aria-checked={on}
@@ -1320,7 +1386,7 @@ export function SessionsPanel(props: Props) {
           {mode !== "plugins" && (
             <button
               className="sess-search sess-plus" onClick={() => toggleNs("")} aria-label="New session" aria-haspopup="dialog" aria-expanded={nsAt === ""}
-              data-ns-anchor title="New session — in a project's checkout or a worktree"
+              data-ns-anchor title="New session — in a project's checkout or a worktree" {...keyAttrs(SHORTCUTS.newSession.keys)}
               style={{ flex: "none", height: 38, aspectRatio: "1", marginTop: 11, padding: 0, display: "grid", placeItems: "center",
                        border: 0, borderBottom: "1px solid color-mix(in srgb, var(--acc) 9%, transparent)", cursor: "pointer", color: "var(--acc)" }}
             >{/* open, the + turns into the × that shuts it */}
@@ -1414,6 +1480,13 @@ export function SessionsPanel(props: Props) {
                     {/* A label, not a destination — a tier under the session titles so they read first. */}
                     <span style={{ flex: "none", maxWidth: 210, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                                    fontSize: "var(--t115)", letterSpacing: ".06em", color: isShut ? "var(--txd)" : "var(--txm)" }}>{g.name}</span>
+                    {g.missing && (
+                      <span className="gone-chip" title={`${g.rel} isn't there any more (moved, renamed or deleted). Right-click to move its sessions to one of your projects.`}
+                        style={{ flex: "none", padding: "1px 5px", borderRadius: 4, fontFamily: "var(--mono)", fontSize: "var(--t8)",
+                                 letterSpacing: 0.6, color: "var(--warn)", border: "1px solid color-mix(in srgb, var(--warn) 40%, transparent)" }}>
+                        FOLDER GONE
+                      </span>
+                    )}
                     <span style={{ flex: 1, minWidth: 6 }} />
                     {/* shut, its rows can't say what they're doing; New's open form owns the spot */}
                     {isShut && !actOn && stateDots(n)}

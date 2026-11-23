@@ -15,13 +15,15 @@ allow-list. We hard-assign (not setdefault) so a shell value can never leak in.
 import os  # noqa: E402
 os.environ.setdefault("MYSTICAL_PLUGINS_BUNDLED", "0")
 # --- /fork ---
-
-
+import ipaddress  # noqa: E402
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
+import threading
+from urllib.error import URLError
 
 import pytest
 
@@ -43,10 +45,16 @@ os.environ["TELEGRAM_BOT_TOKEN"] = "12345:TESTTOKEN"
 os.environ["ALLOWED_CHAT_IDS"] = "555"
 os.environ["DASH_TOKEN"] = "test-dash-token"     # non-empty → the CSRF gate is ON
 os.environ["BRIDGE_DB"] = os.path.join(tempfile.mkdtemp(), "bridge-test.db")
+# The UX knowledge base (bridge/ux_mcp.py) lives in ~/.mystical/ux; no test may write there.
+os.environ["MYSTICAL_UX_DIR"] = tempfile.mkdtemp()
 # The MCP allowlist seeds default_disabled_tools(); the bridge exports .env into
 # the shells it hosts, so an unpinned value flips that default under the very
 # sessions that run this suite (tests patch config.MCP_SERVERS when they want one).
 os.environ["MCP_SERVERS"] = ""
+# TICKETS starts ticket sessions by itself; a developer's .env turning it on must not
+# reach the suite, which switches it per test (aifeatures.enabled).
+os.environ["TICKET_RUNS"] = "0"
+os.environ["TICKET_APPROVE"] = "0"
 # Hard-pin a canonical project root before config freezes it, so within_base()
 # is deterministic suite-wide (config.BASE_PATH is read once, at first import).
 # Tests that assert on containment should build fixtures under config.BASE_PATH.
@@ -69,6 +77,31 @@ os.environ["RULES_FILE"] = os.path.join(tempfile.mkdtemp(), "rules.json")
 # fails fast with "`claude` not found" instead of running the real CLI.
 # toolsets._fill catches the OSError and returns [].
 os.environ["CLAUDE_BIN"] = os.path.join(tempfile.mkdtemp(), "no-real-claude")
+
+# Tests stay on this machine. Two Rivendell tests once called the real Telegram,
+# and on a network that dropped its IPv4 (2026-11-06) every full run sat in
+# SYN_SENT until killed. A connect to anything but loopback now fails at once,
+# and the test it happened in fails too, naming the host (_offline below).
+# shortcut: a thread a test leaves behind is blamed on the test running when it
+# connects (the message names the thread); track threads per test if that misleads.
+_left: list = []
+_connect = socket.socket.connect
+
+
+def _stay_local(sock, address):
+    host = address[0] if isinstance(address, tuple) else None      # AF_UNIX: a path
+    try:
+        local = host is None or host in ("localhost", "0.0.0.0", "::") or ipaddress.ip_address(host).is_loopback
+    except ValueError:                                              # a name to resolve
+        local = False
+    if not local:
+        who = threading.current_thread()
+        _left.append(f"{host}:{address[1]}" + ("" if who is threading.main_thread() else f" from thread {who.name}"))
+        raise ConnectionRefusedError(f"tests stay off the network: {host}:{address[1]}")
+    return _connect(sock, address)
+
+
+socket.socket.connect = _stay_local
 
 # bridge/credentials.py decides KEYCHAIN from sys.platform at import, so on a Mac
 # every test that touches a login ran the real `security` against the
@@ -102,10 +135,30 @@ acp_agents.ACCOUNTS_FILE = os.path.join(_acp_tmp, "agent-accounts.json")
 acp_agents.OPTIONS_FILE = os.path.join(_acp_tmp, "acp-options.json")
 acp_agents.HOMES = os.path.join(_acp_tmp, "agent-homes")
 
+# The Bot API never answers a test: the token above is fake, and the "waiting on
+# you" ping every question or approval card sends went to the real Telegram (13
+# tests on 2026-11-06). Set once and never undone, so a thread a test leaves
+# behind can't reach it either; tests that check what goes out patch urlopen.
+from bridge import telegram  # noqa: E402
+
+
+def _no_bot_api(*a, **k):
+    raise URLError("tests never reach the Bot API")
+
+
+telegram.urlopen = _no_bot_api
+
 # A profiles.json one test leaves behind would bind every later test's new
 # sessions to its first profile (profiles.default_profile), so each test gets
 # an empty list and no picked default.
 from bridge import profiles, store  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _offline():
+    _left.clear()
+    yield
+    assert not _left, f"this test reached the network ({', '.join(_left)}): stub the call"
 
 
 @pytest.fixture(autouse=True)
@@ -126,6 +179,17 @@ def _plugins_installed(monkeypatch, tmp_path):
     testing their features; test_integrations.py starts from none."""
     monkeypatch.setattr(integrations, "_path", lambda: str(tmp_path / "conftest-plugins.json"))
     monkeypatch.setattr(integrations, "_cache", dict.fromkeys(("rivendell", "design"), True))
+
+
+from bridge import flowsettings  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_flow_settings(monkeypatch, tmp_path):
+    """Every test's flow settings seed afresh from the switches as that test set them
+    (the engine and the scheduler read a flow's NEXT and TICKETS, seeded once from them)."""
+    monkeypatch.setattr(flowsettings, "_file", lambda: str(tmp_path / "conftest-flow_settings.json"))
+    monkeypatch.setattr(flowsettings, "_cache", {})
 
 
 # An empty selection is not a failure. pytest counts session.testscollected AFTER

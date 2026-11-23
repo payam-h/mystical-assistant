@@ -65,6 +65,14 @@ def natural_end(job) -> tuple[bool, str]:
     return True, ""
 
 
+def hit_limit(job, why: str) -> bool:
+    """Did this run die on a Claude usage limit ("You've reached your Fable limit…")? The reason
+    natural_end gives is often just "status error"; the limit text is in what the run printed."""
+    from bridge import limits
+    said = [why, getattr(job, "result", None), getattr(job, "error_msg", None), *(getattr(job, "texts", None) or [])[-3:]]
+    return any(limits.is_limit_error(str(t)) for t in said if t)
+
+
 def prompt_with_fixes(prompt: str, fixes) -> str:
     """The Mac app's framing: resolved fixes first, so the job does not re-report them."""
     if not fixes:
@@ -100,6 +108,7 @@ class Plugin:
         self.http: Callable = http
         self.gate_token: Callable[[bool], str | None] | None = None   # (refresh) -> token; injectable
         self.start_run: Callable | None = None
+        self.plan_fallbacks: Callable | None = None   # (job_obj, model) -> [{label, account_slot?|model_once?}]
         self.wait_job: Callable | None = None
 
     # --- lifecycle -------------------------------------------------------------------------
@@ -237,13 +246,36 @@ class Plugin:
                 max_min = 120
             prompt = prompt_with_fixes(str(job.get("prompt") or ""), job.get("fixes"))
             self._output(cur, f"· Mystical session in {cwd}\n")
-            job_obj = (self.start_run or self._start_session)(str(job.get("id") or cur.run_id), cur.name, prompt, cwd,
-                                                              str(job.get("model") or "") or None, str(job.get("permissionMode") or "bypassPermissions"), max_min * 60)
+            start = self.start_run or self._start_session
+            jid, model, pm = str(job.get("id") or cur.run_id), str(job.get("model") or "") or None, str(job.get("permissionMode") or "bypassPermissions")
+            job_obj = start(jid, cur.name, prompt, cwd, model, pm, max_min * 60)
             if job_obj is None:
                 raise RuntimeError("could not start a session (busy)")
             cur.session_id = getattr(job_obj, "store_session_id", None)
             (self.wait_job or self._wait)(job_obj, cur, max_min * 60)
             ok, why = natural_end(job_obj)
+            # A usage limit is not the job's fault and waiting a whole interval does not help: nine of
+            # thirty-four runs in a month died in the first second on "You've reached your Fable limit"
+            # (2026-11). Try the same run on another login with room, then on the fallback model.
+            if not ok and hit_limit(job_obj, why):
+                for fb in (self.plan_fallbacks or self._fallbacks)(job_obj, model):
+                    self._output(cur, f"\n· usage limit hit — retrying on {fb['label']}\n")
+                    self._unpark(cur.session_id)
+                    again = start(jid, cur.name, prompt, cwd, model, pm, max_min * 60,
+                                  **{k: fb[k] for k in ("account_slot", "model_once") if fb.get(k)})
+                    if again is None:      # the session is busy: Mystical's own fallback took it, and we cannot follow that turn
+                        why = "usage limit hit; the session was taken over before the retry could start"
+                        break
+                    job_obj = again
+                    (self.wait_job or self._wait)(job_obj, cur, max_min * 60)
+                    ok, why = natural_end(job_obj)
+                    if ok or not hit_limit(job_obj, why):
+                        break
+                if not ok and hit_limit(job_obj, why):
+                    why = "usage limit on every login and model tried — " + (why or "no room left")
+                # Mystical parks a limit-killed session and resumes it at the reset. Orven schedules the
+                # retry itself, so that resume would run the job a second time with nobody listening.
+                self._unpark(cur.session_id)
             summary = (getattr(job_obj, "result", None) or "\n".join(getattr(job_obj, "texts", []) or []))[:59000]
             finish("ok" if ok else "failed", exitCode=0 if ok else -1, sessionId=getattr(job_obj, "session_id", None),
                    costUsd=getattr(job_obj, "cost", None), summary=summary or None, error=None if ok else why)
@@ -256,8 +288,38 @@ class Plugin:
             with self._lock:
                 self.current = None
 
-    def _start_session(self, job_id: str, name: str, prompt: str, cwd: str, model: str | None, permission_mode: str, hang: int):
-        """The job's own store session, created once and resumed on every run."""
+    def _fallbacks(self, job_obj, model: str | None) -> list[dict]:
+        """Where a limit-killed run goes next, in order: another Claude login with room (same model),
+        then the fallback model (JOBS_FALLBACK_MODEL, default opus; "off" disables it)."""
+        out: list[dict] = []
+        try:
+            from bridge import accounts
+            dead = getattr(job_obj, "account_slot", None) or accounts.DEFAULT_SLOT
+            slot = accounts.pick(exclude=(dead,))
+            if slot and slot != dead:
+                who = next((a.get("email") or f"account {slot}" for a in accounts.list_accounts() if a["slot"] == slot), f"account {slot}")
+                out.append({"account_slot": slot, "label": who})
+        except Exception as e:  # noqa: BLE001 - no second login is a normal state
+            self.ctx.log(f"fallback account lookup failed: {e}")
+        fb = str(self._s().get("JOBS_FALLBACK_MODEL") or "opus").strip()
+        if fb and fb.lower() not in ("off", "none", "0") and fb != (model or ""):
+            out.append({"model_once": fb, "label": f"model {fb}"})
+        return out
+
+    @staticmethod
+    def _unpark(session_id: str | None) -> None:
+        if not session_id:
+            return
+        try:
+            from bridge import limits
+            limits.cancel(session_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _start_session(self, job_id: str, name: str, prompt: str, cwd: str, model: str | None, permission_mode: str, hang: int,
+                       account_slot: int | None = None, model_once: str | None = None):
+        """The job's own store session, created once and resumed on every run. `account_slot` and
+        `model_once` are a fallback attempt's: this turn only for the model (the job's own setting stays)."""
         from bridge import config, profiles, runner, store
         from bridge.browser import rel
         sid = self.sessions.get(job_id)
@@ -272,8 +334,9 @@ class Plugin:
             self._save()
         if model:
             store.set_run_settings(sid, model=model)
-        return runner.start_streaming_job(config.DASH_CHAT_ID, prompt, [], project=cwd, model=model or None,
-                                          permission_mode=permission_mode, session_id=sid, origin=f"orven-job:{name}", hang_timeout=hang)
+        return runner.start_streaming_job(config.DASH_CHAT_ID, prompt, [], project=cwd, model=model_once or model or None,
+                                          permission_mode=permission_mode, session_id=sid, origin=f"orven-job:{name}", hang_timeout=hang,
+                                          account_slot=account_slot)
 
     def _wait(self, job_obj, cur: Current, timeout: float) -> None:
         deadline = time.time() + timeout

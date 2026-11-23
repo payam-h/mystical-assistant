@@ -12,6 +12,7 @@ is refreshed in place, not duplicated or reclassified. Stdlib only.
 """
 
 import os
+import re
 import sys
 import threading
 import time
@@ -54,22 +55,69 @@ def _is_internal_oneshot(title: str) -> bool:
 _PLUGIN_SCRATCH = (".forge",)     # fork: folders under BASE_PATH whose sessions are a plugin's throwaway runs
 
 
+def _enc(path: str) -> str:
+    """A path as Claude Code names its folder under ~/.claude/projects."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def _may_hold_base_sessions(dirname: str) -> bool:
+    """fork: whether a ~/.claude/projects folder can hold a session scan() would
+    list. Only a cwd under BASE_PATH is listed, and Claude names the folder after
+    the cwd, so a folder whose name does not start with the encoded BASE_PATH
+    holds none — and a plugin's scratch workspace holds none either. Skipping
+    them unread is what keeps scan() cheap: on 2026-11-11 the folder held 65,000
+    transcripts, 61,000 of them Forge runs, and stat-ing every one cost 0.2–3.5 s
+    on every 5 s poll (36 s cold), in the request thread."""
+    if not dirname.startswith("-"):
+        return True                  # not an encoded absolute path: nothing to go on, read it
+    bases = {_enc(config.BASE_PATH.rstrip(os.sep)), _enc(os.path.realpath(config.BASE_PATH).rstrip(os.sep))}
+    base = next((b for b in bases if dirname == b or dirname.startswith(b + "-")), None)
+    if base is None:
+        return False
+    return not any(dirname == base + "-" + _enc(s) or dirname.startswith(base + "-" + _enc(s) + "-")
+                   for s in _PLUGIN_SCRATCH)
+
+
 def _in_plugin_scratch(cwd: str) -> bool:
     rel_path = os.path.relpath(os.path.realpath(cwd), config.BASE_PATH)
     return rel_path.split(os.sep)[0] in _PLUGIN_SCRATCH
 
 
+_scan_running = threading.Event()   # fork: a background scan is under way
+
+
 def refresh(chat_id: int | None = None, *, force: bool = False) -> int:
     """Debounced scan() for the hot path (session-list requests), so a session
-    just started in VSCode shows up without rescanning on every poll."""
+    just started in VSCode shows up without rescanning on every poll.
+
+    fork: the scan runs on a thread and the request goes on without it — a
+    session it finds shows on the next poll, 5 s later. It used to run inside
+    the session-list request, so every slow pass was a stall in the dashboard
+    (switching sessions refetches the list). `force` still scans inline: its
+    callers want the result now."""
     global _last_scan
     now = time.time()
     with _scan_lock:
         if not force and (now - _last_scan) < _SCAN_MIN_INTERVAL:
             return 0
+        if not force and _scan_running.is_set():
+            return 0
         _last_scan = now       # claim the scan under the lock — two concurrent
         # request threads must not both pass the debounce and rescan at once.
-    return scan(chat_id)
+        if not force:
+            _scan_running.set()
+    if force:
+        return scan(chat_id)
+
+    def run():
+        try:
+            scan(chat_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"[native] background scan: {e!r}", file=sys.stderr)
+        finally:
+            _scan_running.clear()
+    threading.Thread(target=run, daemon=True, name="native-scan").start()
+    return 0
 
 
 def _index_running(owner: int) -> int:
@@ -117,6 +165,8 @@ def scan(chat_id: int | None = None) -> int:
         return count
 
     for name in names:
+        if not _may_hold_base_sessions(name):        # fork: see _may_hold_base_sessions
+            continue
         pdir = os.path.join(root, name)
         if not os.path.isdir(pdir):
             continue
