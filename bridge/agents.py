@@ -125,6 +125,15 @@ def _alive_since(session: dict) -> "float | None":
     return machine.live_session_starts().get(sid)
 
 
+def _since(session: dict) -> "float | None":
+    """_alive_since, honouring a _session_alive that only says alive (agent_team and
+    upstream's tests stand in for it there): alive with no start known counts every agent."""
+    since = _alive_since(session)
+    if since is None and _session_alive(session):
+        since = 0.0
+    return since
+
+
 def _ran_here(since: "float | None", started_at: float, fallback: float = 0.0) -> bool:
     """Could an agent that started at `started_at` belong to the live process?"""
     if since is None:
@@ -278,7 +287,7 @@ def session_agents(session: dict) -> dict:
     if not d:
         return {"running": 0, "total": 0, "agents": [], "workflows": []}
     marks = _finished_marks(session)
-    since = _alive_since(session)
+    since = _since(session)
     alive = since is not None
     out: list[dict] = []
     for meta_path in glob.glob(os.path.join(d, "*.meta.json")):
@@ -339,7 +348,7 @@ def agent_activity(session: dict, agent_id: str, cursor: int = 0,
     except (OSError, json.JSONDecodeError):
         pass
     run = transcript_jsonl.parse_jsonl(jsonl, cursor, sidechain=True)
-    since = _alive_since(session)
+    since = _since(session)
     alive = _ran_here(since, _summary(jsonl)["started_at"])
     if workflow_id:                                       # status follows the run
         status = _run_status(_workflow_records(d).get(workflow_id, {}), alive)

@@ -408,11 +408,13 @@ def upsert_native_session(claude_sid: str, chat_id: int, project: str, cwd: str,
             "ON CONFLICT(id) DO UPDATE SET "
             "updated=MAX(sessions.updated, excluded.updated), "
             "cwd=COALESCE(sessions.cwd, excluded.cwd), "
-            "project=excluded.project, "
+            # a cwd that is gone keeps the row's project (see the docstring)
+            "project=CASE WHEN ? THEN excluded.project ELSE sessions.project END, "
             "title=CASE WHEN sessions.title IS NULL OR sessions.title='' OR sessions.title LIKE '<%' "
             "THEN excluded.title ELSE sessions.title END, "
             "origin=CASE WHEN sessions.origin IN ('vscode','terminal') THEN excluded.origin ELSE sessions.origin END",
-            (claude_sid, chat_id, project, claude_sid, title, now, now, origin, cwd, None))
+            (claude_sid, chat_id, project, claude_sid, title, now, now, origin, cwd, None,
+             os.path.isdir(cwd)))
     return get_session(claude_sid)
 
 
