@@ -1,9 +1,9 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
-  ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, CircleDot, CloudUpload, Ellipsis, FileDiff, LoaderCircle, Minus,
-  Plus, RefreshCw, RotateCcw, SquarePen, TriangleAlert, X,
+  ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, Cloud, Ellipsis, ExternalLink, FileDiff, GitMerge,
+  GitPullRequest, Laptop, LoaderCircle, Minus, Plus, RefreshCw, RotateCcw, Send, Sparkles, SquarePen, TriangleAlert, Undo2, X,
 } from "lucide-react";
-import { api, type GitFile, type GitStatus } from "../../api";
+import { api, type CompareFile, type GitFile, type GitLedger, type GitStatus, type LedgerCommit, type PrStatus } from "../../api";
 import { CommitGraph } from "../CommitGraph";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
 import { askConfirm } from "../ui/Ask";
@@ -15,28 +15,42 @@ import { useAiFeatures } from "../../lib/ai";
 import { useStickyFlag } from "../../lib/prefs";
 import { notify } from "./Notifications";
 import { syncOf } from "../../lib/gitsync";
+import { gitCard, type Stop } from "../../lib/gitcard";
 import { divergedDraft, pushFailedDraft } from "../../lib/pushfailed";
 import { ago } from "../../lib/surfaces";
 import { TaskLine } from "./TaskChip";
+import { TabKick } from "./TabKick";
+import { commentsMessage, failureMessage, stateLine } from "../../lib/prchip";
+import { diffColor } from "../../lib/resultfields";
 
-/* GIT — the right rail's one git tab, and the dashboard's only git status
-   (the header's git icon went, 2026-10-18): a repo header (branch, ⟳ fetch),
-   a readout (to push / to pull / changed, how fresh that is, and the one move
-   the state allows), then two folds in VS Code's Source Control shape.
-   CHANGES is the working tree with the commit box; GRAPH is the commit graph
-   (CommitGraph). Each fold remembers whether it is open.
+/* GIT — the right rail's one git tab, and the dashboard's only git status: a
+   kicker (branch, how fresh, ⟳ fetch), then the STATUS CARD (/design-first
+   git-calm, A · PIPE, 2026-11-19): a headline that says the situation, three
+   stops (this Mac, committed, origin) with what sits at each, and the one move,
+   amber when it needs you (lib/gitcard.ts decides which). The commit message
+   sits in the card beside Commit, drafted up front from the diff; Commit and
+   Push stay two presses (the user's pick). Under the card, plain lists: CHANGES
+   (rows with hover actions and a menu), COMING IN, TO PUSH, the PULL REQUEST
+   with its checks, and what's in it; then a footer with the base (a menu: the
+   branch this one is compared with, BRANCHES' Target) and the graph's link. A
+   commit opens in place to its files; the newest unpushed one can be undone.
+   It replaces the LEDGER's line and NEXT STEP's glowing card (11-11, 11-12):
+   the user wanted the situation at a glance, with less to look at.
    The working tree comes from App's per-worktree status poll (sessionGit), so
-   the header, the rail badge and the list read the same answer; an op here
-   bumps that poll (onGitChanged) instead of running a second one. The commit
-   box lives outside this component (lib/commitdraft.ts): the rail rebuilds
-   the panel on every tab/session switch, and a GENERATE in flight outlives
-   that. Styles under GIT TAB in index.css. */
+   the rail badge and the list read the same answer; an op here bumps that poll
+   (onGitChanged) instead of running a second one. The commit box lives outside
+   this component (lib/commitdraft.ts): the rail rebuilds the panel on every
+   tab/session switch, and a GENERATE in flight outlives that. Styles under
+   GIT LEDGER and GIT STATUS CARD in index.css. */
 
 interface Props {
   project: string | null;
   branch?: string;
   // App's status poll for this worktree; null until its first answer.
   git: GitStatus | null;
+  // App's auto-fetch of this tree (lib/gitsync needsFetch): busy while it runs,
+  // and git's words from a failed one until a fetch after `at` lands.
+  autoFetch?: { at: number; busy: boolean; error?: string } | null;
   // Re-read the status now — after a commit, a stage, a push.
   onGitChanged: () => void;
   // `changed` lands a dirty file in the editor's diff view, not the file.
@@ -53,18 +67,31 @@ interface Props {
   onSend?: (text: string) => void;
 }
 
-type OpKind = "push" | "publish" | "pull" | "fetch";
-// The readout's sync op, in flight or just over: done shows a few seconds,
-// failed stays with git's own words until dismissed or retried.
+type OpKind = "push" | "publish" | "pull" | "fetch" | "merge";
+// The hero's sync op, in flight or just over: done shows a few seconds,
+// failed stays with git's own words until dismissed or retried. `push`: a
+// failed merge was Merge & push, which its hand-off draft keeps.
 type Op = { kind: OpKind; n: number; phase: "busy" }
   | { kind: OpKind; n: number; phase: "done"; text: string }
-  | { kind: OpKind; n: number; phase: "failed"; output: string; project: string; branch?: string };
-const FAILED: Record<OpKind, string> = { push: "Push refused", publish: "Publish refused", pull: "Pull failed", fetch: "Fetch failed" };
+  | { kind: OpKind; n: number; phase: "failed"; output: string; project: string; branch?: string; push?: boolean };
+const FAILED: Record<OpKind, string> = { push: "Push refused", publish: "Publish refused", pull: "Pull failed", fetch: "Fetch failed", merge: "Merge failed" };
 
-const ST_COLOR = (s: string) => (s === "A" || s === "?" ? "var(--ok)" : s === "D" ? "var(--err)" : "var(--warn)");
+// Colour only where it tells something: added green, deleted red, the rest grey.
+const ST_COLOR = (s: string) => (s === "A" || s === "?" ? "var(--ok)" : s === "D" ? "var(--err)" : "var(--txl)");
+const ROWS = 3;      // a list's commits before "N more"
+const IN_ROWS = 3;   // origin's incoming stays short: the buttons are the point
+const STOPS = ["This Mac", "Committed", "Origin"];
+const STOP_IC: Record<Stop["icon"], typeof Check> = { laptop: Laptop, check: Check, up: ArrowUp, down: ArrowDown, cloud: Cloud, pr: GitPullRequest };
+// What each tree's line last read, so a switch back draws at once and re-reads in place.
+const LEDGERS = new Map<string, GitLedger>();
+const PRS = new Map<string, PrStatus>();
 const byPath = (a: GitFile, b: GitFile) => a.path.localeCompare(b.path);
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const MOD = /Mac|iP/.test(navigator.platform) ? "⌘" : "Ctrl+";
+// The file set each tree's message was last drafted for, and the draft itself,
+// so a rebuild doesn't draft again and the box can say a draft is untouched.
+const DRAFTED = new Map<string, string>();
+const AUTO = new Map<string, string>();
 
 /* A switch to another worktree rebuilds this panel (RightPanel's scope), so
    the parts that would jump keep their last size out here, by name: the new
@@ -136,7 +163,7 @@ function Roll({ slot, v }: { slot: string; v: string | null }) {
   );
 }
 
-export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onReveal, onHandOff, onSend }: Props) {
+export function GitPanel({ project, branch, git, autoFetch, onGitChanged, onOpenFile, onReveal, onHandOff, onSend }: Props) {
   const files = git?.files ?? [];
   // A file is staged when the index half of porcelain's pair moved, and
   // unstaged when the working-tree half did. An old backend sends neither, so
@@ -157,8 +184,7 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
   // Unstage), or the fold head's ⋯ with no path: the "all" actions alone.
   const [ctx, setCtx] = useState<{ x: number; y: number; path: string; staged: boolean } | null>(null);
   // Folds remember being closed — open is the default, so the flag is inverted.
-  const [chClosed, setChClosed] = useStickyFlag("git-changes-closed");
-  const [grClosed, setGrClosed] = useStickyFlag("git-graph-closed");
+  const [grOpen, setGrOpen] = useStickyFlag("git-graph-open");   // off by default: the tracker's list is the short answer
   const [branchOnly, setBranchOnly] = useStickyFlag("git-graph-branch-only");
   const [nonce, setNonce] = useState(0);   // the graph re-reads on ⟳
   const ready = git !== null;
@@ -168,9 +194,6 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
   const branchName = git?.branch || branch || "";
   const ahead = git?.ahead ?? 0;
   const behind = git?.behind ?? 0;
-  // Whatever can resize the readout, the CHANGES fold or the branch pill.
-  const rdRef = useGlide<HTMLDivElement>("readout", "height", !ready, [git, op]);
-  const chRef = useGlide<HTMLDivElement>("changes", "height", !ready, [git, note, chClosed, grClosed]);
   const brRef = useGlide<HTMLSpanElement>("branch", "width", false, [branchName]);
 
   async function commit() {
@@ -185,13 +208,72 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
   }
 
   const s = syncOf(git);
+  const up = s.kind === "diverged" ? s.ahead : s.kind === "ahead" || s.kind === "publish" ? s.n : 0;
+  const down = s.kind === "diverged" ? s.behind : s.kind === "behind" ? s.n : 0;
+  // The line under the working tree, re-read when the counts or a sync op move.
+  const tkey = `${project}|${branch || ""}`;
+  const [led, setLed] = useState<GitLedger | null>(() => LEDGERS.get(tkey) ?? null);
+  useEffect(() => {
+    if (!project || !git?.is_repo) return;
+    let live = true;
+    void api.gitLedger(project, branch || undefined).then((r) => { if (live && r.local) { LEDGERS.set(tkey, r); setLed(r); } }).catch(() => undefined);
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tkey, git?.is_repo, up, down, git?.upstream, nonce]);
+  // The branch's pull request (the chat header's chip reads the same cached answer).
+  const [pr, setPr] = useState<PrStatus | null>(() => PRS.get(tkey) ?? null);
+  useEffect(() => {
+    if (!project || !branchName || !git?.upstream) return;
+    let live = true;
+    const read = () => void api.prStatus(project, branchName).then((r) => { if (live) { PRS.set(tkey, r); setPr(r); } }).catch(() => undefined);
+    read();
+    const t = setInterval(() => { if (document.visibilityState === "visible") read(); }, 60_000);
+    return () => { live = false; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tkey, branchName, git?.upstream, nonce]);
+  // One commit opened in place: its files, and one file's diff under it.
+  const [openSha, setOpenSha] = useState("");
+  const [shown, setShown] = useState<{ files: CompareFile[]; add: number; del: number } | null>(null);
+  const [fdiff, setFdiff] = useState<{ name: string; text: string | null } | null>(null);
+  function openCommit(sha: string) {
+    setFdiff(null); setShown(null);
+    if (openSha === sha || !project) { setOpenSha(""); return; }
+    setOpenSha(sha);
+    void api.gitShow(project, sha).then((r) => setShown({ files: r.files ?? [], add: r.add ?? 0, del: r.del ?? 0 })).catch(() => setShown({ files: [], add: 0, del: 0 }));
+  }
+  function openCommitFile(sha: string, name: string) {
+    if (fdiff?.name === name || !project) { setFdiff(null); return; }
+    setFdiff({ name, text: null });
+    void api.gitShow(project, sha, name).then((r) => setFdiff({ name, text: r.diff ?? "" })).catch(() => setFdiff({ name, text: "" }));
+  }
+  const [allOf, setAllOf] = useState<Record<string, boolean>>({});   // a stretch showing every commit
+  const [baseAt, setBaseAt] = useState<{ x: number; y: number } | null>(null);
+  const [prForm, setPrForm] = useState<{ title: string; body: string } | null>(null);
+  // COMING IN (origin's commits) and, diverged, the merge's dry run. The last
+  // answer stays up while the next loads, so the rows don't blink; its verdict
+  // only counts for the heads it was asked about (`key`).
+  type Incoming = { commits: { sha: string; subject: string; ts: number }[]; clash: string[] | null; key: string };
+  const [incoming, setIncoming] = useState<Incoming | null>(null);
+  const ikey = `${project}|${branch}|${up}|${down}|${git?.upstream}`;
+  useEffect(() => {
+    if (!project || !down) { setIncoming(null); return; }
+    let live = true;
+    void api.gitIncoming(project, branch || undefined).then((r) => { if (live) setIncoming({ ...r, key: ikey }); })
+      .catch(() => { if (live) setIncoming({ commits: [], clash: null, key: ikey }); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ikey, nonce]);
+  // A merge that clashed when it ran (no dry run on this git): its files, until the heads move.
+  const [clashSeen, setClashSeen] = useState<{ files: string[]; key: string } | null>(null);
+  const [clashAll, setClashAll] = useState(false);
+  const clashFiles = clashSeen?.key === ikey ? clashSeen.files : incoming?.key === ikey ? incoming.clash : undefined;
   useEffect(() => {
     if (op?.phase !== "done") return;
     const t = setTimeout(() => setOp(null), 4000);
     return () => clearTimeout(t);
   }, [op]);
 
-  // The readout's one move: PUSH, PUBLISH (push() adds -u) or PULL (ff-only).
+  // The card's sync move: PUSH, PUBLISH (push() adds -u) or PULL (ff-only).
   async function sync(kind: "push" | "publish" | "pull", n: number) {
     if (!project) return;
     const to = s.kind === "ahead" || s.kind === "behind" ? s.upstream : "origin";
@@ -203,7 +285,34 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
         ? { kind, n, phase: "done", text: kind === "pull" ? `Pulled ${plural(n, "commit")} from ${to}`
             : kind === "publish" ? `Published ${branchName} to origin` : `Pushed ${plural(n, "commit")} to ${to}` }
         : { kind, n, phase: "failed", output: r.output || `${FAILED[kind]}.`, project, branch });
+      // A refused push is most often origin moving on: fetch, so the hero offers the merge.
+      if (!r.ok && kind !== "pull") await api.gitFetch(project, branch || undefined).catch(() => undefined);
     } catch (e) { setOp({ kind, n, phase: "failed", output: (e as Error).message, project, branch }); }
+    finally { setBusy(false); onGitChanged(); setNonce((x) => x + 1); }
+  }
+
+  // Merge / Merge & push on a diverged branch, here: a merge commit, never a
+  // rebase. A clash changes nothing: its files come back and the two buttons
+  // turn into session hand-offs. Pushing happens only for Merge & push.
+  async function merge(andPush: boolean) {
+    if (!project || s.kind !== "diverged") return;
+    const { upstream, ahead, behind } = s;
+    let kind: OpKind = "merge";
+    setBusy(true);
+    setOp({ kind, n: behind, phase: "busy" });
+    try {
+      const r = await api.gitMergeUpstream(project, branch || undefined);
+      if (r.clash?.length) { setClashSeen({ files: r.clash, key: ikey }); setOp(null); return; }
+      if (!r.ok) { setOp({ kind, n: behind, phase: "failed", output: r.output || "Merge failed.", project, branch, push: andPush }); return; }
+      const merged = `Merged ${plural(behind, "commit")} from ${upstream}`;
+      if (!andPush) { setOp({ kind, n: behind, phase: "done", text: merged }); return; }
+      kind = "push";
+      setOp({ kind, n: ahead + 1, phase: "busy" });
+      const p = await api.gitPush(project, branch || undefined);
+      setOp(p.ok ? { kind, n: ahead + 1, phase: "done", text: `${merged} and pushed ${plural(ahead + 1, "commit")}` }
+        : { kind, n: ahead + 1, phase: "failed", output: p.output || "Push refused.", project, branch });
+      if (!p.ok) await api.gitFetch(project, branch || undefined).catch(() => undefined);
+    } catch (e) { setOp({ kind, n: kind === "push" ? ahead + 1 : behind, phase: "failed", output: (e as Error).message, project, branch, push: andPush }); }
     finally { setBusy(false); onGitChanged(); setNonce((x) => x + 1); }
   }
 
@@ -227,7 +336,7 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
    *  Runs to the end whether or not this panel is still on screen: the result
    *  goes to the store, and if nothing is showing this worktree's box by then,
    *  the bell says so and clicking it brings the panel back. */
-  async function generate() {
+  async function generate(auto = false) {
     const paths = (staged.length ? staged : unstaged).map((f) => f.path);
     if (!project || !paths.length) return;
     patchDraft(key, { gen: true });
@@ -240,6 +349,7 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
       if (!message) error = r.error || "Couldn't write a message.";
     } catch (e) { error = (e as Error).message; }
     patchDraft(key, message ? { gen: false, msg: message } : { gen: false });
+    if (auto) { if (message) AUTO.set(key, message); return; }   // a draft nobody asked for stays quiet
     if (error) notify("error", `Couldn't write a commit message — ${error}`, onReveal);
     else if (!watched(key)) notify("info", `Commit message ready — ${message.split("\n")[0]}`, onReveal);
   }
@@ -325,38 +435,104 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
   }
 
   const noCommit = busy || !msg.trim() || !changed.size;
+  // Draft the message up front: once per set of changes, after they sit still
+  // a few seconds, and only into an empty box (a cleared draft stays cleared).
+  const sig = files.map((f) => `${f.path}:${f.add}:${f.del}`).join("|");
+  useEffect(() => {
+    if (!ai.commitmsg || !sig || gen || msg.trim() || DRAFTED.get(key) === sig) return;
+    const t = setTimeout(() => { DRAFTED.set(key, sig); void generate(true); }, 4000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sig, ai.commitmsg, gen, msg, key]);
 
-  /* The readout: what a push and a pull would move and what's changed, how
-     fresh that is, then the one move this state allows — none on a diverged
-     branch, where git would refuse both. Zeros dim; "—" is a count that can't
-     exist here (no upstream). Before the status lands, the last figures hold,
-     dimmed, and roll to this tree's when it does. */
-  const fetching = op?.kind === "fetch" && op.phase === "busy";
+  /* The hero's inputs: how fresh the status is (`when`), and the moves this
+     state allows. Diverged, a pull can't fast-forward: Merge / Merge & push
+     run here, or go to a session when the dry run says they'd clash. */
+  const fetching = (op?.kind === "fetch" && op.phase === "busy") || !!autoFetch?.busy;
   const t = git?.fetched_at ? ago(git.fetched_at) : "";
-  const when = !t ? "" : t === "now" ? " · checked just now" : ` · checked ${t} ago`;
-  const toPush = s.kind === "ahead" || s.kind === "publish" ? s.n : s.kind === "diverged" ? s.ahead
-    : s.kind === "synced" || s.kind === "behind" ? 0 : null;
-  const toPull = s.kind === "behind" ? s.n : s.kind === "diverged" ? s.behind
-    : s.kind === "synced" || s.kind === "ahead" ? 0 : null;
-  const action = s.kind === "ahead" ? { kind: "push" as const, n: s.n }
-    : s.kind === "behind" ? { kind: "pull" as const, n: s.n }
-    : s.kind === "publish" && s.n > 0 ? { kind: "publish" as const, n: s.n }
-    : null;
-  const cell = (slot: string, icon: ReactNode, value: number | null, label: string, tone: string) => (
-    <div className={`gp-roc ${ready && value ? tone : "z"}`}>
-      <b>{icon}<Roll slot={slot} v={ready ? String(value ?? "—") : null} /></b><span>{label}</span>
-    </div>
-  );
-  const warn = s.kind === "diverged" ? "warn" : "";
-  const sub = fetching ? <span>checking origin…</span>
-    : !ready ? <span>reading the working tree…</span>
-    : s.kind === "synced" ? <><Check size={12} strokeWidth={2.4} /><span>up to date with <b>{s.upstream}</b>{when}</span></>
-    : s.kind === "ahead" || s.kind === "behind" ? <span><b>{s.upstream}</b>{when}</span>
-    : s.kind === "diverged" ? <span>diverged from <b>{s.upstream}</b>{when}</span>
-    : s.kind === "publish" ? <span>not on <b>origin</b> yet · only in this checkout</span>
-    : s.kind === "local" ? <span>no remote · this repo lives only here</span>
-    : <span>detached HEAD · no branch to push</span>;
+  const when = !t ? "" : t === "now" ? "checked just now" : `checked ${t} ago`;
+  // An auto-fetch failure no fetch has retired since: one quiet line, not the
+  // alert box, which stays for a fetch you asked for.
+  const autoErr = !fetching && op?.phase !== "failed" && autoFetch?.error
+    && !(git?.fetched_at && git.fetched_at >= autoFetch.at) ? autoFetch.error : "";
+  // Never fetched, or the last auto-fetch failed: no "up to date" claim stands.
+  const unchecked = !!git?.upstream && (git.fetched_at === null || !!autoErr);
+  const msgRef = useRef<HTMLTextAreaElement>(null);
+  // A clash never starts here: a new session merges, and its draft says whether to push.
+  function mergeAct(andPush: boolean) {
+    if (s.kind !== "diverged") return;
+    if (clashFiles?.length) {
+      if (onHandOff && project) onHandOff(project, branch, divergedDraft(branchName, s.upstream, s.ahead, s.behind,
+        { push: andPush, clash: clashFiles, dirty: changed.size }));
+    } else void merge(andPush);
+  }
+  // Update: the base merged in here. A clash changes nothing and goes to a session, unsent.
+  async function updateBase() {
+    if (!project || !led?.base) return;
+    setBusy(true);
+    try {
+      const r = await api.gitUpdateBase(project, led.base, branch || undefined);
+      if (r.clash?.length && onHandOff) {
+        onHandOff(project, branch, `Merge \`${led.ref}\` into \`${branchName}\` (a merge commit, never a rebase) and resolve the conflicts. A dry run says these files clash:\n${r.clash.map((f) => `- ${f}`).join("\n")}\nThen stop: don't push.`);
+        setNote(`Merging ${led.base} would clash in ${plural(r.clash.length, "file")}, so nothing changed. The merge is an unsent draft in a new session.`);
+      } else setNote(r.ok ? `Merged ${led.base} into ${branchName}.` : r.output || "Update failed.");
+    } catch (e) { setNote((e as Error).message); }
+    finally { setBusy(false); onGitChanged(); setNonce((x) => x + 1); }
+  }
+  function undoCommit(c: LedgerCommit) {
+    void askConfirm(`Undo "${c.subject}"? The commit goes away and its changes stay, staged.`, { ok: "Undo commit" }).then(async (yes) => {
+      if (!yes || !project) return;
+      setBusy(true);
+      try {
+        const r = await api.gitUndoCommit(project, branch || undefined);
+        setNote(r.ok ? "" : r.output || "Couldn't undo the commit.");
+        if (r.ok) setOpenSha("");
+      } catch (e) { setNote((e as Error).message); }
+      finally { setBusy(false); onGitChanged(); setNonce((x) => x + 1); }
+    });
+  }
+  async function setBase(target: string | null) {
+    if (!project || !branchName) return;
+    try { await api.setBranchTarget(project, branchName, target); } catch (e) { setNote((e as Error).message); }
+    setNonce((x) => x + 1);
+  }
+  async function openPr() {
+    if (!project || !led?.base || !prForm?.title.trim()) return;
+    setBusy(true);
+    try {
+      const r = await api.createPr(project, branchName, led.base, prForm.title.trim(), prForm.body);
+      setNote(r.ok ? `Opened pull request${r.number ? ` #${r.number}` : ""}.` : r.output || "Couldn't open the pull request.");
+      if (r.ok) setPrForm(null);
+    } catch (e) { setNote((e as Error).message); }
+    finally { setBusy(false); setNonce((x) => x + 1); }
+  }
+  // The kicker's short form of how fresh this is (the full words are in the title).
+  const right = fetching ? "checking…" : autoErr ? "offline" : unchecked ? "not checked" : !t ? "" : t === "now" ? "just now" : `${t} ago`;
+  // Only a running push or pull locks the hero: Commit just opens the message box, and an auto-fetch is no reason to wait.
+  const syncing = op?.phase === "busy" && op.kind !== "fetch";
   const pushy = op?.kind === "push" || op?.kind === "publish";
+  // The dry run said the merge would clash: the card shows it when merging is the step, COMING IN otherwise.
+  const clash: ReactNode = s.kind === "diverged" && clashFiles?.length ? (
+    <div className="gp-clash">
+      <div className="gp-clash-h"><TriangleAlert size={12} strokeWidth={2.2} /><span>Would clash</span><em>{plural(clashFiles.length, "file")}</em></div>
+      <div className="gp-clash-rows">
+        {(clashAll ? clashFiles : clashFiles.slice(0, 3)).map((f) => {
+          const cut = f.lastIndexOf("/");
+          return (
+            <div key={f} className="trow gp-row" role="button" tabIndex={0} title={f}
+              onClick={() => onOpenFile(f, false)} onKeyDown={(e) => { if (e.key === "Enter") onOpenFile(f, false); }}>
+              <FileIcon name={f} size={14} />
+              <span className="gp-name">{cut < 0 ? f : f.slice(cut + 1)}</span>
+              <span className="gp-dir" dir="rtl">{cut < 0 ? "" : f.slice(0, cut)}</span>
+              <span className="gp-st">!</span>
+            </div>
+          );
+        })}
+      </div>
+      {clashFiles.length > 3 && !clashAll && <button className="gp-clash-more" onClick={() => setClashAll(true)}>+{clashFiles.length - 3} more</button>}
+      <div className="gp-clash-note">Nothing on disk changed. Each merge button opens a <b>new session</b> with the merge as an unsent draft; only <b>Merge &amp; push</b>'s draft ends in a push.</div>
+    </div>
+  ) : null;
   const act: ReactNode = op?.phase === "failed" ? (
     <div className="gp-fail" role="alert">
       <div className="gp-failh">
@@ -373,10 +549,19 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
             <SquarePen size={13} strokeWidth={2} />Handle in a new session
           </button>
         )}
-        <button className={`gp-pb ghost${pushy ? " sq" : ""}`} title="retry" disabled={busy}
-          onClick={() => void (op.kind === "fetch" ? fetchNow() : sync(op.kind, op.n))}>
-          <RotateCcw size={13} strokeWidth={2} />{!pushy && "Retry"}
-        </button>
+        {/* Nothing changed, so the hero's buttons are the retry; this hands the merge on. */}
+        {op.kind === "merge" && onHandOff && s.kind === "diverged" && (
+          <button className="gp-pb tint" title="Handle it in a new session on this branch, with the merge as an unsent draft"
+            onClick={() => { onHandOff(op.project, op.branch, divergedDraft(branchName, s.upstream, s.ahead, s.behind, { push: !!op.push, dirty: changed.size })); setOp(null); }}>
+            <SquarePen size={13} strokeWidth={2} />Handle in a new session
+          </button>
+        )}
+        {op.kind !== "merge" && (
+          <button className={`gp-pb ghost${pushy ? " sq" : ""}`} title="retry" disabled={busy}
+            onClick={() => void (op.kind === "fetch" ? fetchNow() : op.kind !== "merge" && sync(op.kind, op.n))}>
+            <RotateCcw size={13} strokeWidth={2} />{!pushy && "Retry"}
+          </button>
+        )}
       </div>
     </div>
   ) : op?.phase === "done" ? (
@@ -384,27 +569,7 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
   ) : op?.phase === "busy" && op.kind !== "fetch" ? (
     <button className="gp-pb busy" disabled>
       <LoaderCircle size={14} strokeWidth={2.2} />
-      {op.kind === "publish" ? "Publishing…" : `${op.kind === "pull" ? "Pulling" : "Pushing"} ${plural(op.n, "commit")}…`}
-    </button>
-  ) : s.kind === "diverged" ? (
-    <>
-      <div className="gp-ronote">A push would be refused and a pull can't fast-forward. A new session can merge{" "}
-        <code>{s.upstream}</code> in and push; you send its first message.</div>
-      {onHandOff && project && (
-        <button className="gp-pb tint" title="Open a session on this branch with the merge as an unsent draft"
-          onClick={() => onHandOff(project, branch, divergedDraft(branchName, s.upstream, s.ahead, s.behind))}>
-          <SquarePen size={13} strokeWidth={2} />Handle in a new session
-        </button>
-      )}
-    </>
-  ) : action ? (
-    <button className="gp-pb" disabled={busy} onClick={() => void sync(action.kind, action.n)}
-      title={action.kind === "publish" ? `publish ${branchName} to origin and track it`
-        : action.kind === "pull" ? `fast-forward ${plural(action.n, "commit")} from ${s.kind === "behind" ? s.upstream : ""}`
-        : `push ${plural(action.n, "commit")} to ${s.kind === "ahead" ? s.upstream : ""}`}>
-      {action.kind === "publish" ? <CloudUpload size={14} strokeWidth={2.2} /> : action.kind === "pull"
-        ? <ArrowDown size={14} strokeWidth={2.2} /> : <ArrowUp size={14} strokeWidth={2.2} />}
-      {action.kind === "publish" ? "Publish branch" : `${action.kind === "pull" ? "Pull" : "Push"} ${plural(action.n, "commit")}`}
+      {op.kind === "publish" ? "Publishing…" : `${op.kind === "pull" ? "Pulling" : op.kind === "merge" ? "Merging" : "Pushing"} ${plural(op.n, "commit")}…`}
     </button>
   ) : null;
 
@@ -430,7 +595,7 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
         <span className="gp-name">{name}</span>
         {/* rtl keeps the nearest folder visible when the path is cut */}
         <span className="gp-dir" dir="rtl">{cut < 0 ? "" : f.path.slice(0, cut)}</span>
-        <span className="gp-fig"><i>+{f.add}</i><i>−{f.del}</i></span>
+        <span className="gp-fig"><i>+{f.add}</i>{f.del > 0 && <i>−{f.del}</i>}</span>
         <span className="gp-racts">
           <button className="gp-ib" title="open changes" onClick={(e) => { e.stopPropagation(); open(true); }}><FileDiff size={12} /></button>
           <button className="gp-ib" title={sec ? "unstage" : "stage"} disabled={busy}
@@ -457,135 +622,282 @@ export function GitPanel({ project, branch, git, onGitChanged, onOpenFile, onRev
     </div>
   );
 
-  const bothOpen = !chClosed && !grClosed;
-
-  return (
-    <div className="panel gp" style={{ border: "1px solid color-mix(in srgb, var(--acc) 16%, transparent)", background: "color-mix(in srgb, var(--panel) 86%, transparent)", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-      <div className="gp-head">
-        <span className="gp-title">GIT</span>
-        {branchName && (
-          <span ref={brRef} className="gp-branch" title={branchName}><i>⎇</i><Roll slot="branch" v={branchName} /></span>
-        )}
-        <button className={`gp-ib${fetching ? " spin" : ""}`} disabled={busy}
-          title={s.kind === "none" ? "refresh" : "fetch from origin, then re-read"} onClick={() => void fetchNow()}>
-          <RefreshCw size={13} />
-        </button>
-      </div>
-      <div style={{ height: 1, background: "linear-gradient(90deg,var(--acc),transparent)", flex: "none" }} />
-
-      {project && (
-        <div ref={rdRef} className="gp-rdw">
-          {(!ready || s.kind !== "none") && (
-            <div className="gp-rd">
-              <div className="gp-ro">
-                {cell("push", <ArrowUp size={15} strokeWidth={2.2} />, toPush, s.kind === "publish" ? "to publish" : "to push", warn || (action && action.kind !== "pull" ? "on" : ""))}
-                {cell("pull", <ArrowDown size={15} strokeWidth={2.2} />, toPull, "to pull", warn || (action?.kind === "pull" ? "on" : ""))}
-                {cell("changed", <CircleDot size={14} strokeWidth={2.2} />, changed.size, "changed", "dirty")}
-                {op?.phase === "busy" && op.kind !== "fetch" && <div className="gp-robar"><i /></div>}
-              </div>
-              <div className={`gp-rosub${fetching ? "" : s.kind === "synced" ? " ok" : warn ? " warn" : ""}`}>{sub}</div>
-              <TaskLine project={project} branch={branchName} onSend={onSend} />
-              {act && <div className="gp-act">{act}</div>}
+  const dirty = changed.size;
+  const local = led?.local ?? [];
+  const localN = up || local.length;
+  const prInfo = pr?.pr?.state === "OPEN" ? pr.pr : null;
+  const cap = (n: number) => (n > 99 ? "99+" : n);
+  // The merge's dry run, said before a press (diverged only).
+  const clashN = clashFiles?.length ?? 0;
+  const chk = s.kind !== "diverged" ? null
+    : clashFiles === undefined ? { tone: "", text: "Testing the merge…" }
+    : clashFiles === null ? { tone: "", text: "Couldn't test the merge first; a clash would be undone" }
+    : clashN ? { tone: "warn", text: `${plural(clashN, "file")} clash with origin's ${down}` }
+    : { tone: "ok", text: dirty ? `Merges cleanly; your ${dirty === 1 ? "edit stays" : `${dirty} edits stay`} put` : "Merges cleanly, nothing clashes" };
+  // The status card: the step you're on, said in words, and where the work sits.
+  const card = gitCard({ sync: s, dirty, staged: staged.length, up, down, base: led?.base ?? "", shippedN: led?.shipped_n ?? 0, pr: prInfo, canSend: !!onSend, fresh: right });
+  const step = card.step;
+  const pushKind = s.kind === "publish" ? "publish" : "push";
+  const openPrForm = () => led && setPrForm({ title: led.shipped.length === 1 ? led.shipped[0].subject : branchName.replace(/^[a-z]+\//, "").replace(/[-_]/g, " "),
+    body: [...led.shipped].reverse().map((c) => `- ${c.subject}`).join("\n") });
+  // Built once for the card (filled) and COMING IN (quiet links, when a commit comes first).
+  const mergeBtns = (main: string, other: string) => s.kind === "diverged" && (<>
+    <button type="button" className={main} disabled={busy || syncing} onClick={() => mergeAct(false)}
+      title={clashN ? "Opens a new session with the merge as an unsent draft; it stops before pushing" : `Merge ${s.upstream}'s ${down} into this branch here. Pushing stays a separate step.`}>
+      {clashN ? <SquarePen size={13} strokeWidth={2.2} /> : <GitMerge size={13} strokeWidth={2.4} />}Merge {cap(down)}
+    </button>
+    <button type="button" className={other} disabled={busy || syncing} onClick={() => mergeAct(true)}
+      title={clashN ? "Opens a new session with the merge as an unsent draft; it pushes at the end" : `Merge ${s.upstream}'s ${down} in, then push to origin`}>
+      {clashN ? <SquarePen size={13} strokeWidth={2.2} /> : <ArrowUpDown size={13} strokeWidth={2.4} />}Merge &amp; push
+    </button>
+  </>);
+  const pullBtn = (cls: string) => (
+    <button type="button" className={cls} disabled={busy || syncing} onClick={() => void sync("pull", down)}><ArrowDown size={13} strokeWidth={2.6} />Pull {cap(down)}</button>
+  );
+  const sendBtn = (cls: string, short = false) => prInfo && onSend && (prInfo.failed > 0
+    ? <button type="button" className={cls} onClick={() => onSend(failureMessage(prInfo))}><Send size={13} strokeWidth={2} />{short ? "Send failure" : "Send failure to chat"}</button>
+    : prInfo.review ? <button type="button" className={cls} onClick={() => onSend(commentsMessage(prInfo))}><Send size={13} strokeWidth={2} />{short ? "Send comments" : "Send comments to chat"}</button>
+    : null);
+  const pushBtn = (cls: string) => (
+    <button type="button" className={`gs-btn ${cls}`} disabled={busy || syncing} onClick={() => void sync(pushKind, up)}>
+      <ArrowUp size={13} strokeWidth={2.6} />{pushKind === "publish" ? "Publish" : "Push"} {cap(up)}
+    </button>
+  );
+  // The card's one move (Commit keeps Push beside it, the user's two presses);
+  // a running push or pull shows in its place.
+  const buttons: ReactNode = syncing || (prForm && step === "pr") ? null
+    : step === "commit" ? (<>
+      {/* The label is the promise: with an index, Commit takes only what's in
+          it (bridge/git.py commit()), so "all" would be wrong once one file is staged. */}
+      <button type="button" className="gs-btn pri" disabled={noCommit} title={msg.trim() ? `${MOD}Enter` : "Write a message first"} onClick={() => void commit()}>
+        <Check size={13} strokeWidth={2.6} />{staged.length ? `Commit ${cap(staged.length)} staged` : `Commit ${cap(dirty)}`}
+      </button>
+      {up > 0 && !down && pushBtn("dark")}
+    </>)
+    : step === "sync" ? (s.kind === "behind" ? pullBtn("gs-btn ask") : mergeBtns("gs-btn ask", "gs-btn dark"))
+    : step === "push" ? pushBtn("pri")
+    : step === "pr" && led ? (
+      <button type="button" className="gs-btn pri" disabled={busy} onClick={openPrForm}
+        title={`Open a pull request into ${led.base}`}><GitPullRequest size={13} strokeWidth={2.2} />Open PR into {led.base}</button>
+    )
+    : step === "fix" ? sendBtn("gs-btn ask")
+    : null;
+  const crow = (c: LedgerCommit, undo: boolean) => (
+    <Fragment key={c.sha}>
+      <button type="button" className="gl-c" aria-expanded={openSha === c.sha} title={c.subject} onClick={() => openCommit(c.sha)}>
+        <span>{c.subject}</span><em>{ago(c.ts)}</em>
+      </button>
+      {openSha === c.sha && (
+        <div className="gl-open">
+          <div className="gl-meta">{c.sha}{shown ? ` · ${plural(shown.files.length, "file")} · +${shown.add} −${shown.del}` : " · reading…"}</div>
+          {shown?.files.map((f) => {
+            const cut = f.name.lastIndexOf("/");
+            return (
+              <Fragment key={f.name}>
+                <div className="trow gp-row" role="button" tabIndex={0} title={f.name} aria-expanded={fdiff?.name === f.name}
+                  onClick={() => openCommitFile(c.sha, f.name)} onKeyDown={(e) => { if (e.key === "Enter") openCommitFile(c.sha, f.name); }}>
+                  <FileIcon name={f.name} size={14} />
+                  <span className="gp-name">{cut < 0 ? f.name : f.name.slice(cut + 1)}</span>
+                  <span className="gp-dir" dir="rtl">{cut < 0 ? "" : f.name.slice(0, cut)}</span>
+                  <span className="gp-fig"><i>+{f.add}</i>{f.del > 0 && <i>−{f.del}</i>}</span>
+                  <span className="gp-st" style={{ color: ST_COLOR(f.mark) }}>{f.mark}</span>
+                </div>
+                {fdiff?.name === f.name && (
+                  <pre className="gg-diff">{fdiff.text === null ? "reading…" : fdiff.text.split("\n").map((l, i) => <div key={i} style={{ color: diffColor(l) }}>{l || " "}</div>)}</pre>
+                )}
+              </Fragment>
+            );
+          })}
+          {undo && (
+            <div className="gl-acts">
+              <button type="button" className="gl-b ghost err" disabled={busy} title="Take this commit back; its changes stay, staged"
+                onClick={() => undoCommit(c)}><Undo2 size={12} strokeWidth={2.2} />Undo commit</button>
             </div>
           )}
         </div>
       )}
+    </Fragment>
+  );
+  // A list's first few commits, then "N more" opens the rest it has; past that, the graph.
+  const stretch = (name: string, list: LedgerCommit[], total: number) => (<>
+    {(allOf[name] ? list : list.slice(0, ROWS)).map((c, i) => crow(c, name === "local" && i === 0 && !down))}
+    {!allOf[name] && list.length > ROWS && <button type="button" className="gl-c more" onClick={() => setAllOf((a) => ({ ...a, [name]: true }))}><span>{Math.min(total, list.length) - ROWS} more</span></button>}
+    {(allOf[name] || list.length <= ROWS) && total > list.length && <button type="button" className="gl-c more" onClick={() => setGrOpen(true)}><span>{total - list.length} more in the graph</span></button>}
+  </>);
+  const sec = (title: string, n: ReactNode, links?: ReactNode) => <div className="gs-sec caps">{title}<em>{n}</em>{links && <span className="gs-lk">{links}</span>}</div>;
 
-      {/* Both open: CHANGES takes its content up to half the panel, GRAPH the
-          rest. One closed: the other takes everything, and a closed GRAPH's
-          head sits at the foot, the way VS Code's panes stack. */}
-      <div ref={chRef} className="gp-fold" style={{ flex: chClosed ? "none" : grClosed ? "1 1 0" : "0 1 auto", maxHeight: bothOpen ? "52%" : undefined }}>
-        <div className="gp-fh" role="button" aria-expanded={!chClosed} onClick={() => setChClosed((v) => !v)}>
-          {chClosed ? <ChevronRight size={12} strokeWidth={2} /> : <ChevronDown size={12} strokeWidth={2} />}
-          <b>Changes</b>
-          {changed.size > 0 && <em>{changed.size}</em>}
-          <span className="gp-acts" onClick={(e) => e.stopPropagation()}>
-            {unstaged.length > 0 && (
-              <button className="gp-ib" disabled={busy} title="stage all"
-                onClick={() => void gitOp("stage", unstaged.map((f) => f.path))}><Plus size={13} /></button>
-            )}
-            {changed.size > 0 && (
-              <button className="gp-ib" title="more"
-                onClick={(e) => setCtx({ x: e.clientX, y: e.clientY, path: "", staged: false })}><Ellipsis size={13} /></button>
-            )}
-          </span>
-        </div>
-        {!chClosed && (
-          <div className="mscroll gp-body">
-            {project && (
-              <div className="cbox gp-cbox">
-                <textarea value={msg} onChange={(e) => setMsg(e.target.value)} rows={2}
-                  placeholder={`Message (${MOD}↵ to commit on ${branchName || "this branch"})`}
-                  title={`${MOD}Enter to commit`}
-                  onKeyDown={(e) => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && msg.trim() && changed.size && !busy) { e.preventDefault(); void commit(); }
-                  }} />
-                <div className="gp-cbtns">
-                  {ai.commitmsg && (
-                    <button className="gp-btn caps" disabled={gen || busy || !changed.size} title="write the message from the diff"
-                      onClick={() => void generate()}>{gen ? "Writing…" : "✧ Generate"}</button>
-                  )}
-                  {/* The label is the promise: with an index, COMMIT takes only
-                      what's in it (bridge/git.py commit()), so saying "ALL"
-                      would be wrong the moment you stage one file. */}
-                  <button className="gp-btn pri caps" disabled={noCommit} title={`${MOD}Enter`} onClick={() => void commit()}>
-                    {!ready ? "▸ Commit" : staged.length ? `▸ Commit staged (${staged.length})` : `▸ Commit all (${changed.size})`}
-                  </button>
-                </div>
+  return (
+    <div className="panel gp" style={{ border: "1px solid color-mix(in srgb, var(--acc) 16%, transparent)", background: "color-mix(in srgb, var(--panel) 86%, transparent)", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+      <TabKick name="GIT"
+        chip={branchName && (
+          <span ref={brRef} className="gp-branch" title={branchName}><i>⎇</i><Roll slot="branch" v={branchName} /></span>
+        )}
+        tools={<>
+          {ready && right && <span className="gt-when" title={when || undefined}>{right}</span>}
+          <button className={`gp-ib${fetching ? " spin" : ""}`} disabled={busy || fetching}
+            title={s.kind === "none" ? "refresh" : "fetch from origin, then re-read"} onClick={() => void fetchNow()}>
+            <RefreshCw size={13} />
+          </button>
+        </>} />
+
+      <div className="mscroll gl">
+        {!project ? <div className="gp-empty">No session selected.</div>
+          : !ready ? (skel ? (
+            <div className="swapin" style={{ padding: "4px 12px" }} aria-label="Reading the working tree" aria-busy>
+              {[62, 78, 51, 70, 44].map((w, i) => (
+                <Skeleton key={i} className="h-[13px] rounded-none"
+                  style={{ width: `${w}%`, marginBottom: 5, background: "color-mix(in srgb, var(--acc) 13%, transparent)" }} />
+              ))}
+            </div>
+          ) : null)
+          : !git.is_repo ? <div className="gp-empty swapin">Not a git repository.</div>
+          : (<>
+            <div className="gp-rd">
+              {autoErr && <div className="gp-roerr" title={autoErr}>{when || "never checked"} · {autoErr.split("\n")[0]}</div>}
+              <TaskLine project={project} branch={branchName} onSend={onSend} />
+            </div>
+
+            {/* the status card: the situation, the three stops, the one move */}
+            <div className={`gs-card${card.amber ? " amb" : ""}`}>
+              <div className="gs-hl">{card.head}</div>
+              <div className="gs-sub">{card.sub}</div>
+              <div className="gs-stn">
+                {card.stops.map((st, i) => {
+                  const Ic = STOP_IC[st.icon];
+                  return (
+                    <div key={i}>
+                      <span className={`o ${st.tone}`}><Ic size={13} strokeWidth={2.4} /></span>
+                      <span className={`l caps ${st.tone}`}>{STOPS[i]}</span>
+                      <span className={`v ${st.tone}`}>{st.value}</span>
+                    </div>
+                  );
+                })}
               </div>
-            )}
-            {note && (
-              <div className="gp-note" onClick={() => setNote("")} title="dismiss">{note}</div>
-            )}
-            {!project ? <div className="gp-empty">No session selected.</div>
-              : !ready ? (skel ? (
-                <div className="swapin" style={{ padding: "4px 12px" }} aria-label="Reading the working tree" aria-busy>
-                  {[62, 78, 51, 70, 44].map((w, i) => (
-                    <Skeleton key={i} className="h-[13px] rounded-none"
-                      style={{ width: `${w}%`, marginBottom: 5, background: "color-mix(in srgb, var(--acc) 13%, transparent)" }} />
-                  ))}
-                </div>
-              ) : null)
-              : !git.is_repo ? <div className="gp-empty swapin">Not a git repository.</div>
-              : !changed.size ? <div className="gp-empty swapin">Working tree clean.</div>
-              : (
-                <div className="swapin">
-                  {/* Groups only once the index holds something; otherwise the
-                      rows sit flat and the fold's count is the group. */}
-                  {staged.length > 0 && group("STAGED", staged, true)}
-                  {staged.map((f) => row(f, true))}
-                  {staged.length > 0 && unstaged.length > 0 && group("UNSTAGED", unstaged, false)}
-                  {unstaged.map((f) => row(f, false))}
+              {step === "commit" && (
+                <div className="gs-msg">
+                  <textarea ref={msgRef} value={msg} onChange={(e) => setMsg(e.target.value)} rows={1}
+                    placeholder="Commit message" aria-label="Commit message"
+                    title={`${MOD}Enter commits on ${branchName || "this branch"}`}
+                    onKeyDown={(e) => {
+                      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && msg.trim() && changed.size && !busy) { e.preventDefault(); void commit(); }
+                    }} />
+                  {ai.commitmsg && (
+                    <button type="button" className="gs-draft" disabled={gen || busy || !changed.size} title="Write the message from the diff"
+                      onClick={() => void generate()}>
+                      <Sparkles size={10} strokeWidth={2.2} />{gen ? "writing…" : !!msg && AUTO.get(key) === msg ? "drafted" : "Write it"}
+                    </button>
+                  )}
                 </div>
               )}
-          </div>
-        )}
-      </div>
+              {buttons && <div className="gs-btns">{buttons}</div>}
+              {step === "sync" && chk && <div className={`gl-chk ${chk.tone}`}>{chk.tone === "ok" ? <Check size={12} strokeWidth={2.4} /> : <TriangleAlert size={12} strokeWidth={2.2} />}<span title={chk.text}>{chk.text}</span></div>}
+              {prForm && led?.base && (
+                <div className="gl-form gs-form">
+                  <input value={prForm.title} placeholder="Title" aria-label="Pull request title" onChange={(e) => setPrForm({ ...prForm, title: e.target.value })} />
+                  <textarea value={prForm.body} rows={4} placeholder="What changed" aria-label="Pull request description" onChange={(e) => setPrForm({ ...prForm, body: e.target.value })} />
+                  <div className="gs-btns">
+                    <button type="button" className="gs-btn pri" disabled={busy || !prForm.title.trim()} onClick={() => void openPr()}><GitPullRequest size={13} strokeWidth={2.2} />Open PR into {led.base}</button>
+                    <button type="button" className="gs-btn ghost" onClick={() => setPrForm(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {(act || (step === "sync" && clash)) && <div className="gp-act">{act || clash}</div>}
+              {note && <div className="gp-note" onClick={() => setNote("")} title="dismiss">{note}</div>}
+            </div>
 
-      <div className="gp-fold" style={{ flex: grClosed ? "none" : "1 1 0" }}>
-        <div className="gp-fh" role="button" aria-expanded={!grClosed} onClick={() => setGrClosed((v) => !v)}>
-          {grClosed ? <ChevronRight size={12} strokeWidth={2} /> : <ChevronDown size={12} strokeWidth={2} />}
-          <b>Graph</b>
-          <span className="gp-acts" onClick={(e) => e.stopPropagation()}>
-            <button className="gp-filter" title={branchOnly ? "showing this branch — click for every branch" : "showing every branch — click for this branch only"}
-              onClick={() => setBranchOnly((v) => !v)}>
-              <span>{branchOnly ? branchName || "this branch" : "all branches"}</span><ChevronDown size={10} strokeWidth={2} />
-            </button>
-          </span>
-        </div>
-        {!grClosed && (
-          <div className="mscroll gp-body">
-            {project ? (
-              <CommitGraph project={project} branch={branchOnly ? branchName || undefined : undefined}
-                upstream={git?.upstream} ahead={ahead} behind={behind} nonce={nonce} />
-            ) : <div className="gp-empty">No session selected.</div>}
-          </div>
-        )}
+            {/* plain lists under the card */}
+            {dirty > 0 && (<>
+              {sec("Changes", dirty, <>
+                {unstaged.length > 0 && <button className="gp-ib" disabled={busy} title="stage all" onClick={() => void gitOp("stage", unstaged.map((f) => f.path))}><Plus size={13} /></button>}
+                <button className="gp-ib" title="more" onClick={(e) => setCtx({ x: e.clientX, y: e.clientY, path: "", staged: false })}><Ellipsis size={13} /></button>
+              </>)}
+              {/* Groups only once the index holds something; otherwise the rows sit flat. */}
+              {staged.length > 0 && group("STAGED", staged, true)}
+              {staged.map((f) => row(f, true))}
+              {staged.length > 0 && unstaged.length > 0 && group("UNSTAGED", unstaged, false)}
+              {unstaged.map((f) => row(f, false))}
+            </>)}
+
+            {/* what origin has that this branch doesn't; the card moves it unless a commit comes first */}
+            {down > 0 && (<>
+              {sec("Coming in", down, step !== "sync" && (s.kind === "behind" ? pullBtn("gl-b q") : mergeBtns("gl-b q", "gl-b q")))}
+              {incoming?.commits.slice(0, IN_ROWS).map((c) => (
+                <div key={c.sha} className="gl-c" title={c.subject}><span>{c.subject}</span><em>{ago(c.ts)}</em></div>
+              ))}
+              {down > IN_ROWS && <button type="button" className="gl-c more" onClick={() => setGrOpen(true)}><span>{down - IN_ROWS} more in the graph</span></button>}
+              {step !== "sync" && clash && <div className="gs-clash-in">{clash}</div>}
+              {step !== "sync" && chk && <div className={`gl-chk ${chk.tone}`}>{chk.tone === "ok" ? <Check size={12} strokeWidth={2.4} /> : <TriangleAlert size={12} strokeWidth={2.2} />}<span title={chk.text}>{chk.text}</span></div>}
+            </>)}
+
+            {localN > 0 && (<>{sec("To push", localN)}{stretch("local", local, localN)}</>)}
+
+            {prInfo && (<>
+              {sec("Pull request", `#${prInfo.number}`, <>
+                {/* the card holds this move when the PR is the step; otherwise it waits here */}
+                {step !== "fix" && sendBtn("gl-b q", true)}
+                <a className="gp-ib" href={prInfo.url} target="_blank" rel="noreferrer" title="Open on GitHub"><ExternalLink size={12} strokeWidth={2} /></a>
+              </>)}
+              <div className="gl-c" title={prInfo.title}><span>{prInfo.title}</span><em>{stateLine(prInfo).toLowerCase()}</em></div>
+              {[...prInfo.checks].sort((a, b) => Number(b.state === "fail") - Number(a.state === "fail")).slice(0, 6).map((c) => (
+                <div key={c.name + c.workflow} className={`gl-ck ${c.state}`} title={c.workflow}>
+                  <i>{c.state === "pass" ? <Check size={9} strokeWidth={3.2} /> : c.state === "fail" ? <X size={9} strokeWidth={3.2} /> : null}</i>
+                  <span>{c.name}</span><em>{c.state === "pass" ? "passed" : c.state === "fail" ? "failed" : "running"}</em>
+                </div>
+              ))}
+            </>)}
+
+            {!!led?.base && led.shipped_n > 0 && (<>{sec(prInfo ? "In the PR" : `Not in ${led.base}`, led.shipped_n,
+              !prInfo && !prForm && step !== "pr" && (
+                <button type="button" className="gl-b q" disabled={busy} onClick={openPrForm}
+                  title={up ? "Opens a pull request for what origin has; push first to include the rest" : `Open a pull request into ${led.base}`}>
+                  <GitPullRequest size={13} strokeWidth={2.2} />Open PR
+                </button>))}{stretch("shipped", led.shipped, led.shipped_n)}</>)}
+
+            {/* the base (a menu: BRANCHES' Target) and whether it moved, then the graph */}
+            <div className="gs-foot">
+              {!!led?.base && (<>
+                vs<button type="button" className="gs-base" title="The branch this one is compared with. Click to change."
+                  onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setBaseAt({ x: r.left, y: r.bottom + 4 }); }}>
+                  <span>{led.base}</span><ChevronDown size={10} strokeWidth={2.6} />
+                </button>
+                {led.behind > 0 && <>
+                  <em>moved {led.behind}</em>
+                  <button type="button" className="gl-b q" disabled={busy} title={`Merge ${led.ref} into ${branchName} (a merge commit, never a rebase)`} onClick={() => void updateBase()}>Update</button>
+                </>}
+              </>)}
+              <button type="button" className="gs-graph" aria-expanded={grOpen} onClick={() => setGrOpen((v) => !v)}>
+                Graph{grOpen ? <ChevronDown size={11} strokeWidth={2.4} /> : <ChevronRight size={11} strokeWidth={2.4} />}
+              </button>
+            </div>
+            {grOpen && (
+              <div className="gl-graph">
+                <div className="gp-fh">
+                  <b>Graph</b>
+                  <span className="gp-acts">
+                    <button className="gp-filter" title={branchOnly ? "showing this branch — click for every branch" : "showing every branch — click for this branch only"}
+                      onClick={() => setBranchOnly((v) => !v)}>
+                      <span>{branchOnly ? branchName || "this branch" : "all branches"}</span><ChevronDown size={10} strokeWidth={2} />
+                    </button>
+                  </span>
+                </div>
+                <CommitGraph project={project} branch={branchOnly ? branchName || undefined : undefined}
+                  upstream={git?.upstream} ahead={ahead} behind={behind} nonce={nonce} />
+              </div>
+            )}
+          </>)}
       </div>
 
       {ctx && (
         <ContextMenu ctx={{ x: ctx.x, y: ctx.y, type: ctx.path ? "file" : "folder", id: ctx.path, label: ctx.path || "all changes" }}
           items={ctxItems(ctx)} onClose={() => setCtx(null)} />
+      )}
+      {baseAt && led && (
+        <ContextMenu ctx={{ x: baseAt.x, y: baseAt.y, type: "base", id: "base", label: `compare ${branchName} with` }}
+          items={[
+            ...led.branches.slice(0, 14).map((b): CtxItem => ({ icon: b === led.base ? "✓" : "⎇", label: b, onClick: () => void setBase(b) })),
+            { divider: true },
+            { icon: "↺", label: "Back to the project's default", onClick: () => void setBase(null) },
+          ]} onClose={() => setBaseAt(null)} />
       )}
     </div>
   );

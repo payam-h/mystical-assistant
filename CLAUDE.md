@@ -32,10 +32,16 @@ the user at it rather than restarting. Details: the **bridge-ship** skill.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q      # 1007 passing, ~19s (2026-08-18)
+python3 -m pytest tests/ -q -n 6   # backend; ~2 min on 6 workers (pytest-xdist), 7-10 min without -n
+npm run check                      # in bridge/dashboard/web or bridge/miniapp/web: tsc + every *.check.ts
 ```
 
-Fully green. Anything red is your change — there is no known-failure floor.
+Anything red is your change, on macOS too, with one check first: run a red test alone.
+Two time real threads and fail when the machine is busy (both pass alone):
+`test_rivendell_channel.py::test_a_question_nobody_answers_fails_the_run` and
+`test_logostyle.py::test_a_failed_call_says_why_and_keeps_what_landed`. If the suite hangs on macOS at
+`test_device_setup.py::test_a_wall_the_hidden_user_gets_through_comes_down_and_set_up_fails_closed[8787]`
+(it did twice on 2026-10-20; cause not found, and the test opens no port), `--deselect` it.
 
 `tests/conftest.py` pins the environment **before** `bridge.config` is imported,
 because config freezes every setting into module constants at import time. A

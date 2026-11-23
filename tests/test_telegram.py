@@ -248,6 +248,26 @@ def test_long_code_folds_in_a_rich_message_and_short_code_stays():
     assert folded.count("<details>") == 1
 
 
+def test_an_answers_callout_marker_reads_as_its_bold_word_sent_or_streaming(monkeypatch):
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(telegram.config, "TG_RICH", True)
+    box = "> [!IMPORTANT]\n> - Turn FileVault on.\n\nWrote `> [!NOTE]` docs."
+    telegram.send(1, box, rich=True)
+    telegram.draft(1, 2, box)
+    want = "> **IMPORTANT**\n> - Turn FileVault on.\n\nWrote `> [!NOTE]` docs."
+    assert [json.loads(p["rich_message"])["markdown"] for _, p in calls] == [want, want]
+
+
+def test_a_callout_marker_in_fenced_code_stays_as_written(monkeypatch):
+    # A fence shows the syntax, closed or still streaming in; the box after it is a box.
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(telegram.config, "TG_RICH", True)
+    telegram.send(1, "Like so:\n```md\n> [!NOTE]\n> Hi.\n```\n> [!TIP]\n> Short.", rich=True)
+    telegram.draft(1, 2, "Like so:\n```md\n> [!NOTE]")
+    assert [json.loads(p["rich_message"])["markdown"] for _, p in calls] == [
+        "Like so:\n```md\n> [!NOTE]\n> Hi.\n```\n> **TIP**\n> Short.", "Like so:\n```md\n> [!NOTE]"]
+
+
 def test_html_goes_as_it_is_and_as_plain_text_when_refused(monkeypatch):
     calls = _capture(monkeypatch, lambda m, p: None if p.get("parse_mode") else {"message_id": 3})
     telegram.send(1, 'Back at <tg-time unix="1" format="t">10:00</tg-time> &amp; on', html=True, silent=True)

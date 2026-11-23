@@ -1,5 +1,6 @@
 import type { DataEv } from "./lib/dataview";
 import type { Profile, ProfilesInfo, ProfileWrite } from "./lib/profiles";
+import type { Flow, FlowOption, FlowSet, PastFlow } from "./lib/flowview";
 import type { Caps, HelperConfig, MemberInfo } from "./lib/multi";
 import type { BranchPr, BranchStatus } from "./lib/branchrows";
 
@@ -15,19 +16,53 @@ export const TOKEN = params.get("token") ?? "";
 export const AUTH_REQUIRED =
   (window as Window & { __DASH_AUTH_REQUIRED__?: boolean }).__DASH_AUTH_REQUIRED__ === true;
 
+/** GET /local/sessions/<id>/meter (bridge/meter.py). Times are epoch seconds. */
+export type MeterWho = "claude" | "tools" | "helpers" | "you" | "away";
+export interface MeterItem { label: string; tokens: number; size?: number; reads?: number; turn: string | null }
+export interface MeterHelper { id: string; what: string; start: number; end: number; running: boolean; tokens: number; requests: number; turn: string | null }
+export interface Meter {
+  series: [number, number][];                       // [when, window] per request
+  segs: [number, number, MeterWho][];               // who was working, start to end
+  time: Record<MeterWho, number>;                   // seconds
+  window: { total: number; kinds: Record<string, number> };
+  spent: { total: number; fresh: number; reread: number; kinds: Record<string, number> };
+  biggest: { window: Record<string, MeterItem[]>; spent: Record<string, MeterItem[]> };
+  helpers: MeterHelper[];
+  turns: Record<string, { spent: number; requests: number; from: number; to: number; peak: number }>;
+  compactions: [number, number | null][];
+}
+
 export interface Project {
   rel: string;
   name: string;
 }
+/** What NEW PROJECT makes: a fresh repo, a folder you name, a clone, or a chat with no code. */
+export type NewProjectKind = "new" | "folder" | "clone" | "chat";
+export interface NewProjectBody {
+  kind: NewProjectKind;
+  name?: string;      // new: the repo's folder; chat: its name
+  path?: string;      // folder: the folder; clone: where the clone goes
+  url?: string;       // clone
+  prompt: string;
+  confirmed: boolean; // the notices were shown and accepted
+}
+/** Something the bridge won't do without a yes: git init in your folder, or working outside the projects folder. */
+export interface NewProjectNote { kind: "init" | "outside"; text: string }
 // Why a session is out of the active list. null = still active.
 export type Lifecycle = "done" | "abandoned" | "backlog";
 // An objective the session keeps working on. The model owns the verdict (it calls
 // UpdateGoal); the bridge re-prompts after each turn while state is "active".
 export interface Goal {
   objective: string;
+  /** Its short name: the model's, else the objective's head (bridge/goals.py
+   *  title_of). Absent from a bridge older than this dashboard. */
+  title?: string;
   state: "active" | "complete" | "blocked";
   iter: number;
   note?: string;
+  since?: number;  // epoch s it was set; goals from before have none
+  at?: number;     // epoch s it was met or blocked
+  seen?: boolean;  // a met goal you have prompted past
 }
 /** What a Rivendell job was about, filed on its session (bridge/rivendell_jobs.py
  *  facts()). Only `kind` is near-certain; every other fact is there when Rivendell
@@ -55,6 +90,9 @@ export interface SessionBrief {
   id: string;
   title: string | null;
   project: string;
+  // Its project's folder is gone (moved, renamed, deleted): it lists under the project's
+  // name, marked, and MOVE TO PROJECT puts it in one of yours. Absent from an older bridge.
+  missing?: boolean;
   created?: number; // epoch seconds the session was created (PLUGINS tab sorts by this)
   updated: number;
   asked?: number | null; // epoch seconds its last prompt went in; null before the first (RECENT sorts by it)
@@ -78,6 +116,9 @@ export interface SessionBrief {
   helpers?: HelperConfig;
   parent_session?: string | null;
   member?: MemberInfo | null;
+  // A ticket or merge session names its super session (tickets.owners); that one carries its set's count.
+  ticket_of?: string;
+  tickets?: { done: number; total: number; status: string; yours?: string[] };
   lifecycle?: Lifecycle | null; // null = active; anything else is why it's hidden
   // What the session's next run gets (bridge profiles.brief): a knob set by
   // hand in it, else its profile's, else the default. Loaded into the
@@ -157,6 +198,10 @@ export interface StoreTurn {
   model?: string | null;
   effort?: string | null;
   permission_mode?: string | null;
+  // Who sent the prompt when you didn't type it (lib/sender): 'telegram',
+  // 'miniapp', 'mystical:<kind>', and the sender's why. null = you, or older.
+  sent_by?: string | null;
+  sent_why?: string | null;
   // What the turn spent. All four null = never reported (unknown, not zero).
   tok_in?: number | null;
   tok_out?: number | null;
@@ -195,6 +240,10 @@ export interface AnswerSelection {
 /** What a respond can carry: a question's selections, or a gateway card's value
  *  (request_secret). The value goes to the route and nowhere else. */
 export type CardAnswer = AnswerSelection | { value: string };
+/** An Allow that stands for the rest of the turn, or for the chat from now on. */
+export type AllowScope = "turn" | "chat";
+export const SCOPE_WORD: Record<AllowScope, string> = { turn: "Always allow in this turn", chat: "Always allow in this chat" };
+export const scopeAnswer = (scope: AllowScope): CardAnswer[] => [{ header: "scope", labels: [scope] }];
 /** One card a running job is blocked on (runner.py Job.pending). */
 export interface PendingCard {
   request_id: string;
@@ -259,6 +308,15 @@ export type RunEvent =
   | { type: "result"; result: string; cost: number; elapsed: number; is_error?: boolean }
   | { type: "error"; message: string }
   | { type: "stopped" }
+  // A background command or monitor the agent left running (runner._note_background):
+  // one event when it starts, and background_done when it ends. `state` there is the
+  // CLI's status (completed, failed, killed, stopped) or ours: replaced (your next
+  // message ended the wait), expired (the wait hit its cap).
+  | { type: "background"; id: string; state: "running"; kind: "command" | "monitor"; text: string; command: string }
+  | { type: "background_done"; id: string; state: string; text: string }
+  // The card's checkbox (id + notify: prompt the agent if the wait runs out), or the
+  // agent's own limit on the wait, in seconds (cap, no id).
+  | { type: "background_set"; id?: string; notify?: boolean; cap?: number }
   // A line in a teammate's device run that isn't the run's own: "Mystical
   // restarted HH:MM · this run kept going" (bridge/device_view.py).
   | { type: "divider"; text: string }
@@ -267,6 +325,8 @@ export type RunEvent =
   | { type: "switch"; from: string; to: string; turns?: number; whole?: boolean }
   | { type: "delegation"; session_id: string; name: string; brief?: string; agent?: string; profile?: string | null; write?: boolean }
   | { type: "merge"; name: string; state: string; session_id?: string }
+  // The chat's plan changed (bridge/chatplan.py, lib/planline).
+  | import("./lib/planline").PlanEv
   // What the bridge's own tools record (bridge/gateway_tools.py, bridge/rules.py).
   // A figure is the agent showing you something, with a caption: `images` are upload-dir
   // paths, served by /local/attachment. `compare` is [before, after].
@@ -275,6 +335,8 @@ export type RunEvent =
   | DataEv
   // show_design: a board the agent made (bridge/design_board.py), and its PREVIEW DESIGN button.
   | { type: "design"; board: string; title: string; pages: string[]; ref?: string }
+  // open_site: the Mystical browser it opened (bridge/site_browser.py), and that card's buttons.
+  | { type: "browser"; url: string; profile: string }
   // offer_review: a review the agent offers, with a button after its final answer (OfferCard).
   | { type: "offer"; kind: string; title: string; detail: string; rounds: number; prompt: string }
   // run_checks. A count the runner's output didn't show is null. `new`: failures not on
@@ -294,10 +356,20 @@ export type RunEvent =
   // `detail`: what the card asks about in full — an MCP call's input (a tracker
   // comment is judged on its whole text, not on 120 chars of it), a Bash command
   // longer than the summary, an ExitPlanMode's plan.
-  | { type: "permission"; request_id: string; tool_name: string; summary: string; detail?: string }
+  // `scopes`: how far an Allow may reach past this one call (bridge/gateway.py SCOPES;
+  // the helpers card). The pick goes back as an answer headed `scope`.
+  | { type: "permission"; request_id: string; tool_name: string; summary: string; detail?: string; scopes?: AllowScope[] }
   | { type: "question"; request_id: string; questions: Question[] }
-  | { type: "permission_resolved"; request_id: string; behavior: "allow" | "deny" }
-  | { type: "question_answered"; request_id: string; answers: AnswerSelection[] };
+  | { type: "permission_resolved"; request_id: string; behavior: "allow" | "deny"; scope?: AllowScope }
+  | { type: "question_answered"; request_id: string; answers: AnswerSelection[] }
+  // The CLI retrying a request (system/api_retry), one per try. `error` is its
+  // class: overloaded, rate_limit, server_error, http_529, connection…
+  | { type: "retry"; attempt: number; max: number; delay_ms: number; error: string }
+  // A refusal (rate_limit_event, status rejected). error_code credits_required is
+  // the one no reset fixes; `buy` is whether the login can buy credits.
+  | { type: "ratelimit"; status: "rejected"; error_code: string | null; resets_at: number | null; buy: boolean | null }
+  // Claude Code declined to carry on the turn a bridge restart cut (recovery.CONTINUED).
+  | { type: "resume"; declined: true };
 
 /** A run event with the clock the store kept for it. `at` is epoch seconds and
  *  is absent on a live event, which has not been stored yet — a surface that
@@ -322,6 +394,9 @@ export interface Transcript {
   oldest_seq?: number | null;
   /** First turn whose events are loaded — where rendering should start. */
   tail_from?: string | null;
+  /** The Savers trials this session drew the saver in (bridge/savers.py arms_for):
+   *  its prompts' tag says so. Absent on a bridge older than Savers. */
+  savers?: string[];
 }
 
 export interface ServerInfo {
@@ -369,6 +444,8 @@ export interface ProjectsListing {
   remotes?: Record<string, string>; // rel -> owner/repo of origin, absent if not GitHub
   marks?: Record<string, ProjectMark>; // rel -> its mark; absent on a bridge older than marks
   self?: string; // the bridge's own checkout, when it sits under BASE_PATH
+  roots?: string[]; // folders outside BASE_PATH you allowed (bridge/roots.py); absent on an older bridge
+  chats?: string; // the rel chat projects live under
 }
 
 /** What a project's tile shows and the colour it wears (bridge/projectmarks.py).
@@ -467,6 +544,13 @@ export interface GitStatus {
   // Only while upstream is "": commits a publish would send, null when there
   // is no origin to publish to.
   unpublished?: number | null;
+}
+/** The GIT tab's line under the working tree (bridge/git.py ledger()). base "" = no base to compare with. */
+export interface LedgerCommit { sha: string; subject: string; ts: number }
+export interface GitLedger {
+  base: string; ref: string; ahead: number; behind: number;
+  local: LedgerCommit[]; shipped: LedgerCommit[]; shipped_n: number;
+  branches: string[];   // what the base menu offers
 }
 // One node of the commit graph — `parents` is what the lane layout walks.
 export interface GitCommit {
@@ -712,6 +796,7 @@ export interface RivendellTask {
   session_id: string | null; // the session that ran (or runs) its request on this bridge
   stale?: boolean;           // its instance failed: the last good answer, shown dimmed
   run?: RivendellRun | null; // what this bridge knows about its run, when it ran here
+  project_dir?: string | null; // everywhere view: its project's checkout here ("/ainurhq/x"), for WORK ON IT
 }
 /** TEST LINK's outcome (POST /local/rivendell/test). ok null = re-dialing a
  *  parked token; the chip shows how that went. */
@@ -757,6 +842,7 @@ export interface RivendellTasks {
     detail: string;
   }[];
   links?: RivendellLink[];  // each connection's state, for the chip and banner
+  everywhere?: boolean;      // no project links this checkout: every project's tasks (the tab keeps yours)
 }
 /** A card's peek (bridge/rivendell.py task_detail): the task in full, read off
  *  Rivendell's /mcp, and the GitHub issue its description defers to. */
@@ -849,7 +935,13 @@ export interface Weather {
   hum: string;
   unit: "C" | "F";
   loc: string;
+  // "07:12" in the place's own time; absent from an older bridge
+  sunrise?: string | null;
+  sunset?: string | null;
+  tz?: string | null; // the place's IANA zone, the clock sunrise and sunset are on
 }
+/** A geocoder match the weather city picker offers (bridge/weather.search). */
+export interface Place { name: string; lat: number; lon: number }
 export interface Worktree {
   path: string;
   rel: string | null;
@@ -950,9 +1042,19 @@ export interface AwaitingSession {
 // usage limit or API error and waiting to auto-resume; asking = the last turn
 // finished by asking you something (the transcript's ASK card) — your move, but
 // nothing is blocked; waiting = the last turn ended on WaitForSession and it
-// wakes when the session `on` finishes (bridge/waits.py); else idle.
+// wakes when the session `on` finishes (bridge/waits.py); background = the turn
+// answered and Claude Code says idle, but background tasks still run in its
+// process; credits = the last turn stopped on credits_required, which no reset
+// fixes (bridge/limits.py block_credits); else idle.
 export type SessionState =
-  "working" | "awaiting" | "checking" | "parked" | "asking" | "waiting" | "live" | "idle";
+  "working" | "awaiting" | "checking" | "parked" | "asking" | "waiting" | "live" | "background" | "credits" | "idle";
+/** A task Claude Code still runs after the answer (background_tasks_changed). */
+export interface BgTask {
+  id: string;
+  type: "shell" | "agent" | "task";
+  desc: string;
+  since: number;   // when the bridge first saw it, epoch s
+}
 // One unified per-session status, identical on every surface. Bridge sessions can
 // be any state; native (VS Code/terminal) sessions are working/idle only.
 export interface SessionStatus {
@@ -963,7 +1065,11 @@ export interface SessionStatus {
   label: string | null;
   // `waiting` only: the session it waits on, what it will do then, since when (epoch s).
   // `since` on `working` is the turn's start, folded in by App from /running's jobs.
+  // No `on`: the chat waits on its own helpers (bridge/channel.py), `agents` of them
+  // mid-turn and `needs` of those stopped on a card for you.
   on?: string;
+  agents?: number;
+  needs?: number;
   then?: string;
   since?: number;
   // `parked` only (bridge/limits.py), with `since` = when it stopped: when it
@@ -973,6 +1079,18 @@ export interface SessionStatus {
   at?: number;
   slot?: number | null;
   offer?: { slot: number; label: string }[] | null;
+  why?: string | null; // why it asks when Auto-switch could have moved it: only logins kept out of it have room
+  // `background` only, with `since` = when the answer landed: the tasks still
+  // running (shells too), and the most that ran at once.
+  bg?: BgTask[];
+  peak?: number;
+  // `working` only: the CLI retrying a request (system/api_retry; `error` is its
+  // class, `at` epoch s), and `resumed` while Claude Code carries on a turn a
+  // bridge restart cut. A bridge older than these sends neither.
+  retry?: { attempt: number; max: number; delay_ms: number; error: string; at: number } | null;
+  resumed?: boolean;
+  // `credits` only, with `at` and `slot`: whether that login can buy credits (null = unknown).
+  buy?: boolean | null;
 }
 export interface JobActivity {
   state: "tool" | "awaiting" | "thinking";
@@ -1058,9 +1176,19 @@ export interface Received {
   yours?: { id: string; title: string } | null;
 }
 
+/** A share still coming in: downloading counts 0–90 by its bytes, filing it the rest. */
+export interface Receiving {
+  id: string;
+  title: string;
+  from: string;
+  stage: "download" | "filing";
+  pct: number;
+}
+
 export interface TeamOverview {
   roster: Teammate[];
   inbox: Received[];
+  receiving?: Receiving[];   // absent from an older bridge
   outbox: Share[];
   error: string | null;     // why the roster couldn't be read (no link, Rivendell down)
 }
@@ -1174,30 +1302,6 @@ export interface EnrichedSession {
   model?: string | null;
   permission_mode?: string;
 }
-/** One tool's share of a session's wall clock. `union_s` counts overlapping calls
- *  once; `naive_s` just adds durations. Equal values mean the tool never ran
- *  concurrently with itself — which is what says whether parallelising is on the
- *  table. */
-export interface ToolSpend {
-  calls: number;
-  union_s: number;
-  naive_s: number;
-  avg_s: number;
-  unfinished: number; // started, never finished — the turn was killed mid-call
-}
-
-/** Where a session's time and tokens went. Dollars are deliberately absent: the
- *  CLI prices runs off API list rates while these go through a subscription. */
-export interface SessionBreakdown {
-  wall: number; // seconds across the session's turns
-  tools: Record<string, ToolSpend>;
-  thinking_s: number;
-  waiting_s: number; // AskUserQuestion — a human deciding, not the session being slow
-  model_s: number; // the remainder: generating
-  tokens: { in: number; out: number; cache_w: number; cache_r: number } | null;
-  capped: number; // turns the hang watchdog killed
-  turns: number;
-}
 export interface UsageBucket {
   percent: number;
   resets_at: string | null;
@@ -1209,6 +1313,7 @@ export interface AccountInfo {
   alias: string | null;
   disabled: boolean;
   default: boolean;
+  auto_switch?: boolean; // false = out of Auto-switch: a limit only ever offers this login to you (absent from an older bridge)
   left: number | null; // % of the tighter usage window unspent; null = meter unreadable
   resets_at: string | null; // when that window rolls and `left` goes back up
   five_hour: UsageBucket | null; // both windows, so a row can show the near reset
@@ -1217,6 +1322,12 @@ export interface AccountInfo {
   runs_out_at?: string | null; // the 5-hour window at the last hour's pace, when that beats its refill
   logged_in: boolean; // false = the OAuth token is gone/expired; only a re-login fixes it
   plan: string | null; // "MAX 20x" / "TEAM 5x" / "PRO", off the login's own credentials
+  // How fresh the meter is (bridge/usage.py), absent from an older bridge: when it
+  // was last read (through the CLI, or a running turn's report), whether a turn
+  // reported it in the last 3 min, and that turn's last word on the limit.
+  read_at?: number | null;
+  live?: boolean;
+  status?: "allowed" | "allowed_warning" | "rejected" | null;
 }
 /** A vetted non-Claude agent the bridge can run over ACP (bridge/acp_agents.py
  *  PRESETS). There is no custom command: this list is the whole menu. */
@@ -1331,8 +1442,23 @@ export interface AccountsInfo {
   default_policy: string;
   pending_login: { slot: number; url: string | null } | null;
 }
-/** One AI-powered extra. Everything here spends a model call nobody asked for,
- *  so each ships off and is switched on from the settings modal's AI tab. */
+/** One ticket in a set (bridge/tickets.py): `session` is its live turn state, "running" or how the last ended.
+ *  `stalled`: its turn ended and nothing will start another, so it waits for Continue. `why`: what a fix is for.
+ *  `yours`: its file says ready-for-human, so no session takes it; Go marks it done. */
+export interface TicketRow {
+  status: "queued" | "running" | "retry" | "done" | "fix" | "missing" | "yours";
+  title: string; blocked_by: string[]; branch: string; session_id: string; session?: string;
+  stalled?: boolean; why?: string;
+}
+/** `merge_stalled`: the merge session's turn ended without finishing, as a ticket's `stalled`. */
+export interface TicketSet {
+  folder: string; slug: string; parent_session: string; feature_branch: string; merged: number;
+  status: "approve" | "building" | "merging" | "merged" | "stopped" | "fix"; error?: string;
+  tickets: Record<string, TicketRow>; merge_session?: string; merge_stalled?: boolean;
+}
+/** One AI-powered extra, switched from the settings modal's AI tab. What runs on its
+ *  own ships off. A sub-switch (`parent`: SKILL PATHS' four) is drawn and obeyed only
+ *  while its parent is on; TICKETS among them ships off, the rest ship on. */
 export interface AiFeature {
   key: string;
   label: string;
@@ -1341,6 +1467,24 @@ export interface AiFeature {
   tokens?: string; // what one unit burns, in + out — absent on a bridge older than the figure
   about: string; // the paragraph under the switch — what it does, what it adds
   enabled: boolean;
+  parent?: string; // a sub-switch: the key it sits under, drawn and obeyed only while that one is on
+}
+/** One Saver (bridge/savers.py): a switch of Claude Code's own that makes a turn
+ *  cheaper. TRIAL puts it on every other new session and scores both halves on
+ *  their first turn; `trial` is the latest one's result (null when none ran).
+ *  Deltas are integer percents of the other half, negative = the saver's half
+ *  lower; null while a half has nothing to compare. */
+export interface Saver {
+  key: string;
+  label: string;
+  hint: string;
+  mode: "off" | "trial" | "on";
+  target: number; // sessions a trial scores before it reports
+  trial: {
+    n: number; on: number; off: number;
+    words: number | null; tokens: number | null; tools: number | null;
+    errors_on: number; errors_off: number;
+  } | null;
 }
 /** One bundled integration (bridge/integrations.py) and whether it is installed. A
  *  plugin that isn't installed has its routes answer 404, so the UI hides it
@@ -1431,6 +1575,30 @@ export interface TodayInfo {
   cost: number | null;
 }
 
+/** Something that shipped today (bridge/wins.py): a merge, a commit (or a
+ *  turn's commits folded into one), a push, a PR opened, a test run that passed. */
+export interface Win {
+  ts: number;
+  kind: "merge" | "commit" | "commits" | "push" | "pr" | "tests";
+  text: string; // the branch, the subject, the PR number, the test count, or how many commits
+  detail?: string | null; // "commits": the last one's subject
+  project: string;
+  session: string;
+  turn: string;
+  big: boolean;
+}
+
+/** HOME's spine: today since local midnight, newest win first. */
+export interface TodayWins {
+  since: number;
+  now: number;
+  wins: Win[];
+  work: { project: string; start: number; end: number }[];
+  away: { start: number; end: number }[];
+  worked: number; // wall seconds
+  yesterday?: { wins: number; worked: number }; // only before today's first win
+}
+
 /** One week, grouped per project — time and tokens, no dollars (9f612a4). */
 export interface WeekProject {
   project: string;
@@ -1454,6 +1622,7 @@ export interface WeeklyReport {
     tokens: { in: number; out: number; cache_w: number; cache_r: number } | null;
   };
   days: { day: string; turns: number; elapsed: number }[];
+  hours?: number[][]; // turns per weekday (Mon..Sun) x local hour; absent on an older bridge
   prev: { turns: number; elapsed: number; tokens: number | null };
   failures?: { code: string; label: string; n: number }[]; // failed turns by outcome, commonest first
 }
@@ -1505,6 +1674,16 @@ export interface SlashCommand {
   description: string;
   scope: "project" | "user" | "plugin" | "builtin";
 }
+
+// The one `/name` POST /local/route (bridge/route.py) offers for what is in the composer.
+// `kind`: start = a command for the typed text, next = the step after a flow command
+// ended. `arg` goes after the name, `fresh` means open it in a new session, `alts` are the other fits.
+// Acted on by lib/route.ts.
+export type Route = {
+  name: string; desc: string; why: string; auto: boolean; arg: string; fresh: boolean;
+  kind: "start" | "next";
+  alts: { name: string; desc: string; why: string }[];
+};
 
 // Plugins are the catalog's bigger sibling: Claude Code installs and versions a
 // whole bundle (multi-file skills, agents, MCP servers), so `claude plugin`
@@ -1564,6 +1743,25 @@ const pushed = (project: string, branch?: string) => <T extends { ok: boolean }>
   return r;
 };
 
+/** GET /local/flows (bridge/flowsettings.py state): every flow setting, bridge-wide. */
+/** ponytail_off: PONYTAIL is off and the step is its plugin's, so it won't run; "here": only in a here
+ *  build (DESIGN's and BUILD's REVIEW, the council's after tickets merge). */
+export interface FlowStep { step: string; fixed: boolean; on: boolean; ponytail_off: boolean | "here" }
+export interface FlowRunDefaults { model: string; mode: string; effort: string; trim: string }
+export interface FlowSetting {
+  id: string; on: boolean; next: boolean; tickets?: boolean; approve?: boolean;
+  run: FlowRunDefaults; run_saved: boolean; steps: FlowStep[];
+}
+export interface FlowSettings {
+  on: boolean; autopick: boolean; smartzone: boolean; guess: "auto" | "hand"; nokind: "claude" | "typed";
+  presets: boolean; flows: FlowSetting[];
+}
+export type FlowChange =
+  | { key: string; value: boolean | string }
+  | { flow: string; key: string; value: boolean | string | Record<string, string>; step?: string }
+  | { reset: string }
+  | { presets: Record<string, Record<string, string>> };
+
 export interface RunBody {
   prompt: string;
   images: string[];
@@ -1574,6 +1772,10 @@ export interface RunBody {
   permission_mode?: string; // the picker's mode — the run saves it to the session; omit to keep the session's
   ponytail?: string; // per-run code-minimalism intensity (off/lite/full/ultra); omit for default
   force?: boolean; // skip the "unrelated to this session?" check (user already decided)
+  pick_once?: boolean; // a kind's preset: this prompt only, the session's saved picks stay
+  no_path?: boolean; // Esc took the auto-applied skill out of this prompt: the run is told there is no path
+  flow?: string; // the flow this prompt starts; the bridge puts its first step in front (bridge/paths.py start_flow)
+  by?: "you" | "guess"; // a tap or Tab, or the box's guess
 }
 
 // /local/run either starts a job or holds the prompt because it looks unrelated to
@@ -1617,6 +1819,13 @@ export interface GraphState {
   stale: boolean;
   building: boolean;
   repo_on?: boolean; // this repo's own switch (SETTINGS ▸ Projects ▸ Project map); absent on an older bridge
+}
+
+// graphify itself on the bridge machine, and the install a PROJECT MAP switch offers while it is missing.
+export interface GraphInstall {
+  installed: boolean;
+  state?: "running" | "error"; // absent: no install running, and the last one (if any) worked
+  error?: string;
 }
 
 // One lesson written after a turn, listed by the LEARN tab. Body is fetched
@@ -1738,6 +1947,69 @@ export interface MoveJob {
  *  dock polls now rather than on its next idle beat. */
 export const MOVE_EVENT = "hud:move";
 
+export interface CouncilFinding {
+  id: string;
+  sev: "must" | "should" | "nit";
+  file: string;
+  line: number | null;
+  title: string;
+  by: string[];
+  state: "open" | "fixed" | "answered";
+  answer: string;
+  blocking?: boolean;
+  dismissed?: boolean;
+  /** The round it stands at, in the brief's lists. */
+  round?: number;
+}
+/** A reviewer in a run, keyed "<agent>:<account>" (bridge/council.py). "out" sat the
+ *  round out, `error` saying why. A run saved before reviewers per account keys its
+ *  seats "claude"/"codex", names none, and may hold off, sign-in or not-allowed. */
+export interface CouncilSeat {
+  state: "running" | "done" | "error" | "stopped" | "on" | "out" | "off" | "sign-in" | "not-allowed";
+  score: number | null;
+  summary: string;
+  error: string;
+  agent?: string;
+  /** The account's name; "" for an agent's own machine login. */
+  label?: string;
+}
+/** `ran`: who answered it, the keys a finding's `by` counts against (older bridges omit it). */
+export interface CouncilRound { n: number; score: number | null; blocking: number; ran?: string[] }
+export interface CouncilBrief {
+  status: string;
+  reason: string;
+  round: number;
+  max_rounds: number;
+  bar: number;
+  score: number | null;
+  rounds: CouncilRound[];
+  seats: Record<string, CouncilSeat>;
+  stuck: { finding: CouncilFinding; rounds: number; answer: string } | null;
+  /** The run as one list (council.py ledger): each finding once, at the round that
+   *  last raised it (`round`), most urgent first. To fix: the last round's open ones. */
+  to_fix: CouncilFinding[];
+  fixed: CouncilFinding[];
+  /** The session said no, or you sided with it (dismissed). */
+  answered: CouncilFinding[];
+  advice_sent: boolean;
+  elapsed: number;
+  material?: { commits: string[][]; files: number; add: number; del: number } | null;
+}
+export interface CouncilSettings {
+  bar: number;
+  max_rounds: number;
+  stop_early: boolean;
+  /** Who reviews: "claude:<slot>", "<agent>:<account id>", "<agent>:" for its machine login. */
+  reviewers: string[];
+  /** The projects each outside agent may read; Claude logins read every one. */
+  projects: Record<string, string[]>;
+  /** Every account that could review, as the bridge answers; never sent back. */
+  accounts?: CouncilAccount[];
+}
+/** One row of + Add a reviewer: `status` is why it can't sit now (ok false), else how it
+ *  signs in; `signin`, that signing in fixes it. */
+export interface CouncilAccount { key: string; agent: string; label: string; status: string; ok: boolean; signin: boolean }
+
 export const api = {
   state: () => req<DashState>("/local/state"),
   update: () => req<UpdateInfo>("/local/update"),
@@ -1766,8 +2038,6 @@ export const api = {
     req<Transcript>(`/local/sessions/${encodeURIComponent(id)}?cursor=${cursor}` +
       (opts?.tail ? `&tail=${opts.tail}` : "") +
       (opts?.before ? `&before=${opts.before}` : "")),
-  sessionBreakdown: (id: string) =>
-    req<SessionBreakdown>(`/local/sessions/${encodeURIComponent(id)}/breakdown`),
   // A rehydrated turn's attachments are server paths, not blobs — load them back
   // through the upload dir so the transcript can render (and zoom) them.
   attachmentUrl: (path: string) =>
@@ -1791,6 +2061,11 @@ export const api = {
         method: "POST",
         body: {},
       }),
+  // MOVE TO PROJECT: a session whose project folder is gone, into one of yours, its
+  // folder and the paths in its transcript with it.
+  moveSession: (id: string, project: string) =>
+    req<{ ok: boolean; session: SessionBrief }>(
+      `/local/sessions/${encodeURIComponent(id)}/move`, { method: "POST", body: { project } }),
   // Move a session to another project/worktree, rewriting the old path through
   // its transcript so the model never sees the move.
   relocateSession: (id: string, project: string, branch?: string) =>
@@ -1881,6 +2156,30 @@ export const api = {
         method: "POST",
         body: { disabled_tools: rules },
       }),
+  // The FLOW tab: the session's skill path, and the switch that holds or releases its auto-start.
+  getFlow: (id: string) => req<{ flow: Flow | null; past?: PastFlow[]; set: FlowSet | null }>(`/local/flow?session=${encodeURIComponent(id)}`),
+  // The SESSION tab's window, time and spend (bridge/meter.py); {} when there's no transcript yet.
+  getMeter: (id: string) => req<Meter | Record<string, never>>(`/local/sessions/${encodeURIComponent(id)}/meter`),
+  setFlowAuto: (id: string, on: boolean) =>
+    req<{ ok: boolean }>("/local/flow/auto", { method: "POST", body: { session: id, on } }),
+  // The prompt box's FLOW chip: a switch set for this session (null follows SETTINGS
+  // again), every one reset, or the steps before `to` skipped ("" = the rest).
+  setFlowOption: (id: string, key: FlowOption, on: boolean | null) =>
+    req<{ ok: boolean; flow: Flow }>("/local/flow/settings", { method: "POST", body: { session: id, key, on } }),
+  resetFlow: (id: string) =>
+    req<{ ok: boolean; flow: Flow }>("/local/flow/settings", { method: "POST", body: { session: id, reset: true } }),
+  flowSkipTo: (id: string, to: string) =>
+    req<{ ok: boolean; flow: Flow }>("/local/flow/step", { method: "POST", body: { session: id, to } }),
+  // Skip on a REVIEW in FLOW: the step is done as the work stands, and RETRO follows.
+  skipReview: (id: string) => req<{ ok: boolean }>("/local/flow/review", { method: "POST", body: { session: id } }),
+  // The goal sheet's buttons: Mark done, Keep going, Edit. A bridge older than
+  // this route 404s (it would have read a bare {action} as a clearing /goal).
+  goalAction: (id: string, action: "done" | "keep" | "edit", objective?: string) =>
+    req<{ ok: boolean; goal: Goal | null }>(
+      `/local/sessions/${encodeURIComponent(id)}/goal/act`, {
+        method: "POST",
+        body: { action, objective },
+      }),
   // An empty objective clears the goal; the bridge owns the loop either way.
   setGoal: (id: string, objective: string) =>
     req<{ ok: boolean; goal: Goal | null }>(
@@ -1888,12 +2187,15 @@ export const api = {
         method: "POST",
         body: { objective },
       }),
-  accounts: () =>
-    req<AccountsInfo>("/local/accounts"),
-  accountAction: (action: "add" | "remove" | "disable" | "enable", slot?: number) =>
+  // fresh=N: the bridge first re-reads, through the CLI, any login whose meter is
+  // older than N s (0 = every one, now). A bridge older than that ignores it.
+  accounts: (fresh?: number) =>
+    req<AccountsInfo>(`/local/accounts${fresh === undefined ? "" : `?fresh=${fresh}`}`),
+  /** `on` goes with auto_switch: keep the login in Auto-switch, or out of it. */
+  accountAction: (action: "add" | "remove" | "disable" | "enable" | "auto_switch", slot?: number, on?: boolean) =>
     req<{ ok: boolean; slot?: number }>("/local/accounts", {
       method: "POST",
-      body: { action, ...(slot === undefined ? {} : { slot }) },
+      body: { action, ...(slot === undefined ? {} : { slot }), ...(on === undefined ? {} : { on }) },
     }),
   /** Start a sign-in. No slot: a fresh profile, so the ambient ~/.claude login is
    *  untouched. A slot: that account signs back in where it already lives — the
@@ -1936,6 +2238,17 @@ export const api = {
     req<{ ok: boolean; features: AiFeature[] }>("/local/aifeatures", {
       method: "POST",
       body: { key, enabled },
+    }),
+  /** The FLOWS sheet's settings, kept on the bridge (bridge/flowsettings.py). */
+  flows: () => req<FlowSettings>("/local/flows"),
+  /** One change, `{reset: flow}` or `{presets}`; answers with every setting. */
+  setFlows: (body: FlowChange) => req<FlowSettings>("/local/flows", { method: "POST", body }),
+  /** The Savers and their trials. A bridge older than them answers 404 "not found". */
+  savers: () => req<{ savers: Saver[] }>("/local/savers"),
+  setSaver: (key: string, mode: Saver["mode"]) =>
+    req<{ ok: boolean; savers: Saver[] }>("/local/savers", {
+      method: "POST",
+      body: { key, mode },
     }),
   /** The bundled integrations and whether each is installed. A bridge older than
    *  this answers 404 "not found" (see lib/integrations.ts). */
@@ -1994,11 +2307,15 @@ export const api = {
   run: (body: RunBody) =>
     req<RunStarted | RunHeld>("/local/run", { method: "POST", body }),
   // `message`: a Deny's reason, typed in the box under the docked card. `noted`
-  // says the bridge passed it to the model (an older bridge drops it).
+  // says the bridge passed it to the model (an older bridge drops it). Every answer
+  // box lands here, so the bell (Notifications) drops that ask's toast now.
   respond: (
     jobId: string,
     body: { request_id: string; behavior?: "allow" | "deny"; answers?: CardAnswer[]; message?: string },
-  ) => req<{ noted?: boolean }>(`/local/run/${encodeURIComponent(jobId)}/respond`, { method: "POST", body }),
+  ) => req<{ noted?: boolean }>(`/local/run/${encodeURIComponent(jobId)}/respond`, { method: "POST", body }).then((r) => {
+    window.dispatchEvent(new CustomEvent("hud:answered", { detail: body.request_id }));
+    return r;
+  }),
   // Search within one chat (bridge/chat_search.in_chat): prompts and the agent's words.
   chatSearch: (session: string, q: string) =>
     req<{ hits: { turn: string; kind: string; seq: number | null; snippet: string; at?: number }[] }>(
@@ -2062,6 +2379,7 @@ export const api = {
     req<{ prefs: NoticePrefs }>("/local/notices", { method: "POST", body: { op: "prefs", patch } }),
   usage: () => req<UsageInfo>("/local/usage"),
   today: () => req<TodayInfo>("/local/today"),
+  wins: () => req<TodayWins>("/local/wins"),
   report: (back = 0) =>
     req<WeeklyReport>(`/local/report${back ? "?back=1" : ""}`),
   history: (archived = false) =>
@@ -2110,6 +2428,13 @@ export const api = {
       method: "POST",
       body: { project, op, paths, ...(branch ? { branch } : {}) },
     }),
+  council: (sid: string, full = false) =>
+    req<CouncilBrief>(`/local/council/${encodeURIComponent(sid)}${full ? "?full=1" : ""}`),
+  councilAct: (sid: string, action: string, key?: string) =>
+    req<CouncilBrief>(`/local/council/${encodeURIComponent(sid)}`, { method: "POST", body: { action, key } }),
+  councilSettings: () => req<CouncilSettings>("/local/council/settings"),
+  saveCouncilSettings: (patch: Partial<CouncilSettings>) =>
+    req<CouncilSettings>("/local/council/settings", { method: "POST", body: patch }),
   gitPush: (project: string, branch?: string) =>
     req<{ ok: boolean; output: string }>("/local/git/push", {
       method: "POST",
@@ -2125,9 +2450,43 @@ export const api = {
       method: "POST",
       body: { project, ...(branch ? { branch } : {}) },
     }),
+  // Diverged: the upstream merged in as a merge commit, never a rebase. A clash
+  // changes nothing and names its files.
+  gitMergeUpstream: (project: string, branch?: string) =>
+    req<{ ok: boolean; output: string; clash: string[] }>("/local/git/merge-upstream", {
+      method: "POST",
+      body: { project, ...(branch ? { branch } : {}) },
+    }),
+  gitLedger: (project: string, branch?: string) =>
+    req<GitLedger>(`/local/git/ledger?project=${encodeURIComponent(project)}${branch ? `&branch=${encodeURIComponent(branch)}` : ""}`),
+  // Update: the base merged into this branch (a clash changes nothing and names its files).
+  gitUpdateBase: (project: string, base: string, branch?: string) =>
+    req<{ ok: boolean; output: string; clash: string[] }>("/local/git/update-base", {
+      method: "POST", body: { project, base, ...(branch ? { branch } : {}) },
+    }),
+  // The newest unpushed commit taken back, its changes kept staged.
+  gitUndoCommit: (project: string, branch?: string) =>
+    req<{ ok: boolean; output: string }>("/local/git/undo-commit", {
+      method: "POST", body: { project, ...(branch ? { branch } : {}) },
+    }),
+  // COMING IN: origin's commits HEAD lacks. Diverged, the merge's dry run too:
+  // [] merges cleanly, files = they'd clash, null = couldn't tell.
+  gitIncoming: (project: string, branch?: string) =>
+    req<{ commits: { sha: string; subject: string; ts: number }[]; clash: string[] | null }>(
+      `/local/git/incoming?project=${encodeURIComponent(project)}${branch ? `&branch=${encodeURIComponent(branch)}` : ""}`,
+    ),
   // --- EDITOR tab: browse / read / write any file in the branch's working tree ---
+  /** A chat's Claude sub-agents as a team, and one up close (bridge/agent_team.py). */
+  agentTeam: (sessionId: string) => req<import("./lib/agentteam").Team>(`/local/team?session=${encodeURIComponent(sessionId)}`),
+  agentTeamOne: (sessionId: string, agentId: string) =>
+    req<import("./lib/agentteam").AgentDetail>(`/local/team/agent?session=${encodeURIComponent(sessionId)}&agent=${encodeURIComponent(agentId)}`),
+  /** What the composer completes from disk (bridge/complete.py). */
+  completePaths: (project: string | null, prefix: string) =>
+    req<{ paths: { text: string; name: string; dir: boolean }[] }>(`/local/complete/paths?project=${encodeURIComponent(project ?? "")}&prefix=${encodeURIComponent(prefix)}`),
+  completeSymbols: (project: string) =>
+    req<{ symbols: { name: string; file: string }[] }>(`/local/complete/symbols?project=${encodeURIComponent(project)}`),
   filesTree: (project: string, branch?: string) =>
-    req<{ files: string[]; ignored?: string[] }>(
+    req<{ files: string[]; ignored?: string[]; root?: string }>(
       `/local/files/tree?project=${encodeURIComponent(project)}${branch ? `&branch=${encodeURIComponent(branch)}` : ""}`,
     ),
   fileRead: (project: string, path: string, branch?: string) =>
@@ -2149,6 +2508,9 @@ export const api = {
       method: "POST",
       body: { project, path, content, ...(branch ? { branch } : {}) },
     }),
+  /** Show an absolute path in the OS file manager (lib/revealfile). */
+  revealFile: (path: string) =>
+    req<{ ok: boolean }>("/local/files/reveal", { method: "POST", body: { path } }),
   /** Every session's prompts, newest first and deduped — what Ctrl+R searches. */
   promptHistory: () => req<{ prompts: string[] }>("/local/prompts"),
   /** Mint a read-only link to one session, or revoke every link it has. The
@@ -2285,6 +2647,12 @@ export const api = {
     req<{ ok: boolean; share: Share }>("/local/rivendell/team/send", { method: "POST", body }),
   teamContinue: (id: string, opts?: { into?: "yours"; project?: string }) =>
     req<ContinuePlan>("/local/rivendell/team/continue", { method: "POST", body: { id, ...opts } }),
+  // CONTINUE HERE: their session as yours in `project` (or the new worktree `cwd` their code went
+  // into), its history on screen and the composer empty. NEW SESSION FROM IT is teamContinue's template.
+  teamAdopt: (id: string, project: string, cwd?: string) =>
+    req<{ ok: boolean; session: SessionBrief }>("/local/rivendell/team/adopt", {
+      method: "POST", body: { id, project, ...(cwd ? { cwd } : {}) },
+    }),
   teamEarlier: (id: string) =>
     req<TeamEarlier>(`/local/rivendell/team/earlier?id=${encodeURIComponent(id)}`),
   teamClone: (id: string) =>
@@ -2302,11 +2670,10 @@ export const api = {
   // --- host vitals + weather (WORKSPACE panel ambient widgets) ---
   sysinfo: () => req<HostStats>("/local/sysinfo"),
   weather: () => req<Weather>("/local/weather"),
-  setWeatherCity: (city: string) =>
-    req<Weather & { error?: string }>("/local/weather/city", {
-      method: "POST",
-      body: { city },
-    }),
+  weatherSearch: (q: string) =>
+    req<{ results?: Place[]; error?: string }>(`/local/weather/search?q=${encodeURIComponent(q)}`),
+  setWeatherPlace: (p: Place) =>
+    req<Weather & { error?: string }>("/local/weather/place", { method: "POST", body: p }),
   setWeatherUnit: (unit: string) =>
     req<Weather & { error?: string }>("/local/weather/unit", {
       method: "POST",
@@ -2355,28 +2722,41 @@ export const api = {
       "/local/git/worktree",
       { method: "POST", body: { project, branch, parent, create } },
     ),
-  worktreeRemove: (project: string, path: string, branch?: string, delete_branch = false) =>
-    req<{ ok: boolean; output: string }>("/local/git/worktree/remove", {
+  // archive: the worktree's git-ignored scratch (.mystical, .superpowers) moves to the
+  // repo's .mystical/archive first; `kept` says where. Refused while a turn runs in it.
+  worktreeRemove: (project: string, path: string, branch?: string, delete_branch = false, archive = false) =>
+    req<{ ok: boolean; output: string; kept?: string }>("/local/git/worktree/remove", {
       method: "POST",
-      body: { project, path, branch, delete_branch },
+      body: { project, path, branch, delete_branch, archive },
+    }),
+  // BRANCHES ⋯ Target ▸: the branch this one goes into ("" none, null back to the guess).
+  setBranchTarget: (project: string, branch: string, target: string | null) =>
+    req<{ targets: Record<string, string> }>("/local/git/branch/target", {
+      method: "POST",
+      body: { project, branch, target },
     }),
   createPr: (project: string, head: string, base: string, title: string, body?: string) =>
     req<{ ok: boolean; url: string; number: number | null; output: string }>(
       "/local/github/pr",
       { method: "POST", body: { project, head, base, title, body } },
     ).then(pushed(project, head)),
-  createProject: (name: string, prompt: string) =>
-    req<{ project: Project; session: SessionBrief; job_id: string | null }>(
+  /** NEW PROJECT (bridge/newproject.py). `confirm` back means nothing was done:
+   *  show the notices and send again with `confirmed`. */
+  createProject: (body: NewProjectBody) =>
+    req<{ project?: Project; session?: SessionBrief; job_id?: string | null; notes?: string[]; confirm?: NewProjectNote[]; path?: string }>(
       "/local/projects/create",
-      { method: "POST", body: { name, prompt } },
+      { method: "POST", body },
     ),
+  /** Stop allowing a folder outside the projects folder. Nothing on disk changes. */
+  removeRoot: (project: string) => req<{ ok: boolean; roots: string[] }>("/local/roots/remove", { method: "POST", body: { project } }),
   // --- prompt queue (per session) ---
   queue: (sessionId: string) =>
     req<QueueSnapshot>(`/local/queue?session=${encodeURIComponent(sessionId)}`),
   queueEnqueue: (body: {
     session_id: string; text: string; prompt: string; images?: string[];
     sel?: { tag: string; label: string }[]; width?: number; project?: string;
-    effort?: string; surface?: string; // no model/mode: it runs on the session's
+    effort?: string; surface?: string;
+    model?: string; permission_mode?: string; // only a kind's preset; a plain prompt runs on the session's
   }) => req<QueueSnapshot & { item_id: string }>(
     "/local/queue/enqueue", { method: "POST", body }),
   queueOp: (op: QueueOp, body: Record<string, unknown>) =>
@@ -2395,6 +2775,9 @@ export const api = {
   // --- slash commands: what `/` offers in the composer (lib/slash.ts) ---
   commands: (project?: string | null) =>
     req<{ commands: SlashCommand[] }>(`/local/commands${project ? `?project=${encodeURIComponent(project)}` : ""}`),
+  // The /command that fits the composer's text, or null (also when SKILL ROUTER is off).
+  route: (body: { project: string; cwd?: string; session?: string; text: string; prompts: string[]; last_status?: string; ctx_tokens?: number; first: boolean }) =>
+    req<{ route: Route | null }>("/local/route", { method: "POST", body }),
   // --- skills (project + system SKILL.md dirs, and the built-in catalog) ---
   skills: (project?: string | null) =>
     req<SkillsInfo>(`/local/skills${project ? `?project=${encodeURIComponent(project)}` : ""}`),
@@ -2425,6 +2808,8 @@ export const api = {
     req<GraphState>("/local/graph/update", { method: "POST", body: { project } }),
   graphHtmlUrl: (project: string) =>
     `/local/graph/html?project=${encodeURIComponent(project)}`,
+  graphInstall: () => req<GraphInstall>("/local/graph/install"),
+  installGraphify: () => req<GraphInstall>("/local/graph/install", { method: "POST", body: {} }),
   // --- LEARN tab: per-turn lessons in <repo>/.mystical/learn/ ---
   lessons: (project: string) =>
     req<{ lessons: Lesson[]; repo_enabled: boolean }>(
@@ -2452,6 +2837,24 @@ export const api = {
 
   // --- SETTINGS ▸ System ▸ Storage (bridge/storage.py) ---
   storage: () => req<StorageScan>("/local/storage"),
+  /** Ticket sets, newest first (bridge/tickets.py summaries). */
+  tickets: () => req<{ sets: TicketSet[] }>("/local/tickets"),
+  retryTicket: (folder: string, n: string) =>
+    req<{ text: string }>("/local/tickets/retry", { method: "POST", body: { folder, n } }),
+  /** A ticket of yours is done: what waits on it starts. */
+  goTicket: (folder: string, n: string) =>
+    req<{ text: string }>("/local/tickets/go", { method: "POST", body: { folder, n } }),
+  /** A stopped set builds again, once what stopped it is fixed. */
+  buildTickets: (folder: string) =>
+    req<{ text: string }>("/local/tickets/build", { method: "POST", body: { folder } }),
+  /** A set waiting in `approve` (its flow's AUTO-START off) is approved and builds. */
+  approveTickets: (folder: string) =>
+    req<{ text: string }>("/local/tickets/approve", { method: "POST", body: { folder } }),
+  /** Not now on a set waiting in `approve`: it stops, out of Needs you; Build makes it wait again. */
+  declineTickets: (folder: string) =>
+    req<{ text: string }>("/local/tickets/decline", { method: "POST", body: { folder } }),
+  cleanupTickets: (folder: string) =>
+    req<{ removed: string[]; skipped: string[] }>("/local/tickets/cleanup", { method: "POST", body: { folder } }),
   clearStorage: (clear: StorageClear[], move_files: string[] = []) =>
     req<{ freed: number; errors: string[] }>("/local/storage/clear", { method: "POST", body: { clear, move_files } }),
 };

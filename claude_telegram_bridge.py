@@ -42,8 +42,8 @@ import sys
 
 from bridge import (acp_setup, automations, config, devserver, dream, envsettings, landing, limits,
                     native_activity, notices, onboard, profiles, pubsub, queue_manager, recovery,
-                    report, rivendell, runner, selfupdate, state, store,
-                    tgtopics, toolsets, tunnel, whatsnew)
+                    report, rivendell, run_api, runner, selfupdate, state, store,
+                    tgboard, tgtopics, tickets, toolsets, tunnel, whatsnew)
 from bridge.dispatch import handle_callback, menu, on_message, on_stop
 from bridge.telegram import get_updates, set_commands, tg
 
@@ -187,11 +187,14 @@ def main():
             print(f"↻ Auto-resumed {resumed} interrupted session(s) after restart.")
         limits.boot()                  # re-arm sessions parked on a usage-limit reset
         queue_manager.get().kick()     # start what a restart left queued (a wake refused mid-shutdown)
+        tickets.boot()                 # judge ticket turns that ended unheard, then start what's ready
         if config.TOKEN:
             report.boot()              # Monday-morning weekly report (catches up a dark Monday)
             notices.watch_quiet()      # what quiet hours held, in one message as they end
+            tgboard.watch()            # the Live board: one pinned widget that follows the running turns
         dream.boot()                   # nightly per-repo digest (catches up a night asleep)
         automations.boot()             # your timers, listeners and commands that run agents
+        run_api.boot()                 # other programs' runs: publish the address, pick up what a restart left
         whatsnew.boot()                # what the last update changed, and new notes, into the changelog
         whatsnew.watch()               # hourly look upstream: what a waiting update brings, before it's taken
         # Always reconcile: the enabled set lives per-instance in the instances
@@ -233,7 +236,10 @@ def main():
                     if "callback_query" in upd:
                         handle_callback(upd["callback_query"])
                     elif "message" in upd:
-                        on_message(upd["message"])
+                        if not tgboard.pin_line(upd["message"]):   # the board's own pin line goes
+                            on_message(upd["message"])
+                    elif "widget_query" in upd:
+                        tgboard.on_query(upd["widget_query"])   # a tap on the Live board
                     elif "stopped_message_generation" in upd:
                         on_stop(upd["stopped_message_generation"])   # Stop under a live answer
                 except Exception as e:  # noqa: BLE001

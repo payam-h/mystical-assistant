@@ -2,17 +2,18 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ArrowUpRight, ChevronRight, Diamond, EyeOff, GitBranch, GraduationCap, PanelLeft, Pencil, Puzzle, Search, Shapes,
   SquareTerminal, UserRound, Users, WandSparkles, Waypoints, X, type LucideIcon,
+  FolderX,
 } from "lucide-react";
 import { api, type AccountInfo, type InstalledSkill, type PickResult } from "../../api";
 import { slotHue, type ProfilesInfo } from "../../lib/profiles";
 import { agentLabel } from "../../lib/agents";
 import { ago, projectGivenName, projectMark, projectName, setProjectMarks } from "../../lib/surfaces";
-import { filterRows, folders, parentOf, span, type Show } from "../../lib/projectlist";
+import { filterRows, folders, OUTSIDE, parentOf, span, type Show } from "../../lib/projectlist";
 import { ProjectTile } from "../ui/ProjectTile";
 import type { ProjectGroup } from "./ProjectsPanel";
 import MarkEditor, { poss } from "./MarkEditor";
 import { StyleButton, StylePane, StyleScan, StyleStrip, useStyleRows } from "./LogoStylist";
-import { useAiFeatures } from "../../lib/ai";
+import { useAiFeatures, useGraphify } from "../../lib/ai";
 import { takeSettingsFocus } from "../../lib/opensettings";
 import { showStyle, useStyle } from "../../lib/stylerun";
 import { multi, useMultiOn } from "../../lib/multistore";
@@ -227,6 +228,8 @@ type Cfg = { rel: string; run: string; def: string; design: string | null; pulle
 export function ProjectsSettings(props: ProjectsSettingsProps) {
   const { groups, hidden, remotes, onSetHidden, onRename, profiles, onSetProfile, logins = [], onDesign, onOpenSkills, current } = props;
   const mapAll = !!useAiFeatures().graph;   // PROJECT MAP, the machine-wide switch over each repo's own
+  const gfy = useGraphify();
+  const mapInstall = mapAll && gfy.installed === false;   // its switch would switch on nothing: Install stands in for it
   const [q, setQ] = useState("");
   const [show, setShow] = useState<Show>("all");
   // The open session's project starts unfolded, so the row on the right is in view.
@@ -236,6 +239,7 @@ export function ProjectsSettings(props: ProjectsSettingsProps) {
     return s;
   });
   const searchRef = useRef<HTMLInputElement>(null);
+  const [dropped, setDropped] = useState<string | null>(null);   // the allowed folder just stopped, until the list drops it
 
   const all = useMemo(() => groups
     .map((g) => ({ ...g, remote: remotes[g.rel] ?? "", hidden: !!hidden[g.rel] }))
@@ -558,6 +562,14 @@ export function ProjectsSettings(props: ProjectsSettingsProps) {
                 <button type="button" className="ps-tog" data-on={!g.hidden || undefined} aria-pressed={!g.hidden}
                   aria-label="in the sidebar" onClick={() => onSetHidden([g.rel], !g.hidden)} />
               </Field>
+              {parentOf(g.rel) === OUTSIDE && (
+                <Field icon={FolderX} label="Outside your projects folder" hint="you allowed Mystical to work here. Stopping removes it from this list; the folder and its sessions are left alone">
+                  <button type="button" className="ps-btn" disabled={dropped === g.rel}
+                    onClick={() => { setDropped(g.rel); void api.removeRoot(g.rel).catch(() => setDropped(null)); }}>
+                    {dropped === g.rel ? "Stopped" : "Stop allowing"}
+                  </button>
+                </Field>
+              )}
               {repo && (
                 <>
                   <Field icon={Shapes} label="Mark" hint={markHint(g.rel)}>
@@ -598,9 +610,18 @@ export function ProjectsSettings(props: ProjectsSettingsProps) {
                       aria-label="lessons" disabled={cfg?.lessons == null} onClick={() => setLessons(!cfg?.lessons)} />
                   </Field>
                   <Field icon={Waypoints} label="Project map"
-                    hint={mapAll ? "a code graph each new session starts from" : "PROJECT MAP is off in AI management ▸ Extras"}>
-                    <button type="button" className="ps-tog" data-on={(mapAll && cfg?.map) || undefined} aria-pressed={mapAll && !!cfg?.map}
-                      aria-label="project map" disabled={!mapAll || cfg?.map == null} onClick={() => setMap(!cfg?.map)} />
+                    hint={!mapAll ? "PROJECT MAP is off in AI management ▸ Extras"
+                      : !mapInstall ? "a code graph each new session starts from"
+                      : gfy.error ? <span style={{ color: "var(--err)" }}>{gfy.error}</span>
+                      : gfy.installing ? "installing graphify…" : "needs graphify, which isn't on this machine yet"}>
+                    {mapInstall ? (
+                      <button type="button" className="ps-btn" disabled={!cfg || gfy.installing}
+                        title="install graphify on this machine and switch the map on here"
+                        onClick={() => { if (!cfg?.map) setMap(true); gfy.install(); }}>{gfy.installing ? "Installing…" : "Install"}</button>
+                    ) : (
+                      <button type="button" className="ps-tog" data-on={(mapAll && cfg?.map) || undefined} aria-pressed={mapAll && !!cfg?.map}
+                        aria-label="project map" disabled={!mapAll || cfg?.map == null} onClick={() => setMap(!cfg?.map)} />
+                    )}
                   </Field>
                   {onOpenSkills && (
                     <Field icon={Puzzle} label="Skills"

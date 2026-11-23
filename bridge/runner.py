@@ -32,9 +32,9 @@ import uuid
 
 from bridge import (accounts, acp, acp_agents, agents, aifeatures, chat_images, config, devserver,
                     experimental, git, inspector, integrations, ladder, limits, machine,
-                    native_activity, notices, profiles, pubsub, relevance, state, store, team,
-                    tgask, tgtopics, transcript_jsonl, waits)
-from bridge.browser import rel
+                    native_activity, notices, paths, profiles, pubsub, relevance, savers, state,
+                    store, team, tgask, tgtopics, transcript_jsonl, transcript_page, ux_mcp, waits)
+from bridge.browser import rel, within_base
 from bridge.telegram import panel_kb, send
 
 
@@ -85,13 +85,21 @@ _MYSTICAL_NOTE = (
     "screenshots, recordings, scratch scripts, drafts, reports — go in "
     ".mystical/ in the project root. It ignores itself "
     "(.mystical/.gitignore is `*`), so never add .mystical to the project's "
-    ".gitignore and never commit anything from it.")
+    ".gitignore and never commit anything from it. Screenshots go in "
+    ".mystical/screenshots/<YYYY-MM-DD>/<topic>/: today's date, then one short folder "
+    "per task; give that path as the file name (the Playwright MCP's unnamed files "
+    "already land in the day's folder). Never commit a screenshot to the repo, not even "
+    "for a PR description, unless the user asks for it. A project's visual-test "
+    "baselines are test files, not screenshots: they stay where its tests read them.")
 
 _LOG_NOTE = (
     "To run this project (dev server, `npm run dev`, anything long-lived the "
     "human will look at), use the Run tool — not Bash. The bridge owns what Run "
     "starts, so it outlives the turn and the human can follow its port and logs "
-    "in the dashboard; a background Bash process is invisible to them. Its "
+    "in the dashboard; a background Bash process is invisible to them. A "
+    "background Bash command or monitor still running when you answer keeps "
+    "this chat waiting: you are woken when it finishes, and it is stopped after "
+    "2 hours with nothing finishing. The dev server's "
     f"output is also logged to {devserver.DEV_LOG_REL} in the project root — "
     "read that file (e.g. tail it) to inspect dev-server logs.\n\n"
     + _MYSTICAL_NOTE)
@@ -105,6 +113,17 @@ _PUSH_NOTE = (
     "command, tool or API. Say what failed, in git's words, and suggest the "
     "human handle it in a new session on that branch: Mystical's dashboard "
     "opens one from its push buttons, with the failure as an unsent draft.")
+
+# Every run is told to ask the UX knowledge base before settling a UI question, and
+# to feed it after research or a pick (bridge/ux_mcp.py): the way to need Mobbin less.
+_UX_NOTE = (
+    "Before you settle a UI or UX question (a layout, a component, a link or button "
+    "style, the words on a control), call mcp__mystical-ux__SearchUx (a deferred tool: "
+    "load it with ToolSearch first). It holds what earlier sessions learned: patterns "
+    "with a verdict, rules, real-app screens and the user's past picks, and every past "
+    "Mobbin search. Open Mobbin only when it finds nothing that answers the question. "
+    "After Mobbin or guideline research, and after the user picks a design option, call "
+    "RecordUx so the next session finds the answer there.")
 
 # Told to every interactive run of a session whose repo is on a Rivendell task
 # board (_rivendell_note_for): the work gets a task, the task's key rides the
@@ -186,6 +205,24 @@ _HIDDEN_BROWSER_NOTE = (
     "headless (SETTINGS → SYSTEM → BROWSER). Never open a visible browser on this "
     "machine — no `open <url>`, no headed launches; the user is working in front of it.")
 
+_CHROME_NOTE = (
+    "Claude in Chrome is on: the claude-in-chrome tools work in the user's own Chrome, "
+    "signed in where they are. Use them when a task needs a real logged-in browser, in "
+    "tabs you open yourself; leave the user's tabs alone. They are not covered by the "
+    "no-visible-browser rule. If they report not connected, Chrome is closed or its "
+    "extension is signed in to another account than this run's: say so once instead of "
+    "retrying. When a page needs the human (a login, CAPTCHA or 2FA), ask them rather "
+    "than wait.")
+
+# Told to every run while the AI tab's GRILL AS CARDS switch is on: ASK_SYSTEM_PROMPT's
+# "one decision, not an interrogation" fights a grilling skill's rounds of questions,
+# and a round of taps suits a phone. Constant text, so the appended prompt stays
+# byte-identical from turn to turn (see _compose_system_prompt).
+_GRILL_NOTE = (
+    "When a grilling skill runs (grill-with-docs, grill-me, grilling), ask each round as "
+    "one AskUserQuestion card: up to 4 questions, your recommended answer first, worded "
+    "so yes takes it.")
+
 
 _EXPERIMENTAL_NOTE = (
     "Keep .mystical/ tidy: .mystical/scratch/ for throwaway scripts and probes, .mystical/docs/ for reports and "
@@ -204,13 +241,16 @@ _EXPERIMENTAL_NOTE = (
     "work on it together, start its dev server and call show_design with pages [{name, url}]: they can point at the real app.\n\n"
     "A project may have generated docs: read_docs (find_tools) lists them, and where they disagree with the code, trust the code.\n\n"
     "The project's work list is in the user's right sidebar: read or change it with work_list from the mystical MCP server when "
-    "they ask, filling it from whatever they name. Only they start a run on it: if they ask for one, work_run propose gives them a card to tap.\n\n"
+    "they ask, filling it from whatever they name. Only they start a task: its Start in the Work panel opens the task's own session. "
+    "For work in several steps, keep your plan with chat_plan: set it before you start and mark steps as you go. The user sees it "
+    "beside the work list and may change it, which reaches you as a message.\n\n"
     "If you think a feature is complex enough to warrant a review loop, ask the user with offer_review from the mystical MCP "
     "server as your last step: they get a Start review button after your final answer. If it isn't, or it's reasonably "
     "tested and just needs a check, go ahead normally.")
 
 
-def _compose_system_prompt(graph: str = "", rivendell: str = "") -> str:
+def _compose_system_prompt(graph: str = "", rivendell: str = "", paths_pack: str = "",
+                           chrome: bool = False) -> str:
     """ASK prompt + the dev-log and push notes (+ the Rivendell note for a
     session that gets it), then the graph pack.
 
@@ -221,9 +261,11 @@ def _compose_system_prompt(graph: str = "", rivendell: str = "") -> str:
     # With the switch on: where things go, and the tools for showing proof. One cache rewrite
     # when it's turned on, then as byte-stable as the rest.
     extra = _EXPERIMENTAL_NOTE if experimental.enabled() else ""
-    parts = [p for p in (config.ASK_SYSTEM_PROMPT.strip(), _LOG_NOTE, _PUSH_NOTE, extra,
+    parts = [p for p in (config.ASK_SYSTEM_PROMPT.strip(), _LOG_NOTE, _PUSH_NOTE, _UX_NOTE, extra,
                          _HIDDEN_BROWSER_NOTE if config.AI_BROWSER_HEADLESS else "",
-                         rivendell, graph.strip()) if p]
+                         _CHROME_NOTE if chrome else "",
+                         _GRILL_NOTE if aifeatures.enabled("grillcards") else "",
+                         rivendell, paths_pack, graph.strip()) if p]
     return "\n\n".join(parts)
 
 
@@ -322,7 +364,7 @@ def normalize_ponytail(level) -> "str | None":
 
 
 def _run_env(ponytail: "str | None",
-             account_slot: "int | None" = None) -> dict:
+             account_slot: "int | None" = None, resume_cut: bool = False) -> dict:
     """Env for the claude subprocess: the inherited env plus a run's ponytail
     intensity and Claude account. The account arrives as CLAUDE_CONFIG_DIR,
     which is the whole multi-account mechanism -- every turn is still the
@@ -333,6 +375,20 @@ def _run_env(ponytail: "str | None",
     # for never arrives. Without the ceiling it also waits forever for a
     # background shell (a dev server): _watchdog ends those turns.
     over["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = "0"
+    # How long one foreground Bash call may run. At the CLI's own 10 min it moves
+    # the command to the background, where _watchdog ends it with the turn, and a
+    # 7 to 10 minute test suite sat on that edge. Under RUN_TIMEOUT: the hang
+    # watchdog counts a long call as silence.
+    over["BASH_MAX_TIMEOUT_MS"] = str(max(600, config.RUN_TIMEOUT - 300) * 1000)
+    # Opt in to system/session_state_changed (running | idle | requires_action):
+    # the CLI's own word on whether a turn is done, where the bridge used to
+    # guess from the turn row, the job and the transcript (Job.cli_state).
+    over["CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS"] = "1"
+    if resume_cut:
+        # Only on boot recovery's run of a turn a restart cut: Claude Code then
+        # continues that turn itself, with no prompt from us. Never on a normal
+        # turn, where it could pick up a turn you stopped yourself.
+        over["CLAUDE_CODE_RESUME_INTERRUPTED_TURN"] = "1"
     # The host flag that tells the model AskUserQuestion options can carry a
     # `preview`; under -p it's off unless set. The cards draw an option's
     # preview images as that option's pictures (_adopt_preview_images).
@@ -430,6 +486,8 @@ def _mcp_config(claude_session_id: str, extra: "dict | None" = None,
                           "args": ["-m", "bridge.goal_mcp"], "env": env},
                 "verify": {"command": sys.executable,
                            "args": ["-m", "bridge.verify_mcp"], "env": env},
+                "mystical-ux": {"command": sys.executable,
+                                "args": ["-m", "bridge.ux_mcp"], "env": env},
                 **({"mystical": gateway} if gateway else {}),    # bridge/gateway.py
             }}, f)
     except BaseException:
@@ -439,30 +497,38 @@ def _mcp_config(claude_session_id: str, extra: "dict | None" = None,
 
 
 # The flag each browser MCP takes for the three AI BROWSER settings (hidden,
-# binary, profile folder), keyed by the package in its args rather than by its
-# `claude mcp list` name, so a server someone renamed is still caught.
+# binary, profile folder) and for where its unnamed files go, keyed by the
+# package in its args rather than by its `claude mcp list` name, so a server
+# someone renamed is still caught.
 _BROWSER_MCP_FLAGS = {
-    "@playwright/mcp": ("--headless", "--executable-path", "--user-data-dir"),
-    "chrome-devtools-mcp": ("--headless", "--executablePath", "--userDataDir"),
+    "@playwright/mcp": ("--headless", "--executable-path", "--user-data-dir", "--output-dir"),
+    "chrome-devtools-mcp": ("--headless", "--executablePath", "--userDataDir", None),
 }
 
 
-def _with_browser(defn: dict) -> dict:
+def _with_browser(defn: dict, cwd: "str | None" = None) -> dict:
     """A server definition with the AI BROWSER settings appended as flags, when it
     is one of the two browser MCPs; anything else unchanged. A flag the user's own
     definition already carries is left to them — yargs would turn a repeated
-    --userDataDir into a list."""
+    --userDataDir into a list.
+
+    Playwright writes its unnamed files (a screenshot without a file name, page
+    snapshots, console logs) to <cwd>/.playwright-mcp, loose in the repo; they
+    go to the day's folder under .mystical/screenshots instead, as _MYSTICAL_NOTE
+    asks of named ones. chrome-devtools keeps those in the reply or the temp dir."""
     args = list(defn.get("args") or [])
     flags = next((f for pkg, f in _BROWSER_MCP_FLAGS.items() if any(pkg in a for a in args)), None)
     if not flags:
         return defn
     own = {a.split("=", 1)[0] for a in args}
-    headless, binary, profile = flags
+    headless, binary, profile, output = flags
     extra = [headless] if config.AI_BROWSER_HEADLESS and headless not in own else []
     if config.AI_BROWSER_EXECUTABLE and binary not in own:
         extra += [binary, config.AI_BROWSER_EXECUTABLE]
     if config.AI_BROWSER_PROFILE and profile not in own:
         extra += [profile, config.AI_BROWSER_PROFILE]
+    if output and cwd and output not in own:
+        extra += [output, os.path.join(cwd, ".mystical", "screenshots", time.strftime("%Y-%m-%d"))]
     return {**defn, "args": args + extra} if extra else defn
 
 
@@ -521,7 +587,7 @@ def _external_mcp(disabled_tools: "list[str] | None",
         if s["rule"] in denied:
             continue
         if s["name"] in defs:
-            extra[s["name"]] = _with_browser(defs[s["name"]])
+            extra[s["name"]] = _with_browser(defs[s["name"]], cwd)
         elif s.get("dir"):
             # Local to a different project: this cwd's claude couldn't load it
             # even without strict mode, so skipping it hides nothing.
@@ -575,6 +641,7 @@ def _base_cmd(prompt: str, chat_id: int, *, stream: bool,
     --resume (which requires an existing transcript).
     """
     fmt = "stream-json" if stream else "json"
+    chrome = bool(config.CHROME_ACCESS and interactive and claude_session_id and not skip_pack)
     cmd = [claude_bin(), "-p"]
     if not interactive:
         cmd.append(prompt)  # text input as an arg
@@ -605,6 +672,8 @@ def _base_cmd(prompt: str, chat_id: int, *, stream: bool,
             # still take MCP off entirely.
             extra, strict = _external_mcp(disabled_tools, cwd)
             cmd += ["--mcp-config", _mcp_config(claude_session_id, extra, gateway)]
+            if chrome:
+                cmd.append("--chrome")
             if strict:
                 cmd.append("--strict-mcp-config")
                 if disabled_tools is None:
@@ -612,6 +681,8 @@ def _base_cmd(prompt: str, chat_id: int, *, stream: bool,
                     # deny — and settling it here is what keeps the fallback
                     # below (and its `claude mcp list` call) off this path.
                     disabled_tools = []
+            if paths.pack_for(claude_session_id):   # the pack's gate: on, and an attended origin
+                cmd += ["--plugin-dir", paths.PACK_DIR]
     if model:
         cmd += ["--model", model]
     if effort:
@@ -642,7 +713,8 @@ def _base_cmd(prompt: str, chat_id: int, *, stream: bool,
     # Only runs that get the goals server (below) can act on the note.
     rv_note = (_rivendell_note_for(chat_id, claude_session_id, cwd)
                if interactive and claude_session_id and not skip_pack else "")
-    cmd += ["--append-system-prompt", _compose_system_prompt(graph, rv_note)]
+    pp = paths.pack_for(claude_session_id) if interactive and claude_session_id and not skip_pack else ""
+    cmd += ["--append-system-prompt", _compose_system_prompt(graph, rv_note, pp, chrome)]
     hooks = {}
     if interactive and not skip_pack:
         # bridge/askhook.py: options offered in prose go back once to be asked
@@ -733,8 +805,10 @@ def run_blocking(chat_id: int, prompt: str, resume_id: str | None = None,
                     fork=fork) + list(extra_args or [])
     timeout = timeout or config.RUN_TIMEOUT
     try:
+        # A one-shot never reuses its prefix: the 5-minute cache (savers.ONE_SHOT_ENV).
         proc = subprocess.run(cmd, cwd=cwd or state.project_dir(chat_id), capture_output=True,
-                              text=True, timeout=timeout, env=_run_env(ponytail, account_slot))
+                              text=True, timeout=timeout,
+                              env={**_run_env(ponytail, account_slot), **savers.ONE_SHOT_ENV})
     except subprocess.TimeoutExpired:
         return (f"⏱️ Timed out after {timeout // 60} min.", None, None, True)
     except FileNotFoundError:
@@ -783,6 +857,19 @@ def adopt_uploads(job_id: str, paths: list[str] | None) -> list[str]:
 
 INTERRUPT_GRACE = 5.0   # seconds to wait for a graceful interrupt before SIGTERM
 INTERRUPT_KILL = 2.0    # seconds after SIGTERM before SIGKILL
+
+
+def _continue_after_turn(job, effort=None) -> bool:
+    """The end of a council fix turn starts its next review round, and nothing
+    else follows it. Then the flow's recorded next step; a goal re-prompts at
+    the end of that step's turn instead, so one turn end never queues two. A
+    ticket's turn end is judged first; the tickets it starts run in sessions of
+    their own."""
+    from bridge import council, goals, tickets, worklist  # local import: runner<->* cycle
+    tickets.after_turn(job)
+    worklist.after_turn(job)
+    return (council.after_turn(job) or paths.continue_after_turn(job, effort)
+            or goals.continue_after_turn(job, effort))
 
 
 class Job:
@@ -842,6 +929,8 @@ class Job:
         # None until a message actually reports usage, so a stream that never did
         # leaves the columns NULL — unknown rather than free.
         self.tokens: dict | None = None
+        self.msg_usage: dict = {}         # message id -> its usage, until a result covers it
+        self.result_tokens: dict | None = None   # the results' exact sums so far
         self.cwd: str | None = None       # where claude was spawned (set by _run_streaming)
         # The MCP server to switch on for this turn whatever the session's toggles
         # say (a Rivendell newspaper's `rivendell`), and argv extras for the child
@@ -857,6 +946,8 @@ class Job:
         # The latest TodoWrite list, so a clip can be shown against the plan it
         # is evidence for. Last write wins: that is what the plan *is*.
         self.todos: list = []
+        self.after_tool: list = []    # events to add once the tool call in flight has its result (chatplan)
+        self.sub_cmds: list = []      # every shell command this turn, whole: the agent's and its sub-agents'.
         # The plan as the task tools keep it — what claude 2.1.280 -p offers
         # instead of TodoWrite: task id -> its latest status (TaskCreate's result
         # names the id, TaskUpdate moves it). The RIVENDELL card's todo bar.
@@ -870,6 +961,37 @@ class Job:
         # tool_use id -> (command, worktrees before it) for a Bash call, judged by
         # _note_work_cwd once its result says it ran.
         self.bash_cmds: dict[str, tuple[str, "set[str] | None"]] = {}
+        # What Claude Code says about itself. cli_state is the last
+        # system/session_state_changed (running | idle | requires_action), None
+        # from a CLI that doesn't emit it, and then every reader falls back to
+        # `status`. bg is the live set from system/background_tasks_changed,
+        # replaced whole on every event (task id -> {type, desc, since}); bg_peak
+        # the most that ran at once, so a fan-out reads as progress.
+        self.cli_state: str | None = None
+        self.bg: dict[str, dict] = {}
+        self.bg_peak = 0
+        # The background commands the watchdog took down with this finished turn
+        # (their descriptions): carry_on tells the session at the turn's end.
+        self.bg_ended: list[str] = []
+        self.answered_at: float | None = None   # this turn's first result
+        # The CLI retrying a request (system/api_retry); the next assistant event
+        # means it got through. rate_limit is the last rate_limit_event's info.
+        self.retry: dict | None = None
+        self.rate_limit: dict | None = None
+        # Boot recovery's run of a turn a restart cut (recovery.CONTINUED): no
+        # prompt goes in, Claude Code carries the cut turn on by itself
+        # (CLAUDE_CODE_RESUME_INTERRUPTED_TURN). resume_state is "waiting" until
+        # it starts ("accepted") or goes idle without starting ("declined").
+        self.native_resume = False
+        self.resume_state: str | None = None
+        # Background commands and monitors the CLI says are still running, by its
+        # task id (_note_background). A turn that ends with one open is waiting
+        # for it: _watchdog keeps the child, which wakes the model when it ends.
+        # `bg` above is the same tasks as the pill shows them, agents included;
+        # this is the set the turn waits on, with what each card needs.
+        self.bg_tasks: dict[str, dict] = {}
+        self.bg_cmds: dict[str, str] = {}      # tool_use id -> command, till its task starts
+        self.bg_cap: float | None = None       # the agent's own wait limit (set_bg_cap); None = BG_WAIT_CAP
         self._interrupt_timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._stdin_lock = threading.Lock()
@@ -892,7 +1014,7 @@ class Job:
     def _write_stdin(self, obj: dict) -> bool:
         """Write one JSON line to the live process's stdin (control channel).
         False when nothing took it: no child yet, or its stdin is gone (closed
-        at the turn's `result`, or the child exited)."""
+        once the turn is over, or the child exited)."""
         proc = self.proc
         if proc is None or proc.stdin is None:
             return False
@@ -958,7 +1080,15 @@ class Job:
 
     def respond(self, request_id: str, *, behavior: str = "allow",
                 message: str | None = None, answers: list | None = None) -> bool:
-        """Answer a pending can_use_tool request. Returns False if unknown."""
+        """Answer a pending can_use_tool request. Returns False if unknown.
+
+        A background command's card answers through here too, as `bg:<task id>`
+        (the route and both clients already carry a respond): deny stops the
+        command, an answer headed `notify` ticks its checkbox."""
+        if request_id.startswith("bg:"):
+            pick = next((a for a in answers or [] if isinstance(a, dict) and a.get("header") == "notify"), None)
+            return self.background(request_id[3:], stop=behavior == "deny" and pick is None,
+                                   notify=None if pick is None else "on" in (pick.get("labels") or []))
         with self._lock:
             entry = next((p for p in self.pending if p["request_id"] == request_id), None)
             if entry is None:
@@ -967,7 +1097,7 @@ class Job:
 
         if entry.get("gateway"):
             from bridge import gateway          # a Mystical tool's card: nothing of Claude's waits on it
-            gateway.answer_card(self, entry, answers)
+            gateway.answer_card(self, entry, answers, behavior, message)
             return True
         if entry["kind"] == "question":
             resp = {"behavior": "deny",
@@ -1083,6 +1213,37 @@ class Job:
                            elapsed=self.elapsed, session_id=self.session_id)
             return out
 
+    def background(self, task_id: str, *, stop: bool = False, notify: "bool | None" = None) -> bool:
+        """What the card of a background command can do. `stop` asks the CLI to
+        end that one task (the stop_task control request, CLI 2.1.323): its
+        task_notification then closes the card, and the model is not woken for
+        it. `notify` is the card's checkbox: prompt the agent if the wait on
+        this command runs out (_watchdog, BG_WAIT_CAP). False for a task that
+        is not running, or a child that can no longer be told."""
+        task = self.bg_tasks.get(task_id)
+        if task is None or self.exited.is_set():
+            return False
+        if notify is not None:
+            task["notify"] = bool(notify)
+            self.add({"type": "background_set", "id": task_id, "notify": bool(notify)})
+        if stop:
+            return self._write_stdin({"type": "control_request", "request_id": uuid.uuid4().hex,
+                                      "request": {"subtype": "stop_task", "task_id": task_id}})
+        return True
+
+    def set_bg_cap(self, seconds: float) -> int:
+        """The agent's own limit on how long this turn waits, in silence, on its
+        background commands: a minute at least, never past BG_WAIT_CAP."""
+        self.bg_cap = float(max(60, min(int(seconds), int(BG_WAIT_CAP))))
+        self.add({"type": "background_set", "cap": int(self.bg_cap)})
+        return int(self.bg_cap)
+
+    def bg_waiting(self) -> bool:
+        """The turn said its piece and its child lives on for a background
+        command or monitor: it wakes when one ends, or a new message ends the
+        wait (end_bg_wait)."""
+        return self.status != "running" and bool(self.bg_tasks) and not self.exited.is_set()
+
     def activity(self) -> dict:
         """A short 'what is it doing right now' label for the jobs monitor:
         awaiting input, the latest tool call, or thinking — plus a tool count."""
@@ -1099,6 +1260,10 @@ class Job:
             kind = "question" if "question" in kinds else "permission"
             label = "awaiting your answer" if kind == "question" else "awaiting your approval"
             return {"state": "awaiting", "kind": kind, "label": label, "tools": tools}
+        if self.bg_waiting():
+            n = len(self.bg_tasks)
+            return {"state": "background", "tools": tools,
+                    "label": f"waiting on {n} background command{'s' if n > 1 else ''}"}
         if last_tool is not None:
             name = last_tool.get("name", "")
             summary = last_tool.get("summary", "")
@@ -1122,6 +1287,7 @@ class AcpJob(Job):
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
+        self.after_tool = None       # no stream of tool results to wait on here: a plan line goes in at once
         self.acp_account = ""            # the agent account id; "" = the CLI's own login
         self.agent_session_id = None     # the agent's own session id, once it's open
         self.conn = None                 # acp.Conn
@@ -1159,7 +1325,7 @@ class AcpJob(Job):
             from bridge import gateway
             # Answered before the card goes: the paused turn watches for it to go,
             # and must find the answer waiting.
-            gateway.answer_card(self, card, answers)
+            gateway.answer_card(self, card, answers, behavior, message)
             with self._lock:
                 self.pending = [p for p in self.pending if p.get("request_id") != request_id]
             return True
@@ -1216,11 +1382,17 @@ def _with_images(prompt: str, image_paths: list[str] | None) -> str:
     child can just read the file.
 
     "File(s)", not "screenshot(s)" — the tray takes any file, and telling the
-    model a .csv is a screenshot is how it ends up trying to look at one."""
+    model a .csv is a screenshot is how it ends up trying to look at one.
+
+    A leading /command stays first: the CLI runs a command only from the very
+    start of the prompt, so the note goes after that one token, not before it."""
     if not image_paths:
         return prompt
-    return ("The user attached file(s); open them before responding: "
-            + ", ".join(image_paths) + "\n\n" + prompt)
+    note = "The user attached file(s); open them before responding: " + ", ".join(image_paths)
+    if not prompt.startswith("/"):
+        return note + "\n\n" + prompt
+    cmd, *args = prompt.split(None, 1)
+    return f"{cmd} {note}" + (f"\n\n{args[0]}" if args else "")
 
 
 def steer(session_id: str, text: str, image_paths: list[str] | None = None) -> bool:
@@ -1244,8 +1416,11 @@ def steer(session_id: str, text: str, image_paths: list[str] | None = None) -> b
     session is prompted with this.
     """
     with _jobs_lock:
-        job = next((j for j in _jobs.values()
-                    if j.store_session_id == session_id and j.status == "running"), None)
+        # A turn waiting on background commands keeps its stdin open (see
+        # _run_streaming): the message starts a follow-up turn in that process
+        # and the commands keep running.
+        job = next((j for j in _jobs.values() if j.store_session_id == session_id
+                    and (j.status == "running" or j.bg_waiting())), None)
     if isinstance(job, AcpJob) and experimental.enabled():
         if not acp.soft_steer(job, chat_images.note(text, job.cwd) + _with_images(text, image_paths)):
             return False
@@ -1372,7 +1547,7 @@ def running_jobs(chat_id: int) -> list[dict]:
     from machine.list_running()."""
     with _jobs_lock:
         jobs = [j for j in _jobs.values()
-                if j.chat_id == chat_id and j.status == "running"]
+                if j.chat_id == chat_id and (j.status == "running" or j.bg_waiting())]
     out = []
     for j in jobs:
         sid = j.store_session_id
@@ -1403,6 +1578,44 @@ def _running_agents(claude_sid: str) -> int:
     return agents.session_agents({"claude_session_id": claude_sid})["running"]
 
 
+def _background_view(j: "Job") -> "dict | None":
+    """A turn that answered and that Claude Code calls idle, with background
+    tasks still running in its process: not WORKING (the answer is in), not
+    DONE either (the process lives, and a prompt now would queue behind it).
+    None for anything else, a CLI that never reports its state included."""
+    bg = getattr(j, "bg", None)          # a Job built bare (tests) has none of it
+    if getattr(j, "cli_state", None) != "idle" or not bg or j.answered_at is None:
+        return None
+    tasks = sorted(bg.items(), key=lambda kv: kv[1]["since"])
+    n = len(tasks)
+    return {"state": "background", "kind": None, "source": "bridge",
+            "label": f"answered — {n} in background",
+            "bg": [{"id": tid, **t} for tid, t in tasks],
+            "peak": max(j.bg_peak, n), "since": j.answered_at}
+
+
+def _helper_waits(bridge_running: list, awaiting_map: dict) -> dict:
+    """chat id -> its WAITING status, for each chat with a helper mid-turn."""
+    try:
+        kids = store.helper_parents(bridge_running)
+    except Exception:  # noqa: BLE001 - the status map must still answer
+        return {}
+    by_chat: dict[str, list] = {}
+    for sid in bridge_running:      # the list's order, so the label holds still between polls
+        if sid in kids:
+            by_chat.setdefault(kids[sid][0], []).append((sid, kids[sid][1]))
+    out = {}
+    for parent, rows in by_chat.items():
+        needs = [name for sid, name in rows if sid in awaiting_map]
+        if needs:
+            label = f"{needs[0]} needs you" if len(needs) == 1 else f"{len(needs)} agents need you"
+        else:
+            label = f"waiting on {rows[0][1]}" if len(rows) == 1 else f"waiting on {len(rows)} agents"
+        out[parent] = {"state": "waiting", "kind": None, "source": "bridge", "label": label,
+                       "agents": len(rows), "needs": len(needs)}
+    return out
+
+
 def _build_status(bridge_running: list, awaiting: list, jobs: list,
                   external: list, native_snap: dict) -> dict:
     """Merge bridge + native liveness into one {session_id: {state, kind, source,
@@ -1414,16 +1627,28 @@ def _build_status(bridge_running: list, awaiting: list, jobs: list,
     awaiting_map = {a["session_id"]: a.get("kind") for a in awaiting}
     job_label = {j["session_id"]: (j.get("activity") or {}).get("label")
                  for j in jobs if j.get("session_id")}
+    latest = _latest_jobs()
     status: dict[str, dict] = {}
     for sid in bridge_running:
+        j = latest.get(sid)
         if sid in awaiting_map:
             kind = awaiting_map[sid]
             label = "awaiting your answer" if kind == "question" else "awaiting your approval"
             status[sid] = {"state": "awaiting", "kind": kind,
                            "source": "bridge", "label": label}
+        elif j is not None and (bg := _background_view(j)) is not None:
+            status[sid] = bg
         else:
             status[sid] = {"state": "working", "kind": None, "source": "bridge",
                            "label": job_label.get(sid) or "working…"}
+            if j is not None and getattr(j, "retry", None):
+                status[sid]["retry"] = dict(j.retry)
+            if j is not None and getattr(j, "native_resume", False):
+                status[sid]["resumed"] = True    # Claude Code carrying a cut turn on
+    for sid, c in limits.credits_blocked().items():
+        # Stopped on credits_required: no reset brings it back, so it is yours.
+        status.setdefault(sid, {"state": "credits", "kind": None, "source": "bridge",
+                                "label": "needs extra-usage credits", **c})
     # A prompt being checked against its session (bridge/relevance.py) holds the
     # send for ~10s before any job exists — surface it so the session stays in the
     # active lists instead of vanishing until the prompt is approved.
@@ -1441,7 +1666,7 @@ def _build_status(bridge_running: list, awaiting: list, jobs: list,
             "state": "parked", "kind": p["kind"], "source": "bridge",
             "label": (f"usage limit — resuming ~{limits.when_str(p['at'])}" if p["kind"] == "limit"
                       else f"API error — retrying {limits.wait_str(p['at'])}"),
-            "at": p["at"], "since": p["since"], "slot": p["slot"], "offer": p["offer"]})
+            "at": p["at"], "since": p["since"], "slot": p["slot"], "offer": p["offer"], "why": p["why"]})
     # A turn that signed off with a question — the ASK card in the transcript —
     # is finished, not blocked: the work landed and nothing is parked. But the
     # next move is yours, and reported as idle it looks like nobody is waiting.
@@ -1455,6 +1680,13 @@ def _build_status(bridge_running: list, awaiting: list, jobs: list,
         status.setdefault(sid, {"state": "waiting", "kind": None, "source": "bridge",
                                 "label": f"waiting on {w['title']}", "on": w["on"],
                                 "then": w["then"], "since": w["since"]})
+    # A chat whose own turn ended while its helpers (bridge/channel.py) still run isn't
+    # done either: their reports wake it. Idle here, it read as finished on every surface
+    # while it was only waiting (2026-11-21). No `on`: that is WaitForSession's, and a
+    # prompt of yours ends no wait here. A helper stopped on a card is named, since the
+    # chat can't move until you answer it.
+    for parent, w in _helper_waits(bridge_running, awaiting_map).items():
+        status.setdefault(parent, w)
     now = time.time()
     for row in external:
         sid = row.get("session_id")
@@ -1488,16 +1720,18 @@ def bridge_status(chat_id: int) -> dict:
                          running_jobs(chat_id), [], {})
 
 
-def running_snapshot(chat_id: int) -> dict:
+def running_snapshot(chat_id: int, scan: bool = True) -> dict:
     """The full /running payload: external sessions + bridge jobs + bridge-running
     ids + awaiting list + the unified status map. Both servers return this verbatim
-    so the dashboard and Mini App show identical per-session status."""
-    external = machine.list_running()
+    so the dashboard and Mini App show identical per-session status. scan=False
+    leaves out VS Code and terminal sessions (no process scan): the Live board's
+    view (bridge/tgboard.py)."""
+    external = machine.list_running() if scan else []
     bridge_running = store.running_session_ids(chat_id)
     awaiting = awaiting_input()
     jobs = running_jobs(chat_id)
     status = _build_status(bridge_running, awaiting, jobs, external,
-                           native_activity.snapshot())
+                           native_activity.snapshot() if scan else {})
     # Same blind spot as the native branch of _build_status, one layer over: a
     # bridge session whose turn ended while background agents keep running holds
     # no job and appends nothing to its transcript, so the agents in flight are
@@ -1509,7 +1743,7 @@ def running_snapshot(chat_id: int) -> dict:
             continue
         if n := _running_agents(csid):
             status[sess["id"]] = {"state": "working", "kind": None, "source": "bridge",
-                                  "label": f"{n} agent{'s' if n > 1 else ''} working"}
+                                  "label": f"{n} agent{'s' if n > 1 else ''} working", "agents": n}
     return {"external": external, "bridge_running": bridge_running,
             "jobs": jobs, "awaiting": awaiting, "status": status}
 
@@ -1591,15 +1825,13 @@ def notify_awaiting(chat_id: int | None, session_id: str | None, kind: str,
             always=bool(job and job.tg_live))
 
 
-def _first_line(text: str) -> str:
-    return next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")[:200]
-
-
 def notify_turn_done(chat_id: int | None, session_id: str | None, is_error: bool,
                      body: str = "") -> None:
     """Ping when a streaming run finishes (or errors), so you can step away. The
     feed's line is the closing sentence, or for a failure what outcomes.py
-    calls it, which a red row is useless without."""
+    calls it, which a red row is useless without. A ticket's or merge's reply
+    that opens with a to-do box gives its to-do instead, Telegram too: nobody
+    reads those sessions, so the bell is where you learn of it (2026-11-17)."""
     if _plugin_session(session_id):
         return
     try:
@@ -1607,10 +1839,12 @@ def notify_turn_done(chat_id: int | None, session_id: str | None, is_error: bool
     except Exception:  # noqa: BLE001
         turn = {}
     out = turn.get("outcome") or {}
+    unread = not is_error and (store.get_session(session_id or "") or {}).get("origin") in ("ticket", "ticket-merge")
+    todo = transcript_page.todo(body) if unread else ""
     line = (f"{out['label'].capitalize()}: {out.get('detail') or ''}".strip()[:200]
-            if is_error and out.get("label") else _first_line(body))
+            if is_error and out.get("label") else (f"To do: {todo}" if todo else transcript_page.first_line(body))[:200])
     icon, verb = ("⚠️", "hit an error") if is_error else ("✅", "finished")
-    why = f"\n{line}" if is_error and line else ""
+    why = f"\n{line}" if (is_error or todo) and line else ""
     _notify(chat_id, f"{icon} Claude {verb} — {_session_label(session_id)}{why}",
             _session_kb(chat_id, session_id, "🛠 Open session"),
             kind="failed" if is_error else "done", sid=session_id, body=line,
@@ -1626,6 +1860,22 @@ def notify_waiting(chat_id: int | None, session_id: str | None, on_title: str) -
             kind="waiting", sid=session_id, body=f"waiting on {on_title}")
 
 
+def notify_goal(chat_id: int | None, session_id: str | None, goal: dict) -> None:
+    """The turn that met a goal, or stopped it on something only you can give:
+    said once, in place of that turn's DONE (bridge/goals.py verdict)."""
+    if _plugin_session(session_id):
+        return
+    from bridge import goals  # local import: runner<->* cycle
+    met = goal.get("state") == goals.COMPLETE
+    note = " ".join((goal.get("note") or "").split())[:300]
+    head = "◎ Goal met" if met else "◎ Goal needs you"
+    _notify(chat_id, f"{head} — {_session_label(session_id)}\n{goals.title_of(goal)}"
+                     + (f"\n{note}" if note else ""),
+            _session_kb(chat_id, session_id, "🛠 Open session"),
+            kind="goal_met" if met else "goal_blocked", sid=session_id,
+            body=note or goals.title_of(goal))
+
+
 def notify_woken(chat_id: int | None, session_id: str | None, body: str) -> None:
     """A waiting session was queued its wake-up (bridge/waits.py)."""
     if _plugin_session(session_id):
@@ -1639,12 +1889,20 @@ def _announce_end(job) -> None:
     """A turn that ended by itself: WAITING when it ended on WaitForSession (it
     wakes on its own), else DONE or FAILED; then wake whoever waited on it."""
     chat = None if job.tg_live else job.chat_id     # None: the bell only (_notify)
+    from bridge import goals  # local import: runner<->* cycle
     from bridge import channel                      # lazy: channel reaches this module
     if channel.quiet_ping(job.store_session_id) and job.status != "error":
         waits.target_ended(job)   # a helper's turn, or a chat waiting on helpers: no ping yet
         return
     if w := waits.get(job.store_session_id or ""):
         notify_waiting(chat, job.store_session_id, w["title"])
+    elif getattr(job, "resume_state", None) == "declined":
+        # Nothing ran, so not DONE: the cut work is still waiting on you.
+        notify_turn_done(chat, job.store_session_id, True,
+                         body="A restart cut this turn and Claude Code didn't carry it on. "
+                              "Carry it on from the turn, or leave it.")
+    elif job.status != "error" and (g := goals.verdict(job)):   # an error still says so
+        notify_goal(chat, job.store_session_id, g)
     else:
         notify_turn_done(chat, job.store_session_id, job.status == "error",
                          body=(job.error_msg or "") if job.status == "error" else
@@ -1677,6 +1935,9 @@ def _announce_end(job) -> None:
 #     session — a completed turn resets the cap — so a session whose resume
 #     itself keeps dying (or keeps timing out) can't burn tokens in a loop. That
 #     cap, not the watchdog, is the runaway-cost brake.
+#   - The answer is Claude Code's silent-turn reminder copied back: it reads
+#     "done" (end_turn), but the model stopped mid-task on an injected line
+#     nobody typed. It resumes like a crash, under the same cap.
 # Only a user Stop (job.interrupted) is never auto-resumed.
 
 RESUME_NUDGE = (
@@ -1687,6 +1948,14 @@ TIMEOUT_NUDGE = (
     "⏮ Your previous turn was killed by the bridge's hang watchdog (no output "
     "for too long) — not by the user. Review your recent transcript and continue "
     "exactly where you left off; finish the task you were doing. Don't start over.")
+ECHO_NUDGE = (
+    "⏮ Your previous turn ended right after you repeated a system reminder "
+    "(\"The user hasn't heard from you…\") as your answer — not by the user. "
+    "Review your recent transcript and continue exactly where you left off; "
+    "finish the task you were doing. Don't start over.")
+# How every wording of that reminder starts: Claude Code's own and the server's
+# (flag tengu_hushed_lark_text; CLAUDE_CODE_SILENT_TURN_REMINDER_TEXT overrides both).
+SILENT_REMINDER = "The user hasn't heard from you in a while"
 AUTO_RESUME_MAX = 5                 # consecutive dead turns before giving up
 _resume_fails: dict[str, int] = {}  # session id -> consecutive error-ended turns
 
@@ -1729,6 +1998,14 @@ def _stopping(rc: "int | None") -> bool:
     return state.shutting_down
 
 
+def _refused_reset(job: "Job") -> "float | None":
+    """When the window that refused this turn reopens (epoch s), as Claude Code
+    reported it with the refusal; None without a rejected rate_limit_event."""
+    rl = getattr(job, "rate_limit", None) or {}
+    r = rl.get("resetsAt")
+    return float(r) if rl.get("status") == "rejected" and isinstance(r, (int, float)) else None
+
+
 def _maybe_auto_resume(job: "Job", cwd: str, model: str | None,
                        effort: str | None) -> bool:
     """Resume a session whose turn died without the user behind it. Returns True
@@ -1742,12 +2019,29 @@ def _maybe_auto_resume(job: "Job", cwd: str, model: str | None,
     sid = job.store_session_id
     if not sid:
         return False
+    echoed = False
     if job.status == "done":
-        _resume_fails.pop(sid, None)             # healthy turn resets the cap
-        limits.note_ok(sid)                      # ...and closes any limit episode
-        return False
-    if job.status != "error" or job.interrupted or job.refusal:
+        limits.note_ok(sid)                      # a completed turn closes any limit episode
+        echoed = not job.interrupted and (job.result or "").lstrip().startswith(SILENT_REMINDER)
+        if not echoed:
+            _resume_fails.pop(sid, None)         # healthy turn resets the cap
+            return False
+        # else resumed below; its text trips none of the error checks on the way
+    elif job.status != "error" or job.interrupted or job.refusal:
         return False                              # a refused turn is refused again
+    rl = getattr(job, "rate_limit", None) or {}
+    if rl.get("errorCode") == "credits_required" or limits.is_credits_error(job.result or job.error_msg):
+        # Needs purchased credits: no reset clears that, so a park would wait
+        # for nothing. It is yours now; the status map lists it under NEEDS YOU.
+        limits.block_credits(sid, job.account_slot, rl.get("canUserPurchaseCredits"))
+        _notify(job.chat_id,
+                f"⊘ {_session_label(sid)} stopped: its login needs extra-usage credits, "
+                f"and waiting for the reset won't change that.",
+                _session_kb(job.chat_id, sid), kind="credits", sid=sid,
+                body="Its login needs extra-usage credits. Waiting for the reset won't change that.",
+                always=job.tg_live)
+        job.told = True
+        return False
     if job.skip_pack:
         return False                              # tools-off: a resume would run with tools
     if not config.AUTO_RESUME or state.shutting_down:
@@ -1759,7 +2053,7 @@ def _maybe_auto_resume(job: "Job", cwd: str, model: str | None,
         if not _resumable(job, sess):
             return False                          # died before init — nothing to resume
         d = limits.defer(sid, job.chat_id, cwd, model, effort,
-                         slot=job.account_slot)
+                         slot=job.account_slot, reset_at=_refused_reset(job))
         if d is None:
             return False                          # kept failing past resets — stay stopped
         when, first = d
@@ -1770,12 +2064,16 @@ def _maybe_auto_resume(job: "Job", cwd: str, model: str | None,
                            model=model, effort=effort):
             return True
         if first:
-            _notify(job.chat_id,
-                    f"⏳ Claude usage limit hit — {_session_label(sid)} is paused and "
-                    f"will auto-resume when the limit resets (~{limits.when_tg(when)}).",
-                    _session_kb(job.chat_id, sid), kind="parked", sid=sid,
+            from bridge import tgboard           # lazy: tgboard imports runner
+            text = (f"⏳ Claude usage limit hit — {_session_label(sid)} is paused and "
+                    f"will auto-resume when the limit resets (~{limits.when_tg(when)}).")
+            kb = _session_kb(job.chat_id, sid)
+            _notify(job.chat_id, text, kb, kind="parked", sid=sid,
                     body=f"Hit the usage limit. It resumes on its own around {limits.when_str(when)}.",
-                    always=job.tg_live)
+                    always=job.tg_live,
+                    ask=lambda: tgboard.limit_card(job.chat_id, sid, text, kb,
+                                                   silent=notices.tier("parked") != "needs",
+                                                   thread=tgtopics.thread_for(job.chat_id, sid)))
             job.told = True
         return True
     if limits.is_server_error(job.result or job.error_msg):
@@ -1823,15 +2121,22 @@ def _maybe_auto_resume(job: "Job", cwd: str, model: str | None,
         return False                              # died before init — nothing to resume
     try:
         job2 = start_streaming_job(
-            job.chat_id, TIMEOUT_NUDGE if job.timed_out else RESUME_NUDGE, [],
+            job.chat_id, ECHO_NUDGE if echoed else TIMEOUT_NUDGE if job.timed_out else RESUME_NUDGE, [],
             project=cwd, session_id=sid, model=model, effort=effort,
-            account_slot=job.account_slot, runtime=job.runtime)
+            account_slot=job.account_slot, runtime=job.runtime, sent_by="mystical:resume",
+            sent_why="the turn stopped on a repeated system reminder" if echoed
+            else "the turn went silent and the watchdog restarted it" if job.timed_out
+            else "an error cut the turn off")
     except Exception as e:  # noqa: BLE001
         print(f"[auto-resume] failed for {sid}: {e}", file=sys.stderr)
         return False
     if job2 is None:
         return False                              # slot taken (e.g. the queue advanced)
-    if job.timed_out:
+    if echoed:
+        _notify(job.chat_id, f"🔄 The turn stopped on a repeated system reminder "
+                             f"— resuming {_session_label(sid)}.",
+                kind="resumed", sid=sid, body="It stopped on a repeated system reminder. Resuming.")
+    elif job.timed_out:
         mins = (job.hang_timeout or config.RUN_TIMEOUT) // 60
         _notify(job.chat_id, f"⏱️ No output for {mins} min — "
                              f"killed as hung, resuming {_session_label(sid)}.",
@@ -1934,7 +2239,8 @@ def resume_after_agent_login(agent: str, acct: str) -> bool:
         return False
     try:
         job = start_streaming_job(e["chat_id"], AGENT_AUTH_NUDGE, [], project=e["cwd"],
-                                  session_id=e["sid"], model=e["model"], effort=e["effort"])
+                                  session_id=e["sid"], model=e["model"], effort=e["effort"],
+                                  sent_by="mystical:resume", sent_why="the agent's login came back")
     except Exception as ex:  # noqa: BLE001
         print(f"[reauth] agent resume failed for {e['sid']}: {ex}", file=sys.stderr)
         return False
@@ -1957,7 +2263,8 @@ def resume_after_login(slot: "int | None") -> bool:
     try:
         job = start_streaming_job(e["chat_id"], AUTH_NUDGE, [], project=e["cwd"],
                                   session_id=e["sid"], model=e["model"],
-                                  effort=e["effort"], account_slot=e["slot"])
+                                  effort=e["effort"], account_slot=e["slot"],
+                                  sent_by="mystical:resume", sent_why="you signed in again")
     except Exception as ex:  # noqa: BLE001
         print(f"[reauth] resume failed for {e['sid']}: {ex}", file=sys.stderr)
         return False
@@ -1972,9 +2279,10 @@ def _register(job: Job):
     with _jobs_lock:
         _jobs[job.id] = job
         if len(_jobs) > _JOBS_MAX:
-            # Evict finished jobs only — dropping a running job would 404 its
-            # respond/interrupt endpoints and strand a pending permission card.
-            done = [j for j in _jobs.values() if j.status != "running"]
+            # Evict jobs whose child exited only — dropping a live one (still
+            # running, or done answering while a background agent can wake it to
+            # ask) would 404 its respond/interrupt and strand its card.
+            done = [j for j in _jobs.values() if j.exited.is_set()]
             excess = len(_jobs) - _JOBS_MAX
             for old in sorted(done, key=lambda j: j.started)[:excess]:
                 _jobs.pop(old.id, None)
@@ -2141,15 +2449,40 @@ _USAGE_KEYS = (("in", "input_tokens"), ("out", "output_tokens"),
                ("cache_r", "cache_read_input_tokens"))
 
 
-def _add_usage(job: "Job", usage: dict) -> None:
+def _add_usage(job: "Job", usage: dict, msg_id: "str | None" = None) -> None:
     """Add one message's usage to the turn's running total. Summed, not
     last-wins: the last message's figure is how full the window was, the sum is
-    what the turn spent. Both are wanted, for different readouts."""
+    what the turn spent. Both are wanted, for different readouts.
+
+    Counted once per message id: the CLI emits one `assistant` event per content
+    block, each repeating its message's usage, so summing events multiplied the
+    cache reads by the block count. That usage is also the message's as it
+    started, so output reads near zero here; each `result` brings the exact
+    figures for the requests it covers (_add_result_usage)."""
     if not isinstance(usage, dict) or not any(usage.get(k) for _, k in _USAGE_KEYS):
         return
-    acc = job.tokens or {key: 0 for key, _ in _USAGE_KEYS}
-    for key, src in _USAGE_KEYS:
-        acc[key] += usage.get(src) or 0
+    job.msg_usage[msg_id or f"#{len(job.msg_usage)}"] = usage
+    _sum_usage(job)
+
+
+def _add_result_usage(job: "Job", usage) -> None:
+    """A `result`'s usage: exact, and per query (a woken turn's second result
+    covers only its own requests, checked against the CLI 2026-11-08), so it adds
+    to the turn and replaces the estimate of the messages it covers. Main thread
+    only: helpers' spend is in their own transcripts (bridge/meter.py)."""
+    if not isinstance(usage, dict) or not any(usage.get(k) for _, k in _USAGE_KEYS):
+        return
+    base = job.result_tokens or {key: 0 for key, _ in _USAGE_KEYS}
+    job.result_tokens = {key: base[key] + (usage.get(src) or 0) for key, src in _USAGE_KEYS}
+    job.msg_usage.clear()
+    _sum_usage(job)
+
+
+def _sum_usage(job: "Job") -> None:
+    acc = dict(job.result_tokens or {key: 0 for key, _ in _USAGE_KEYS})
+    for u in job.msg_usage.values():
+        for key, src in _USAGE_KEYS:
+            acc[key] += u.get(src) or 0
     job.tokens = acc
     # Flushed per message, not only in the turn's finally: SPEND polls while the
     # turn runs, and a turn accounted only once it's over reads as "unknown" for
@@ -2240,8 +2573,176 @@ def _note_work_cwd(job: "Job", command: str, before: "set[str] | None" = None) -
         pass
 
 
+def _task_kind(task_type) -> str:
+    """background_tasks_changed's task_type in a word the pill can print:
+    local_bash is a shell, anything agent-shaped an agent."""
+    t = str(task_type or "")
+    return "shell" if "bash" in t or "shell" in t else "agent" if "agent" in t else "task"
+
+
+def _retry_reason(d: dict) -> str:
+    """api_retry's error class (rate_limit, overloaded, server_error, ...) or,
+    when it names none, the HTTP status behind it; "connection" for a retry
+    with no response at all."""
+    err = d.get("error")
+    if isinstance(err, dict):
+        err = err.get("type") or err.get("error")
+    if err:
+        return str(err)[:40]
+    status = d.get("error_status")
+    return f"http_{status}" if status else "connection"
+
+
+def _note_rate_limit(job: Job, info: dict) -> None:
+    """A login's limits as the CLI just saw them: the composer's meter reads
+    them live instead of waiting for its next poll. Best effort."""
+    try:
+        accounts.note_rate_limit(job.account_slot, info)
+    except Exception as e:  # noqa: BLE001
+        print(f"[usage] rate_limit_event not noted: {e}", file=sys.stderr)
+
+
+RESUME_WAIT = 60.0   # a native resume that hasn't started by then was declined
+
+
+def _resume_declined(job: "Job") -> None:
+    """Claude Code went idle without carrying the cut turn on (cut too long
+    ago, it hit --max-turns, an MCP result ended it), or never said anything.
+    The turn says so and offers today's nudge; the process is let go."""
+    if job.resume_state != "waiting":
+        return
+    job.resume_state = "declined"
+    job.add({"type": "resume", "declined": True})
+    job.close_stdin()
+
+
+def _note_resume(job: "Job", d: dict) -> None:
+    t = d.get("type")
+    if (t == "command_lifecycle" and d.get("state") == "started") or t == "assistant" \
+            or d.get("resume_reason"):
+        job.resume_state = "accepted"
+    elif t == "system" and d.get("subtype") == "session_state_changed" and d.get("state") == "idle":
+        _resume_declined(job)
+
+
+_BG_CMD_MAX = 2000
+
+
+def _note_background(job: Job, d: dict) -> None:
+    """Keep job.bg_tasks in step with the CLI's own task events, and put a card
+    in the transcript for each background command or monitor: one event when it
+    starts (what it is), one when it ends (how). Seen on CLI 2.1.323: a
+    `run_in_background` Bash emits task_started (task_type local_bash) before
+    its tool result, and task_notification (status completed) when it exits; a
+    foreground command emits neither.
+
+    Agents and workflows are left out: they report into their own files and
+    _watchdog already waits for them through _running_agents. So is a task a
+    sub-agent owns, which ends with its agent."""
+    tid = str(d.get("task_id") or "")
+    if not tid:
+        return
+    if d.get("subtype") == "task_started":
+        kind = str(d.get("task_type") or "")
+        if d.get("owned_by_subagent") or "agent" in kind or "workflow" in kind:
+            return
+        use = d.get("tool_use_id")
+        cmd = job.bg_cmds.pop(use, None) or (job.bash_cmds.get(use) or ("",))[0]
+        task = {"kind": "monitor" if "monitor" in kind else "command",
+                "text": str(d.get("description") or "")[:300], "command": cmd[:_BG_CMD_MAX]}
+        job.bg_tasks[tid] = task
+        job.add({"type": "background", "id": tid, "state": "running", **task})
+        return
+    status = str(d.get("status") or "")
+    # A monitor notifies on every event it sees; only an ending closes its card.
+    if status in ("", "running", "pending") or job.bg_tasks.pop(tid, None) is None:
+        return
+    job.add({"type": "background_done", "id": tid, "state": status,
+             "text": str(d.get("summary") or "")[:300]})
+
+
+def _drop_background(job: Job, state_: str) -> list:
+    """Close the cards of the background tasks a dying child takes with it.
+    Returns the tasks that were open."""
+    gone = []
+    for tid in list(job.bg_tasks):
+        gone.append(job.bg_tasks.pop(tid))
+        job.add({"type": "background_done", "id": tid, "state": state_, "text": ""})
+    return gone
+
+
+def _bg_cap(job: Job) -> float:
+    return min(job.bg_cap or BG_WAIT_CAP, BG_WAIT_CAP)
+
+
+def _bg_expired_prompt(job: Job, tasks: list) -> None:
+    """The wait ran out on commands whose card had "prompt the agent" ticked:
+    queue the session a turn that says so, once this one has let go of its run
+    slot. Without it an agent that ended its turn to wait is never told its
+    command was stopped. Best-effort, on its own thread: the watchdog must
+    still get to kill the child."""
+    asked = [t for t in tasks if t.get("notify")]
+    sid = job.store_session_id
+    if not asked or not sid:
+        return
+    mins = max(1, round(_bg_cap(job) / 60))
+    lines = "\n".join(f"- {t.get('text') or 'background command'}: `{(t.get('command') or '')[:400]}`"
+                      for t in asked)
+    text = (f"Mystical stopped what you were waiting on: nothing had finished after {mins} min "
+            f"of waiting, which is this chat's limit.\n{lines}\n"
+            "Read its output file for what it got to, then carry on. If it needs longer, run it "
+            "again in shorter steps or raise the limit with background_wait (2 hours at most).")
+
+    def go():
+        try:
+            job.exited.wait(30)
+            from bridge import queue_manager   # local import: runner<->queue cycle
+            sess = store.get_session(sid) or {}
+            queue_manager.enqueue(sid, text=text, prompt=text, images=[], model=None, effort=None,
+                                  permission_mode=None, width=None, sel=[], surface="background",
+                                  chat_id=job.chat_id, project=sess.get("project") or "",
+                                  sent_by="mystical:wait",
+                                  sent_why=f"its background wait ran out after {mins} min")
+        except Exception as e:  # noqa: BLE001 - a wake-up is never worth a crash
+            print(f"[runner] background wake-up dropped: {e}", file=sys.stderr)
+
+    threading.Thread(target=go, daemon=True).start()
+
+
+def end_bg_wait(session_id: str) -> bool:
+    """End a session's wait on background commands so a new turn can start: its
+    finished turn's child is still up (and holds the run slot) only to be woken
+    by them. The commands die with it; the next process is told so by the CLI
+    on --resume. True if a wait was ended and the slot came free.
+
+    Waits on the slot, not job.exited: the turn's finally frees the slot and
+    then calls into the prompt queue, whose lock the caller may be holding."""
+    job = _latest_jobs().get(session_id)
+    proc = job.proc if job else None
+    if job is None or proc is None or not job.bg_waiting():
+        return False
+    _drop_background(job, "replaced")
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    deadline = time.monotonic() + INTERRUPT_KILL + 5.0
+    killed = False
+    while state.is_running(session_id) and time.monotonic() < deadline:
+        if not killed and time.monotonic() > deadline - 5.0 and proc.poll() is None:
+            killed = True
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        time.sleep(0.05)
+    return not state.is_running(session_id)
+
+
 def _handle_event(job: Job, d: dict):
     t = d.get("type")
+    if job.resume_state == "waiting":
+        _note_resume(job, d)
     job.boot = None          # the child is talking; nothing is loading any more
     sid = d.get("session_id")
     if sid and sid != job.session_id:
@@ -2252,6 +2753,17 @@ def _handle_event(job: Job, d: dict):
         # (e.g. --session-id rejected on an older CLI) — the row must follow it.
         if job.store_session_id:
             store.set_claude_session_id(job.store_session_id, sid)
+    if d.get("parent_tool_use_id") and t in ("assistant", "user"):
+        # A sub-agent's step, not this chat's agent's. Claude Code writes it to that agent's own file,
+        # which the Agents view reads (bridge/agent_team.py). Recorded here, a 100-agent turn was 7,500
+        # rows of other agents' work with nothing saying whose. Its shell commands are still noted, as
+        # a sub-agent running the tests is the tests having run (rules: Don't finish untested).
+        if t == "assistant":
+            for b in d.get("message", {}).get("content", []):
+                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Bash":
+                    job.sub_cmds.append(str((b.get("input") or {}).get("command") or "")[:20000])
+            del job.sub_cmds[:-400]
+        return
     if t == "assistant":
         if job.status == "done":
             # ponytail: claude -p emits `result` when the model ends its turn with
@@ -2260,11 +2772,12 @@ def _handle_event(job: Job, d: dict):
             # to running, or a watchdog kill / crash from here reads as a clean
             # finish: no error row, no timeout notice, no auto-resume.
             job.status, job.elapsed = "running", None
+        job.retry = None              # a reply came, so any retry got through
         usage = d.get("message", {}).get("usage") or {}
         ctx = _ctx_of(usage)
         if ctx:
             job.ctx_tokens = ctx      # last one wins; persisted at turn end
-        _add_usage(job, usage)        # and the running total; also at turn end
+        _add_usage(job, usage, d.get("message", {}).get("id"))   # and the running total; also at turn end
         for b in d.get("message", {}).get("content", []):
             if not isinstance(b, dict):
                 continue
@@ -2293,8 +2806,15 @@ def _handle_event(job: Job, d: dict):
                 if name == "Bash":
                     cmd = inp.get("command") or ""
                     job.bash_cmds[b.get("id")] = (cmd, _trees_before(job, cmd))
+                    if inp.get("run_in_background"):
+                        job.bg_cmds[b.get("id")] = cmd
+                    # bash_cmds forgets a command when its result arrives; the Stop rule reads this one.
+                    job.sub_cmds.append(cmd[:20000])
+                    del job.sub_cmds[:-400]
                 elif name == "TodoWrite" and isinstance(inp.get("todos"), list):
                     job.todos = inp["todos"]
+                    from bridge import chatplan   # local import: runner<->* cycle
+                    chatplan.from_todos(job.store_session_id, job.todos, job)
                 elif name == "TaskUpdate" and inp.get("taskId"):
                     tid = str(inp["taskId"])
                     job.task_status[tid] = str(inp.get("status")
@@ -2303,6 +2823,8 @@ def _handle_event(job: Job, d: dict):
                     job.clip_meta[b.get("id")] = _clip_meta(job, inp)
                 elif name == "Read" and isinstance(inp.get("file_path"), str):
                     job.read_paths[b.get("id")] = inp["file_path"]
+                elif name == "Monitor":
+                    job.bg_cmds[b.get("id")] = str(inp.get("command") or "")
                 job.open_tools[b.get("id")] = (name, time.time())
                 ev = {"type": "tool", "name": name, "id": b.get("id"),
                       "summary": _summarize_tool(name, inp)}
@@ -2318,6 +2840,8 @@ def _handle_event(job: Job, d: dict):
                 name, t0 = job.open_tools.pop(rid, (None, 0.0))
                 if (bash := job.bash_cmds.pop(rid, None)) is not None:
                     _note_work_cwd(job, *bash)
+                if name and name.startswith("mcp__mobbin__"):
+                    ux_mcp.capture(name, b.get("content"), job.cwd)
                 made = d.get("tool_use_result") if name == "TaskCreate" else None
                 if (isinstance(made, dict) and isinstance(made.get("task"), dict)
                         and made["task"].get("id")):
@@ -2340,12 +2864,17 @@ def _handle_event(job: Job, d: dict):
                 if imgs:
                     ev["images"] = imgs
                 job.add(ev)
+                if not job.open_tools:
+                    while job.after_tool:
+                        job.add(job.after_tool.pop(0))
     elif t == "system" and d.get("subtype") == "init" and job.status == "done":
         # Another turn in the same process. On --resume the CLI first replays
         # the notice of a background task the last process left behind, a
         # no-op whose result ("", num_turns 0) beats our prompt (CLI 2.1.302).
         # Left done, _watchdog's shell grace killed the child mid-thinking.
         job.status, job.elapsed = "running", None
+    elif t == "system" and d.get("subtype") in ("task_started", "task_notification"):
+        _note_background(job, d)
     elif t == "system" and d.get("subtype") == "hook_response":
         _hook_log(job, d)
     elif t == "system" and d.get("subtype") == "compact_boundary":
@@ -2357,6 +2886,35 @@ def _handle_event(job: Job, d: dict):
         job.compacted = {"pre": meta.get("pre_tokens") or meta.get("preTokens"),
                          "trigger": meta.get("trigger") or ""}
         job.ctx_tokens = None
+    elif t == "system" and d.get("subtype") == "session_state_changed":
+        # "the session's current state rather than a transition": idle and the
+        # result can come in either order, so nothing here pairs them.
+        job.cli_state = d.get("state")
+    elif t == "system" and d.get("subtype") == "background_tasks_changed":
+        now, live = time.time(), {}
+        for task in d.get("tasks") or []:
+            tid = str((task or {}).get("task_id") or "")
+            if tid:
+                live[tid] = job.bg.get(tid) or {
+                    "type": _task_kind(task.get("task_type")),
+                    "desc": str(task.get("description") or "")[:2000], "since": now}
+        job.bg = live
+        job.bg_peak = max(job.bg_peak, len(live))
+    elif t == "system" and d.get("subtype") == "api_retry":
+        job.retry = {"attempt": d.get("attempt"), "max": d.get("max_retries"),
+                     "delay_ms": d.get("retry_delay_ms"), "error": _retry_reason(d),
+                     "at": time.time()}
+        job.add({"type": "retry", **{k: job.retry[k] for k in ("attempt", "max", "delay_ms", "error")}})
+    elif t == "rate_limit_event":
+        info = d.get("rate_limit_info") or {}
+        job.rate_limit = info
+        _note_rate_limit(job, info)
+        if info.get("status") == "rejected":
+            # Only a refusal is worth a row: outcomes.py reads credits_required
+            # off it, and a plain limit's park takes its resetsAt.
+            job.add({"type": "ratelimit", "status": "rejected",
+                     "error_code": info.get("errorCode"), "resets_at": info.get("resetsAt"),
+                     "buy": info.get("canUserPurchaseCredits")})
     elif t == "control_response":
         # The CLI's answer to one of ours (interrupt, set_model,
         # set_permission_mode). Only a refusal earns a row: the pick it carried
@@ -2374,11 +2932,15 @@ def _handle_event(job: Job, d: dict):
             job.result = ("Context compacted" + (f": {round(pre / 1000)}k tokens summarized" if pre else "")
                           + ". The conversation carries on from the summary.")
         job.cost = d.get("total_cost_usd")
+        _add_result_usage(job, d.get("usage"))
         if d.get("session_id"):
             job.session_id = d["session_id"]
         # An interrupted turn may report is_error; treat it as a clean stop.
         job.status = "error" if (d.get("is_error") and not job.interrupted) else "done"
+        job.answered_at = job.answered_at or time.time()
         job.elapsed = int(time.time() - job.started)
+        while job.after_tool:              # a turn that ended with a tool call still open
+            job.add(job.after_tool.pop(0))
         job.add({"type": "result", "result": job.result, "cost": job.cost,
                  "elapsed": job.elapsed, "is_error": job.status == "error"})
 
@@ -2560,15 +3122,22 @@ def _adopt_preview_images(job_id: str, rid: "str | None", questions):
     same size cap, copied rather than moved because the file is whoever made
     it. Anything else in a preview (text, a path that isn't an image file)
     stays as written. Never raises: the question has to reach the human even
-    when its pictures can't."""
+    when its pictures can't.
+
+    A path two options both show is copied once and both point at that copy,
+    so the card can tell the shot is the same and say so (lib/qpreview
+    sharedShot) instead of looking like a mix-up (2026-11-03)."""
     if not isinstance(questions, list):
         return questions
     tag = re.sub(r"[^\w-]", "", rid or "")[:40] or "q"
     n = 0
+    copied: "dict[str, str]" = {}
 
     def adopt(m: "re.Match") -> str:
         nonlocal n
         src = m.group(2)
+        if src in copied:
+            return f"![{m.group(1)}]({copied[src]})"
         try:
             if (not os.path.isfile(src)
                     or not (mimetypes.guess_type(src)[0] or "").startswith("image/")
@@ -2581,6 +3150,7 @@ def _adopt_preview_images(job_id: str, rid: "str | None", questions):
             # each other's a.png; the real name keeps the extension.
             fp = os.path.join(d, f"{tag}-{n}-{os.path.basename(src)}")
             shutil.copy2(src, fp)
+            copied[src] = fp
             return f"![{m.group(1)}]({fp})"
         except OSError as e:
             print(f"[runner] preview image not copied: {e}", file=sys.stderr)
@@ -2618,12 +3188,22 @@ def _prune_uploads():
 
 
 # After the turn's result the claude child lives on only for background work
-# (_run_env lifts the CLI's wait ceiling). An agent or workflow reports back
-# into the same process and the model carries on (the assistant branch flips
-# the job to running), so a turn waits for those. A background shell or
-# monitor can be a dev server that never ends: once no agent is working and
-# the child has been quiet this long, the turn is over.
+# (_run_env lifts the CLI's wait ceiling). An agent, workflow, background
+# command or monitor reports back into the same process and the model carries
+# on (the assistant branch flips the job to running), so a turn waits for
+# those. With none of them open (job.bg_tasks, _running_agents) and the child
+# quiet this long, the turn is over.
 BG_SHELL_GRACE = 15.0
+# How long a finished turn waits, in silence, on its background commands and
+# monitors: the CLI's own ceiling for one background command. It used to be
+# BG_SHELL_GRACE for these too (a background dev server pinned its session as
+# RUNNING), and every agent that ended its turn to wait for a build or a
+# watcher was never woken: the kill took the command with it (apex,
+# 2026-11-17, `mystical run-status --wait` stopped 15 s after the result). A
+# dev server belongs in the Run tool; one started here holds the session as
+# waiting until this cap, its card's Stop, or a turn started over it
+# (end_bg_wait). The agent can ask for less (Job.set_bg_cap), never more.
+BG_WAIT_CAP = 2 * 3600.0
 
 
 def _watchdog(job: Job, proc) -> None:
@@ -2631,9 +3211,14 @@ def _watchdog(job: Job, proc) -> None:
     hang timeout (config.RUN_TIMEOUT unless the run set its own) while nothing
     waits on the user. A busy turn runs for as long as it takes — this is a
     hang detector, not a work cap (the cost brake is the auto-resume cap, see
-    _maybe_auto_resume). And end a finished turn whose child only background
-    shells keep alive (BG_SHELL_GRACE): the CLI takes them down and exits, and
-    the turn closes on the result it already has.
+    _maybe_auto_resume). And end a finished turn whose child is still up with
+    nothing left to wake it (BG_SHELL_GRACE), or whose background commands
+    have kept it waiting past BG_WAIT_CAP: the CLI takes them down and exits,
+    and the turn closes on the result it already has. A command the grace took
+    down (one the CLI lists in job.bg that the wait never held the turn for) is
+    noted in job.bg_ended, and the turn's end tells the session
+    (bridge/carry_on.py). At the cap the command's own card decides that
+    (_bg_expired_prompt), so the two never both prompt.
 
     proc is the claude child, or an agent turn's acp.Conn (its poll() never
     reaps; its kill() sweeps the group). It stands down once the turn has
@@ -2651,14 +3236,21 @@ def _watchdog(job: Job, proc) -> None:
             if job.pending or job.interrupted:
                 continue                # waiting on the user, or stopping: not a hang
         quiet = time.monotonic() - quiet_since
+        waiting = bool(job.bg_tasks) and job.status != "running"
         if (job.status != "running" and not (job.runtime or "").startswith("acp:")
-                and quiet >= BG_SHELL_GRACE
+                and quiet >= (_bg_cap(job) if waiting else BG_SHELL_GRACE)
                 and not (job.session_id and _running_agents(job.session_id))):
+            if not waiting:
+                job.bg_ended = [b["desc"] or "one with no description"
+                                for b in job.bg.values() if b["type"] != "agent"]
+            _bg_expired_prompt(job, _drop_background(job, "expired"))
             proc.terminate()
             job.exited.wait(INTERRUPT_KILL)
             if proc.poll() is None:
                 proc.kill()
             return
+        if waiting:
+            continue                    # a wait, not a hang: BG_WAIT_CAP is its limit
         if quiet >= limit:
             job.timed_out = True
             proc.kill()
@@ -2824,12 +3416,16 @@ def _run_streaming(job: Job, prompt: str, image_paths: list[str], cwd: str,
         if "--mcp-config" in cmd:
             # Its file holds tokens (see _mcp_config); it goes with the child.
             mcp_dir = os.path.dirname(cmd[cmd.index("--mcp-config") + 1])
-        cmd = _one_settings(cmd + job.extra_args)
+        # Savers (bridge/savers.py): every ON one, and each TRIAL this session drew.
+        saving = set() if job.skip_pack else savers.for_run(job.store_session_id)
+        cmd = _one_settings(cmd + job.extra_args + savers.settings_args(saving))
         try:
             proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True, bufsize=1,
-                                    env={**_run_env(ponytail, job.account_slot),
+                                    env={**_run_env(ponytail, job.account_slot,
+                                                    resume_cut=job.native_resume),
+                                         **savers.env(saving),
                                          **(gateway_hook_env(job) if rule_hooks else {})})
         except FileNotFoundError:
             job.add({"type": "error", "message": "`claude` not found on PATH."})
@@ -2874,11 +3470,20 @@ def _run_streaming(job: Job, prompt: str, image_paths: list[str], cwd: str,
         # however long; a hang does.
         threading.Thread(target=_watchdog, args=(job, proc), daemon=True).start()
 
-        # Deliver the prompt on stdin as a stream-json user message.
-        job._write_stdin({"type": "user",
-                          "message": {"role": "user", "content": full_prompt}})
+        if job.native_resume:
+            # Nothing to deliver: the CLI picks the cut turn up on its own, or
+            # goes idle (declined). RESUME_WAIT covers a CLI that says nothing.
+            job.resume_state = "waiting"
+            watch = threading.Timer(RESUME_WAIT, _resume_declined, args=(job,))
+            watch.daemon = True
+            watch.start()
+        else:
+            # Deliver the prompt on stdin as a stream-json user message.
+            job._write_stdin({"type": "user",
+                              "message": {"role": "user", "content": full_prompt}})
 
         assert proc.stdout is not None
+        answered = False
         for line in proc.stdout:
             line = line.strip()
             if not line:
@@ -2891,15 +3496,29 @@ def _run_streaming(job: Job, prompt: str, image_paths: list[str], cwd: str,
                 _handle_control_request(job, d)
                 continue
             _handle_event(job, d)
-            if d.get("type") == "result" and (d.get("num_turns") or d.get("result")):
-                # Turn finished; close stdin so the stream-json process exits
-                # (it otherwise stays alive awaiting more input). Not on the
-                # empty no-op a replayed notice gets (see _handle_event's init):
-                # our prompt runs after it and answers its cards over stdin.
-                # A lone one is ended by _watchdog's shell grace instead.
+            t = d.get("type")
+            # Not the empty no-op a replayed notice gets (see _handle_event's
+            # init): our prompt runs after it and answers its cards over stdin.
+            # A lone one is ended by _watchdog's shell grace instead.
+            answered = answered or (t == "result" and bool(d.get("num_turns") or d.get("result")))
+            if answered and (t == "result" or d.get("subtype") == "session_state_changed") \
+                    and not job.bg and not job.bg_tasks and job.cli_state in (None, "idle"):
+                # Turn over: close stdin so the stream-json process exits (it
+                # otherwise stays alive awaiting more input). Only once the CLI
+                # is idle with no background task out: one that reports wakes
+                # the model in this process, even straight after the result,
+                # and the woken turn asks over stdin -- closed, its
+                # AskUserQuestion failed with "Stream closed" (CLI 2.1.319). A
+                # CLI without state events (cli_state None) ends on its result.
+                # The open stdin is also how a background command's card stops
+                # it (Job.background) and how a message reaches this process
+                # without ending it (steer). A wait nothing wakes is ended by
+                # _watchdog.
                 job.close_stdin()
         proc.wait()
 
+        if job.resume_state == "declined" and job.status == "running":
+            job.status = "done"       # not a failure: the turn's card offers the nudge
         if job.interrupted:
             # Stopped by the user (graceful interrupt or kill): finalize cleanly
             # and mark the turn so the transcript shows it was stopped.
@@ -2963,6 +3582,7 @@ def _run_streaming(job: Job, prompt: str, image_paths: list[str], cwd: str,
             store.set_turn_tokens(job.id, job.tokens)
             if not restart_killed:   # else leave 'running' for boot recovery to resume
                 store.finish_turn(job.id, job.status, job.cost, job.elapsed)
+                savers.check_done()   # a trial that just got its sessions says so
         job.clear_pending()
         job.close_stdin()
         _prune_uploads()
@@ -2973,6 +3593,7 @@ def _run_streaming(job: Job, prompt: str, image_paths: list[str], cwd: str,
             # Not for a turn a restart killed: its item must reach the persisted
             # queue still "running", which the reload re-queues (PreviewQueue._load).
             if not restart_killed:
+                paths.end_turn_step(job)   # first: the prompt the queue starts next may start another flow
                 try:
                     from bridge import queue_manager
                     queue_manager.notify_job_done(
@@ -2992,8 +3613,11 @@ def _run_streaming(job: Job, prompt: str, image_paths: list[str], cwd: str,
             # limit-parked turn is picked up by the ladder rather than raced by
             # a nudge that would run against the same exhausted account. The
             # nudge reads the session's model and mode when it starts.
-            from bridge import goals  # local import: runner<->* cycle
-            resumed = goals.continue_after_turn(job, effort) or resumed
+            resumed = _continue_after_turn(job, effort) or resumed
+        # Last, and at every turn end: a carry-on for an MCP the turn switched
+        # on, unless something above already starts the next turn.
+        from bridge import carry_on  # local import: runner<->* cycle
+        resumed = carry_on.after_turn(job, resumed or restart_killed) or resumed
         if not job.interrupted and job.status == "done" and job.store_session_id:
             _graph_refresh_after_turn(job.chat_id, cwd)
         if not job.interrupted and not resumed and not restart_killed:
@@ -3074,12 +3698,24 @@ def _finalize_run_context(session: dict, project_dir: str, *,
     cwd = cwd or project_dir
     # A stored cwd can be a git worktree that was later removed; spawning there
     # raises FileNotFoundError (which the bridge misreports as "`claude` not found
-    # on PATH"). Fall back to the project dir so the run still proceeds.
+    # on PATH"). Fall back to the tree the session moved into while it is still
+    # there (its own project folder may be that removed tree), else to its own
+    # project folder. Never to the caller's: that is the project the composer has
+    # open, another project's folder when this one's is gone (2026-11-05: nr-kantoor
+    # moved, and its session's turn ran in osanwe). Nothing of its own left: None,
+    # and start_streaming_job refuses the run (FOLDER_GONE).
     if not os.path.isdir(cwd):
-        cwd = project_dir
-    if not session.get("cwd"):
+        wt = session.get("work_cwd")
+        own = os.path.realpath(os.path.join(config.BASE_PATH, (session.get("project") or "").lstrip("/")))
+        cwd = (wt if wt and os.path.isdir(wt)
+               else own if within_base(own) and os.path.isdir(own) else None)
+    if cwd and not session.get("cwd"):
         store.set_cwd(session["id"], cwd)
     return session, cwd, permission_mode or profiles.effective(session)["permission_mode"]
+
+
+FOLDER_GONE = ("This session's folder is gone: {where}. Move it to one of your projects first "
+               "(right-click it in the sidebar ▸ Move to project…), then send again.")
 
 
 def start_streaming_job(chat_id: int, prompt: str, image_paths: list[str],
@@ -3094,7 +3730,10 @@ def start_streaming_job(chat_id: int, prompt: str, image_paths: list[str],
                         mcp_on: str | None = None,
                         extra_args: list[str] | None = None,
                         hang_timeout: float | None = None,
-                        skip_pack: bool = False) -> Job | None:
+                        skip_pack: bool = False,
+                        native_resume: bool = False,
+                        flow: str | None = None, flow_by: str | None = None,
+                        sent_by: str | None = None, sent_why: str | None = None) -> Job | None:
     """Acquire the busy lock and start a streaming run. Returns None if busy.
 
     Resolves (or creates) the store session and runs it in the session's own cwd
@@ -3119,6 +3758,13 @@ def start_streaming_job(chat_id: int, prompt: str, image_paths: list[str],
 
     hang_timeout caps the silence the watchdog allows this run (None = RUN_TIMEOUT).
 
+    sent_by / sent_why go on the turn row (store.start_turn): who sent a prompt you
+    didn't type ('telegram', 'miniapp', 'mystical:<kind>') and the sender's why.
+
+    native_resume is boot recovery's run of a turn a restart cut: `prompt` is only
+    the turn row's marker (recovery.CONTINUED), nothing is sent, and Claude Code
+    carries the cut turn on by itself or declines (Job.resume_state).
+
     skip_pack runs it as _base_cmd's internal one-shot: no context pack, no tools and
     no MCP servers at all, for a prompt that carries untrusted text and needs no tools
     (a Rivendell meeting's notes). Such a turn that dies is not resumed: the resume
@@ -3135,11 +3781,15 @@ def start_streaming_job(chat_id: int, prompt: str, image_paths: list[str],
     session = _resolve_session(chat_id, project_dir, session_id=session_id,
                                permission_mode=permission_mode, origin=origin,
                                profile_id=profile_id)
+    end_bg_wait(session["id"])      # a turn waiting on background commands gives way
     if not state.acquire_run(session["id"], chat_id):
         return None
     try:
         session, cwd, perm = _finalize_run_context(
             session, project_dir, permission_mode=permission_mode, origin=origin)
+        gone = cwd is None
+        if gone:
+            cwd = config.BASE_PATH      # bookkeeping only (the turn's sha): a refused run spawns nothing
         # The session's own model unless the caller brought one: the /run routes
         # save theirs to the row; internal callers (Rivendell, goals)
         # run theirs without writing it. Neither = no --model, the CLI default.
@@ -3162,6 +3812,10 @@ def start_streaming_job(chat_id: int, prompt: str, image_paths: list[str],
             # A teammate's device run or a session a teammate sent (bridge/device_view.py,
             # bridge/team.py): read only, on every account.
             refusal, account_slot = team.refusal(session.get("origin")), None
+        if gone and not refusal:
+            home = os.path.expanduser("~")
+            where = session.get("cwd") or session.get("project") or "?"
+            refusal = FOLDER_GONE.format(where="~" + where[len(home):] if where.startswith(home + os.sep) else where)
         if account_slot is not None:
             profiles.follow_account(session, account_slot)
         is_acp = (runtime or "").startswith("acp:")
@@ -3183,27 +3837,47 @@ def start_streaming_job(chat_id: int, prompt: str, image_paths: list[str],
         job.work_cwd = wt if wt and os.path.isdir(wt) else None
         job.mcp_on, job.extra_args = mcp_on, list(extra_args or [])
         job.skip_pack = skip_pack
+        job.native_resume = native_resume and not is_acp
         if runtime is None and account_slot and account_slot != accounts.DEFAULT_SLOT:
             runtime = f"claude:{account_slot}"
         job.runtime = runtime
         job.hang_timeout = hang_timeout
         _register(job)
+        if flow and not refusal and not is_acp:   # the box's flow starts with this turn, queued or not
+            prompt = paths.start_flow(session["id"], flow, flow_by or "you", prompt)
+            # BUILD with its grill off moved the session onto a branch of its own: this turn runs there.
+            moved = (store.get_session(session["id"]) or {}).get("cwd")
+            if moved and moved != cwd and os.path.isdir(moved):
+                cwd, job.work_cwd = moved, None
+        # A session CONTINUE HERE made from a teammate's: their turns are on screen, not in
+        # Claude, so its runs carry them until one of yours has finished (bridge/team.py seed).
+        run_prompt = prompt
+        if not refusal and not is_acp:
+            note, extra = team.seed(session["id"], job.id)
+            if note:
+                run_prompt, image_paths = f"{prompt}\n\n{note}", list(image_paths) + extra
         store.start_turn(session["id"], job.id, prompt,
                          [os.path.basename(p) for p in image_paths], model=model,
                          runtime=runtime, sha=git.head_sha(cwd),
-                         effort=effort or "auto", permission_mode=perm)
+                         effort=effort or "auto", permission_mode=perm,
+                         sent_by=sent_by, sent_why=sent_why)
         from bridge import titler  # local import: runner<->* cycle
         titler.kick(chat_id, session, job.id)
         waits.drop(session["id"])   # a new turn here ends its wait; Claude can wait again
         if experimental.enabled():
             from bridge import timed_waits      # same rule for wait_for
             timed_waits.drop(session["id"])
+        limits.clear_credits(session["id"])   # ...and a credits stop: you chose what's next
+        savers.assign(session["id"])          # a new session draws its half of each trial
+        from bridge import goals  # local import: runner<->* cycle
+        goals.on_user_turn(session["id"], prompt)   # your reply re-arms a blocked goal
+        paths.on_turn_start(session["id"], prompt)  # a typed flow command joins its path
         _ensure_journal_thread()
         if experimental.enabled() and not refusal:
             _multi_agent_turn_start(job, session, cwd, model, prompt)
         job.prefix += chat_images.note(prompt, cwd)
         threading.Thread(target=_run_streaming,
-                         args=(job, prompt, image_paths, cwd, model, effort, perm,
+                         args=(job, run_prompt, image_paths, cwd, model, effort, perm,
                                ponytail),
                          daemon=True).start()
         return job

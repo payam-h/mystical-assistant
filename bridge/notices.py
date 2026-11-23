@@ -14,8 +14,9 @@ or not a dashboard is open, and Telegram has to obey the same per-event choices
 the dashboard shows. One table, kept a week; a client groups rows by subject.
 
 NEEDS YOU is not stored. It is live state — a card waiting in a session, an
-offered Rivendell job still held, a session whose newest word is "log in" — so
-`needs()` reads it fresh off the status map and the queue each time. Answering
+offered Rivendell job still held, a session whose newest word is "log in", a
+ticket set waiting for Approve & build — so `needs()` reads it fresh off the
+status map, the queue and the sets' set.json each time. Answering
 anywhere (the card, a Mac banner, Telegram, the PLUGINS queue) changes that
 state, so nothing has to remember to resolve a row.
 
@@ -47,8 +48,13 @@ CATALOG = {
     "question": ("ask", "needs", "session"),
     "login": ("account", "needs", "session"),
     "limit_choice": ("account", "needs", "session"),
+    "credits": ("account", "needs", "session"),     # stopped on credits_required: no reset fixes it
     "rv_offer": ("rv_offer", "needs", "rivendell"),
     "done": ("done", "news", "session"),
+    "goal_met": ("done", "news", "session"),        # the turn that met its goal (runner.notify_goal)
+    "goal_blocked": ("ask", "needs", "session"),    # ...or stopped it on something only you can give
+    "council_passed": ("done", "news", "session"),  # a council run reached its bar (council.py)
+    "council_stopped": ("ask", "needs", "session"),  # ...or stopped short of it and waits on you
     "failed": ("failed", "news", "session"),
     "parked": ("parked", "news", "session"),
     "resumed": ("resumed", "fyi", "session"),
@@ -75,6 +81,10 @@ CATALOG = {
     "styled": ("bridge", "news", "bridge"),         # STYLE WITH AI finished (logostyle.py)
     "style_failed": ("bridge", "news", "bridge"),
     "weekly": ("weekly", "fyi", "bridge"),
+    "saver_trial": ("bridge", "news", "bridge"),    # a Savers trial reached its sessions (savers.py)
+    "tickets": ("tickets", "news", "session"),      # a ticket set stopped before BUILD (tickets.py)
+    "tickets_wait": ("tickets", "needs", "session"),  # ...or waits for Approve & build
+    "tickets_yours": ("tickets", "needs", "session"),  # ...or holds a ticket of yours until Go
     "updated": ("updates", "news", "bridge"),
     "coming": ("updates", "news", "bridge"),       # an update waiting upstream, before it is taken
 }
@@ -82,14 +92,17 @@ CATALOG = {
 # The one place the copy lives: the dashboard and the Mac app render `verb`.
 VERBS = {
     "approve": "APPROVE", "question": "QUESTION", "login": "SIGN IN",
-    "limit_choice": "LIMIT", "rv_offer": "OFFERED", "done": "DONE", "failed": "FAILED",
+    "limit_choice": "LIMIT", "credits": "NEEDS CREDITS", "rv_offer": "OFFERED", "done": "DONE", "failed": "FAILED",
     "parked": "PARKED", "resumed": "RESUMED", "retrying": "RETRYING", "waiting": "WAITING",
+    "goal_met": "GOAL MET", "goal_blocked": "GOAL NEEDS YOU",
+    "council_passed": "COUNCIL PASSED", "council_stopped": "COUNCIL NEEDS YOU",
     "started": "STARTED", "rv_started": "STARTED", "rv_ended": "ENDED",
     "rv_held": "HELD", "rv_dismissed": "DISMISSED", "rv_done": "DONE", "rv_failed": "FAILED",
     "rv_refused": "REFUSED", "rv_link": "LINK DOWN", "rv_link_back": "LINK BACK",
     "rv_brief": "BRIEF READY", "team_in": "SENT YOU",
     "pr_failing": "CHECKS FAILING", "pr_changes": "CHANGES ASKED", "move_done": "MOVED",
-    "move_failed": "MOVE FAILED", "styled": "STYLED", "style_failed": "STYLE FAILED", "weekly": "WEEKLY REPORT",
+    "move_failed": "MOVE FAILED", "styled": "STYLED", "style_failed": "STYLE FAILED", "weekly": "WEEKLY REPORT", "saver_trial": "TRIAL DONE",
+    "tickets": "PARTS", "tickets_wait": "PARTS", "tickets_yours": "YOURS",
     "updated": "UPDATED", "coming": "UPDATE READY",
 }
 _RV_DONE = {"review": "REVIEWED", "impl": "IMPLEMENTED", "conflict": "RESOLVED", "design-build": "BUILT"}
@@ -121,6 +134,7 @@ DEFAULTS = {
     "bridge": {"pop": True, "sound": "none", "tg": "off"},
     "weekly": {"pop": False, "sound": "none", "tg": "always"},
     "updates": {"pop": True, "sound": "none", "tg": "off"},
+    "tickets": {"pop": True, "sound": "knock", "tg": "away"},
 }
 SOUNDS = ("blip", "chime", "ping", "knock", "none")
 ROUTES = ("off", "away", "always")
@@ -398,8 +412,10 @@ def _need(kind: str, subject: str, session_id: "str | None", title: str, body: s
 def needs(status: dict) -> list:
     """Everything waiting on you right now, newest first: sessions blocked on a
     card or a question (the status map), teammates' Rivendell jobs still held for
-    a tap, and sessions whose newest notice asks you to sign in or pick a limit
-    route. The feed only lends the detail — the card's command, the question."""
+    a tap, and sessions whose newest notice asks you to sign in, pick a limit
+    route or unblock a goal that is still blocked, ticket sets waiting for
+    Approve & build, and tickets of yours waiting for Go. The feed only lends the
+    detail — the card's command, the question."""
     try:
         rows = store.list_notices(time.time() - KEEP_S, LIMIT)
     except Exception:  # noqa: BLE001
@@ -433,11 +449,32 @@ def needs(status: dict) -> list:
             continue
         if r["kind"] == "limit_choice" and (status or {}).get(sid, {}).get("state") != "parked":
             continue
-        if r["kind"] not in ("login", "limit_choice"):
+        if r["kind"] == "credits" and (status or {}).get(sid, {}).get("state") != "credits":
+            continue                              # a new turn started, or you left it
+        if r["kind"] == "goal_blocked" and (store.get_goal(sid) or {}).get("state") != "blocked":
+            continue                              # answered, re-opened or cleared
+        if r["kind"] not in ("login", "limit_choice", "goal_blocked", "credits"):
             continue
         sess = store.get_session(sid) or {}
         out.append(_need(r["kind"], sid, sid, sess.get("title") or r["title"],
                          r["body"], r["at"], {"project": sess.get("project"), **r["meta"]}))
+    # Ticket sets waiting for Approve & build, live off set.json as the sidebar reads them: the
+    # feed's 200 rows hold about a day, and a set can wait longer. A session shows once, its Ask first;
+    # an abandoned one (archived) not at all, as it left the sidebar.
+    listed = {n["subject"] for n in out}
+    try:
+        from bridge import tickets                # local import: tickets imports this
+        waiting, mine = tickets.waiting(), tickets.yours()
+    except Exception:  # noqa: BLE001 — never the bell's whole list for one bad set.json
+        waiting, mine = {}, {}
+    for sid, c in waiting.items():
+        if sid not in listed and (sess := store.get_session(sid)) and not sess.get("archived"):
+            out.append(_need("tickets_wait", sid, sid, sess.get("title") or "", tickets.approval_line(c["total"]),
+                             c["at"] or None, {"project": sess.get("project")}))
+    for sid, c in mine.items():
+        if sid not in listed and (sess := store.get_session(sid)) and not sess.get("archived"):
+            out.append(_need("tickets_yours", sid, sid, sess.get("title") or "", tickets.yours_line(c["yours"]),
+                             (of_kind.get((sid, "tickets_yours")) or {}).get("at"), {"project": sess.get("project")}))
     try:
         from bridge import rivendell, rivendell_instances   # local import: rivendell is heavy
         held = rivendell.queue()

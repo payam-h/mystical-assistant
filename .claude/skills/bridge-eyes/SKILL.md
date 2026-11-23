@@ -1,13 +1,17 @@
 ---
 name: bridge-eyes
-description: Use when frontend work in this repo needs to be looked at rather than asserted — after changing anything under bridge/dashboard/web, bridge/miniapp/web or site/, or when the user says "screenshot it", "does it look right", "show me the dashboard", or asks you to verify a UI change. Covers headless capture in WSL and driving the live UIs over CDP.
+description: Use when frontend work in this repo needs to be looked at rather than asserted — after changing anything under bridge/dashboard/web, bridge/miniapp/web or site/, or when the user says "screenshot it", "does it look right", "show me the dashboard", or asks you to verify a UI change. Covers headless capture in WSL and on the Mac (before/after layout compares included), and driving the live UIs over CDP.
 user-invocable: true
 ---
 
 # Looking at the UIs headlessly
 
-There is no display here. Every visual claim has to come from a captured pixel,
-and the obvious way to capture one hangs forever on this project's own UIs.
+Every visual claim has to come from a captured pixel, and the obvious way to
+capture one hangs forever on this project's own UIs.
+
+**On macOS, read [MAC.md](MAC.md) instead of the capture sections below.** They
+drive WSL's Playwright build of chrome-headless-shell, which the Mac doesn't have;
+MAC.md has the Mac kit (`macos/eyes/`), including a before/after compare.
 
 ## Which port is which
 
@@ -17,8 +21,8 @@ and the obvious way to capture one hangs forever on this project's own UIs.
 | 8787 | Mini App | 390px wide. `/api/*` needs Telegram init-data. |
 | 8791 | Landing page | Static. |
 
-`DASH_TOKEN` is empty in this machine's `.env`, so local GETs need no auth. If it
-is set, append `?token=…`.
+`DASH_TOKEN` is empty in WSL's `.env`, so local GETs need no auth. Where it is set
+(the Mac's, in quotes), append `?token=…` without the quotes.
 
 ## Static pages: use the bridge's own helper
 
@@ -92,7 +96,7 @@ The 7th argument is the same `Runtime.evaluate` string `shot2.mjs` takes, run
 with `awaitPromise`, so an async IIFE with `await sleep()` between clicks is the
 whole step language — no separate DSL.
 
-- **Output is VP8/webm, never mp4.** Playwright's bundled ffmpeg (the only one
+- **Output is webm (VP8, or VP9 from Playwright's ffmpeg 1013 on), never mp4.** Playwright's bundled ffmpeg (the only one
   on this machine) is built `--disable-everything`: mjpeg in, libvpx out, webm
   muxed. No h264, no concat demuxer, no gif. Telegram accepts it via
   `sendVideo` (measured 2026-08-31); `send.py` falls back to `sendDocument` if

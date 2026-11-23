@@ -1,19 +1,21 @@
-import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import {
   TriangleAlert, CircleStop, Copy, Check, RotateCw, RotateCcw, ChevronDown, ChevronLeft, ChevronRight,
   Quote, Layers, Image as ImageIcon, Terminal, BookOpen, PencilLine, FilePlus2, Search, Globe,
   Plug, Bot, Sparkles, Webhook, Logs, CircleX, Wrench, Circle, FlaskConical, Hammer, GitBranch, PackagePlus, Play, type LucideIcon,
 } from "lucide-react";
-import { api, type AnswerSelection, type CardAnswer, type RunEvent, type TimedEvent } from "../api";
+import { api, scopeAnswer, type AnswerSelection, type CardAnswer, type RunEvent, type TimedEvent } from "../api";
 import type { PendingRequest } from "../chat";
 import { Markdown, type OpenFile } from "./Markdown";
+import { LiveHostCtx, LiveRow, type LiveHost } from "./LiveRow";
 import { selectionMd } from "../lib/selmd";
 import { PermissionCard } from "./PermissionCard";
 import { QuestionCard } from "./QuestionCard";
 import { AskMarker, AskRecord } from "./AskDock";
 import { fmtTokens } from "../lib/week";
 import { useMultiOn } from "../lib/multistore";
+import { useChatImages } from "../lib/chatimages";
 import { ImageLightbox, MediaThumb, ZoomButton, type Clip, type Shown } from "./ImageLightbox";
 import { askBack, type AskBack } from "../lib/askback";
 import { hhmm, useClock12, wall } from "../lib/surfaces";
@@ -23,6 +25,7 @@ import { segmentsOf, stepsTitle, type Seg, type StepCat } from "../lib/segments"
 import { chapterStarts, kindsByPurpose, kindsOf, noteEnding, splitSaid, stretchesOf, workTitle, zonesOf, zonesWithSaid, TOP_TYPES, type Mark } from "../lib/dossier";
 import { parseFrame } from "../lib/multi";
 import { DelegationRow, IncomingNote, MergeLine, SaidTier, SwitchLine } from "./MultiRows";
+import { PlanLine } from "./PlanLine";
 import { bashKind, testLine, testResult, type BashKind } from "../lib/bashkind";
 import { analyzeFailures } from "../lib/failures";
 import { isShowTool, lookedNotes, noteLine, proofsOf, withoutAnswered } from "../lib/pictures";
@@ -32,13 +35,15 @@ import { ROW_FILTERS, rowMatches, type RowFilter } from "../lib/rowfilter";
 import { ChecksRow, ReportCard, RuleRow, SecretCard, SecretRecord } from "./EvidenceRows";
 import { ProofBlock } from "./Proof";
 import { AnswerParts, DataView } from "./DataView";
-import { DesignCard } from "./DesignPane";
+import { BrowserCard, DesignCard } from "./DesignPane";
 import { OfferCard, offerOf } from "./OfferCard";
 import { stripViews, viewsNamed } from "../lib/dataview";
 import { TurnReceipt } from "./TurnReceipt";
 import { PromptBubble } from "./PromptBubble";
 import { WorkingIndicator } from "./hud/WorkingIndicator";
 import { nowOf } from "../lib/workstate";
+import { retries, retrying, retryLine, type Retry } from "../lib/clisignals";
+import { Spinner } from "./ui";
 import type { HudSettings } from "../lib/theme";
 import { markShotSeen, shotUnseen, useSeenShots } from "../lib/seenshots";
 import { fmtSpan, openAgent, useAgentFor } from "../lib/subagents";
@@ -54,6 +59,19 @@ import {
 // Answers already landed this session — a reopened session or a re-render draws
 // them at once.
 const landedResults = new Set<string>();
+
+/** What a background command's card says: running, or how it ended. `end` is
+ *  its background_done state; none on a turn that is over means the process
+ *  went without saying (a restart, a Stop). */
+function bgLabel(kind: "command" | "monitor", end: string | undefined, ended: boolean): string {
+  const what = kind === "monitor" ? "Background monitor" : "Background command";
+  if (!end) return ended ? `${what} stopped when the turn ended` : `${what} running. The agent continues when it finishes`;
+  if (end === "completed") return `${what} finished`;
+  if (end === "failed") return `${what} failed`;
+  if (end === "replaced") return `${what} stopped by your next message`;
+  if (end === "expired") return `${what} stopped: the wait ran out`;
+  return `${what} stopped`;
+}
 
 /** Timing for an answer landing live (index.css `.res[data-land]`). The answer is
  *  complete when it arrives — stream-json hands over whole text blocks — so it is
@@ -745,8 +763,9 @@ function KindChip({ m, n, title }: { m: Mark; n: number; title?: string }) {
 
 /** What the live line says (lib/workstate nowOf): a step that is out, or, with
  *  none, Thinking and the agent's latest words (`what`). `key` is the step, so a
- *  new one rolls in. */
-type NowData = { key: string; mark: Mark; verb: string; what: string; code: string; more: number };
+ *  new one rolls in. `retry`: the CLI is retrying a request, and the line says
+ *  which try, why and when the next goes (lib/clisignals retryLine). */
+type NowData = { key: string; mark: Mark; verb: string; what: string; code: string; more: number; retry?: Retry };
 
 const clock = (s: number) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`);
 
@@ -791,14 +810,22 @@ function NowLine({ now, secs, gone, onGone }: { now: NowData; secs: number; gone
     return () => a.cancel();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gone]);
-  const think = now.mark === "think";
+  // A retry: the node is a ring draining toward the next try, counted on the
+  // clock of this draw (the zone redraws the line every second).
+  const r = now.retry ? retryLine(now.retry, Date.now() / 1000) : null;
+  const think = now.mark === "think" && !r;
+  const st = r ? "retry" : think ? "think" : "work";
+  const m = r ? "retry" : now.mark;
   return (
-    <span ref={root} className="dwork-now" data-st={think ? "think" : "work"} data-m={now.mark} data-gone={gone ? "" : undefined}>
-      <span ref={ic} className="now-ic">{think ? <i className="now-ring" /> : <MarkIcon mark={now.mark} size={12} />}</span>
+    <span ref={root} className="dwork-now" data-st={st} data-m={m} data-gone={gone ? "" : undefined}>
+      <span ref={ic} className="now-ic" style={r ? ({ "--f": r.frac } as React.CSSProperties) : undefined}>
+        {r ? <span className="now-cd">{r.left}</span> : think ? <i className="now-ring" /> : <MarkIcon mark={now.mark} size={12} />}
+      </span>
       <span ref={tx} className="now-tx">
-        <span key={now.key} className="now-line" data-st={think ? "think" : "work"} data-m={now.mark}>
+        <span key={now.key} className="now-line" data-st={st} data-m={m}>
           <b className="now-v">{now.verb}</b>
-          {think ? (now.what ? <q className="now-q">{now.what}</q> : null) : (
+          {r ? <><span className="now-o">{r.what}</span><span className="now-note">{r.note}</span></>
+            : think ? (now.what ? <q className="now-q">{now.what}</q> : null) : (
             <>
               {now.what || now.code ? <span className="now-o">{now.what ? <span>{now.what}</span> : null}{now.code ? <code>{now.code}</code> : null}</span> : null}
               {now.more ? <span className="now-more">+{now.more}</span> : null}
@@ -816,6 +843,9 @@ function NowLine({ now, secs, gone, onGone }: { now: NowData; secs: number; gone
  *  answered, under one header (lib/dossier) — a plate with a ringed node, WORK
  *  and the figure on one line and the kind chips under it: the marks the rows
  *  inside wear on the spine, with a number; the old sentence is their tooltip.
+ *  On the session's spine (spine.css) the chips are the title, by tool (one
+ *  terminal for every command), and the time sits by the chevron: WORKED said
+ *  the same thing on every row down a turn split by notes (B · BY TOOL).
  *  Pictures are the one result a header loses, so the shut plate shows every
  *  one of them in one row of equal tiles that scrolls sideways, tap one to
  *  open it. While any is unseen
@@ -833,7 +863,10 @@ function NowLine({ now, secs, gone, onGone }: { now: NowData; secs: number; gone
  *  paint containment clips anything past the plate); the cat draws as a row
  *  inside the plate instead of under the turn; STATUS would only say what the
  *  line already does, so the line stands in for it. */
-function WorkZone({ cats, notes, steps, failed, pics, gallery, state, since, hud, events, started, now, span, chapters, defaultOpen, animate, children, purposes, looked, filtered, filterCounts, reveal = 0 }: {
+function WorkZone({ cats, notes, steps, failed, pics, gallery, state, since, hud, events, started, now, span, chapters, defaultOpen, animate, retried = 0, children, purposes, looked, filtered, filterCounts, reveal = 0 }: {
+  /** How many times the CLI retried a request in this turn, once it has moved
+   *  on: the header keeps it quietly (the turn's last zone only). */
+  retried?: number;
   /** What the zone's commands were for (lib/bashkind): its chips count these
    *  instead of "commands". Absent with the experimental switch off, as are the
    *  next four. */
@@ -842,7 +875,8 @@ function WorkZone({ cats, notes, steps, failed, pics, gallery, state, since, hud
    *  what the agent made of its newest ones, when it has said.
    *  ponytail: one strip, so one note; each picture's own is in the lightbox. A zone
    *  that looked at several things in turn may want a strip per note. */
-  looked?: { note: string };
+  /** `shown`: how many of the pictures it showed you (Gallery only), which it didn't just look at. */
+  looked?: { note: string; shown: number };
   /** The rows for a filter other than all, and how many each would keep (lib/rowfilter). */
   filtered?: (f: RowFilter) => ReactNode[];
   filterCounts?: () => Record<RowFilter, number>;
@@ -1026,9 +1060,12 @@ function WorkZone({ cats, notes, steps, failed, pics, gallery, state, since, hud
   // played out (NowLine `gone`).
   const lastNow = useRef(now);
   if (now) lastNow.current = now;
+  // Under Terminal the line is the chat's last row (LiveRow), not a line in this header.
+  const host = useContext(LiveHostCtx);
+  const liveAt = host?.host ? (host as LiveHost & { host: HTMLElement }) : null;
   const [wasLive, setWasLive] = useState(!!now);
   const [fading, setFading] = useState(false);
-  if (wasLive !== !!now) { setWasLive(!!now); setFading(!now); }
+  if (wasLive !== !!now) { setWasLive(!!now); setFading(!now && !liveAt); }
   const line = now ?? (fading ? lastNow.current : null);
   // The cat, hosted by the plate: shut, under the header; open, at the foot.
   const ind = state && hud?.indicator === "nyan" ? (
@@ -1039,6 +1076,14 @@ function WorkZone({ cats, notes, steps, failed, pics, gallery, state, since, hud
   const [enter] = useState(() => (animate ? `streamIn .34s cubic-bezier(.2,.8,.2,1) ${steps ? 0 : 90}ms both` : undefined));
   const fresh = pics.filter((p) => p.unseen);
   const words = workTitle(stepsTitle(cats), notes);
+  const tools = kindsOf(cats, notes);
+  const lab = <span className="dwork-lab caps">{state ? "Working" : "Worked"}</span>;
+  const retry = retried ? (
+    <span className="dwork-retry" title={`Claude Code retried a request ${retried} time${retried === 1 ? "" : "s"} in this turn`}>
+      ↻ {retried} retr{retried === 1 ? "y" : "ies"}
+    </span>
+  ) : null;
+  const when = [chapters ? `${chapters} chapters` : "", span].filter(Boolean).join(" · ");
   const picsWord = `${pics.length} picture${pics.length === 1 ? "" : "s"}`;
   return (
     <div
@@ -1048,7 +1093,7 @@ function WorkZone({ cats, notes, steps, failed, pics, gallery, state, since, hud
       data-landed={landed ? "" : undefined}
       data-live={state ?? undefined}
       data-ind={orbit ? "orbit" : undefined}
-      data-now={line ? "" : undefined}
+      data-now={line && !liveAt ? "" : undefined}
       data-err={failed ? "" : undefined}
       data-shots={fresh.length ? "new" : undefined}
       style={enter ? { animation: enter } : undefined}
@@ -1061,20 +1106,27 @@ function WorkZone({ cats, notes, steps, failed, pics, gallery, state, since, hud
         title={open ? "hide the work" : "show the work"}
         className="dwork-head"
       >
+        {/* the session's spine node (spine.css): what this block is; the chevron at the end says open or shut */}
         <span className="dwork-node" aria-hidden>
-          <ChevronDown size={11} className={`transition-transform duration-200 ${open ? "" : "-rotate-90"}`} />
+          <Terminal size={13} strokeWidth={2.2} />
         </span>
         <span className="dwork-l1">
-          <span className="dwork-lab">WORK</span>
+          {lab}
           <span className="dwork-ms">
-            <Roll n={steps} />{` step${steps === 1 ? "" : "s"}`}{chapters ? ` · ${chapters} chapters` : ""}{span ? ` · ${span}` : ""}
+            <Roll n={steps} />{` step${steps === 1 ? "" : "s"}`}{when ? ` · ${when}` : ""}
           </span>
+          {retry}
         </span>
         <span className="dwork-l2">
           <span className="dwork-kinds" title={words} aria-label={words}>
-            {(purposes ? kindsByPurpose(cats, purposes, notes) : kindsOf(cats, notes)).map((k) => (
+            {(purposes ? kindsByPurpose(cats, purposes, notes) : tools).map((k) => (
               <KindChip key={k.m} m={k.m} n={k.n} title={k.m.startsWith("p-") ? `${k.n} · ${k.m.slice(2)}` : undefined} />
             ))}
+          </span>
+          {/* the session's spine titles the work with these instead: by tool, the commands one
+              terminal, and the word only while there's nothing to count (spine.css, B · BY TOOL) */}
+          <span className="dwork-tools" title={words || undefined} aria-label={words || undefined}>
+            {tools.length ? tools.map((k) => <KindChip key={k.m} m={k.m} n={k.n} />) : lab}
           </span>
         </span>
         <span className="dwork-right">
@@ -1086,9 +1138,16 @@ function WorkZone({ cats, notes, steps, failed, pics, gallery, state, since, hud
           ) : pics.length ? (
             <span className="dwork-k" data-m="shot" title={picsWord}><i aria-hidden><ImageIcon size={12} strokeWidth={2.2} /></i>{pics.length}</span>
           ) : null}
+          {/* and its time by the chevron, the chapters and retries beside it; the chips count the steps (spine.css) */}
+          {when || retry ? <span className="dwork-when">{retry}{when ? <span className="dwork-ms">{when}</span> : null}</span> : null}
+          <ChevronDown size={13} aria-hidden className={`dwork-chev transition-transform duration-200 ${open ? "" : "-rotate-90"}`} />
         </span>
-        {line ? <NowLine now={line} secs={secs} gone={!now} onGone={() => setFading(false)} /> : null}
+        {line && !liveAt ? <NowLine now={line} secs={secs} gone={!now} onGone={() => setFading(false)} /> : null}
       </button>
+      {now && liveAt ? (
+        <LiveRow live={liveAt} turnSecs={started ? Math.max(0, Math.floor(clockAt - started)) : null}
+          line={<NowLine now={now} secs={secs} gone={false} onGone={() => {}} />} />
+      ) : null}
       {zoom && <ImageLightbox src={zoom} all={gallery} onClose={() => setZoom(null)} />}
       {/* Mid-glide both parts are here, the one you left marked data-leaving.
           The shut part stays mounted while open, hidden: remounted on shutting,
@@ -1099,9 +1158,9 @@ function WorkZone({ cats, notes, steps, failed, pics, gallery, state, since, hud
             {!open ? ind : null}
             {pics.length && looked ? (
               <div className="ma-looked">
-                <div className="ma-looked-lab">Looked at {picsWord}</div>
+                <div className="ma-looked-lab">{looked.shown ? picsWord : `Looked at ${picsWord}`}</div>
                 <div className="ma-looked-body">
-                  <ShotRow pics={pics} shut={!open} label={`Looked at ${picsWord}`} onOpen={setZoom} />
+                  <ShotRow pics={pics} shut={!open} label={looked.shown ? picsWord : `Looked at ${picsWord}`} onOpen={setZoom} />
                   {looked.note ? <p className="ma-looked-note">{looked.note}</p> : null}
                 </div>
               </div>
@@ -1296,6 +1355,8 @@ function WorkStretch({ words, cats, failed, peek, live, defaultOpen, pics, rows,
         <span key={k.m} className="dwork-k" data-m={k.m}><i aria-hidden><MarkIcon mark={k.m} size={10} /></i>{k.n}</span>
       ))}
       {failed ? <span className="dwork-k" data-m="fail"><i aria-hidden><MarkIcon mark="fail" size={10} /></i>{failed}</span> : null}
+      {/* the session's spine says it in words instead (spine.css, A · LEDGER) */}
+      <span className="wtally-words" aria-hidden>{what}</span>
       <ChevronDown size={10} strokeWidth={2.4} aria-hidden className="wtally-chev" />
     </button>
   ) : null;
@@ -1570,6 +1631,17 @@ function LogRow({ src, label, text, error, animate }:
  *  that would have to know what a block is. */
 const BULK = "ax-bulk";
 
+/** The verb a row says on the session's spine, where it reads as a sentence
+ *  ("Ran npm run check") instead of wearing its tag (A · LEDGER, spine.css).
+ *  An agent or a skill names itself; a run's members hang off a head that said it. */
+const MARK_VERB: Partial<Record<Mark, string>> = {
+  command: "Ran", read: "Read", edit: "Edited", write: "Wrote", search: "Searched", fetch: "Looked up",
+  call: "Called", step: "Called", hook: "Hook", log: "Logged",
+};
+const verbOf = (mark: Mark | undefined, error?: boolean): string | undefined =>
+  !mark || mark === "agent" || mark === "skill" ? undefined
+    : error ? "Failed" : mark.startsWith("p-") ? "Ran" : MARK_VERB[mark];
+
 function ActionRow({
   tier,
   shape,
@@ -1672,7 +1744,7 @@ function ActionRow({
             </span>
           )}
         </span>
-        <span className="ax-obj">{children}</span>
+        <span className="ax-obj">{verbOf(mark, error) ? <span className="ax-verb">{verbOf(mark, error)}</span> : null}{children}</span>
         <span className="ax-stat">{stat}</span>
         <span className="ax-chev">
           {drawer && (
@@ -2333,6 +2405,8 @@ export const RunStream = memo(function RunStream({
   compact = false,
   view = null,
   askDocked = false,
+  bgN = 0,
+  bgSince,
   saidTier = false,
   sessionId,
   turnNo,
@@ -2394,6 +2468,11 @@ export const RunStream = memo(function RunStream({
   compact?: boolean;
   /** A Rivendell job's first turn: its answer is drawn as the job's view (FinalResult, JobViews). */
   view?: JobViewInput | null;
+  /** The turn answered and Claude Code still runs this many background tasks in
+   *  its process (status `background`, since `bgSince`): no indicator draws,
+   *  one quiet line where it sat says so (BgLine). */
+  bgN?: number;
+  bgSince?: number;
 }) {
   // An ask is drawn by its question card and by nothing else. A live run also
   // emits it as a tool: the bridge answers the control request with a `deny`
@@ -2415,6 +2494,10 @@ export const RunStream = memo(function RunStream({
   const multiOn = useMultiOn();
   const dossier = toolStyle === "dossier";
   const mx = multiOn && dossier;
+  // SYSTEM ▸ Pictures it shows you: Gallery only files what it shows you (lib/pictures) in
+  // the WORK strip with what it looked at; components/Proof says it in one line.
+  const shownTo = useChatImages().shown;
+  const galleryOnly = mx && shownTo === "gallery";
   const clockAt = (e: TimedEvent): string | undefined => {
     if (turnStarted == null || e.at == null) return undefined;
     const s = Math.max(0, e.at - turnStarted);
@@ -2437,12 +2520,20 @@ export const RunStream = memo(function RunStream({
   const qAnswered = new Map<string, AnswerSelection[]>();
   const answeredAt = new Map<string, number | undefined>();
   const toolDone = new Map<string, Done>();
+  const bgDone = new Map<string, string>();
+  const bgNotify = new Map<string, boolean>();
+  let bgCap = 7200;            // seconds the turn waits on background commands (runner.BG_WAIT_CAP)
   const secretGiven = new Map<string, boolean>();
   for (const e of events) {
     if (e.type === "secret_answered") secretGiven.set(e.request_id, e.given);
     if (e.type === "permission_resolved") { permResolved.set(e.request_id, e.behavior); answeredAt.set(e.request_id, e.at); }
     if (e.type === "question_answered") { qAnswered.set(e.request_id, e.answers); answeredAt.set(e.request_id, e.at); }
     if (e.type === "tool_done" && e.id) toolDone.set(e.id, e);
+    if (e.type === "background_done") bgDone.set(e.id, e.state);
+    if (e.type === "background_set") {
+      if (e.id && e.notify !== undefined) bgNotify.set(e.id, e.notify);
+      if (e.cap) bgCap = e.cap;
+    }
   }
   // A failure a later call made good reads as ordinary work everywhere below; the
   // filter's "failures" still finds it. One nothing made good is said by the receipt.
@@ -2469,7 +2560,7 @@ export const RunStream = memo(function RunStream({
   /** A tool whose pictures are shown to you (lib/pictures), once it has come back with them. */
   const showAt = (i: number): boolean => {
     const e = events[i];
-    return mx && e?.type === "tool" && isShowTool(e.name) && !!doneOf(e)?.images?.length;
+    return mx && !galleryOnly && e?.type === "tool" && isShowTool(e.name) && !!doneOf(e)?.images?.length;
   };
   const turnWord = [turnNo ? `turn ${turnNo}` : "", turnStarted ? hhmm(turnStarted) : ""].filter(Boolean).join(" · ");
   const addShots = (ev: number, call: string, about: string, paths: string[] = [], clip?: Clip, at?: number) => {
@@ -2481,6 +2572,10 @@ export const RunStream = memo(function RunStream({
   events.forEach((e, i) => {
     if (e.type === "steer") addShots(i, "STEER", e.text, e.images);
     else if (e.type === "tool" && !showAt(i)) { const d = doneOf(e); addShots(i, e.name, e.summary, d?.images, d?.clip, e.at); }
+    else if (galleryOnly && e.type === "figure") {
+      addShots(i, e.kind === "compare" ? "compare_images" : "show_image", "", e.images, undefined, e.at);
+      for (const s of shotsOf.get(i) ?? []) s.caption = e.caption;
+    }
   });
 
   // Only the quiet steps fold away — a terminal, a diff, a delegated run, a
@@ -2523,7 +2618,7 @@ export const RunStream = memo(function RunStream({
    *  turn gathers them by its answer, and its work closes back up into one zone. */
   const shownLive = (i: number) => {
     const t = events[i].type;
-    return !ended && (t === "figure" || t === "report" || t === "data" || t === "design" || showAt(i));
+    return !ended && ((t === "figure" && !galleryOnly) || t === "report" || t === "data" || t === "design" || t === "browser" || showAt(i));
   };
   // The rest of the bridge tools' rows are cut too: a stretch of nothing but them has
   // no STEP in it to draw for (lib/segments), and each is a row of its own anyway.
@@ -2531,7 +2626,7 @@ export const RunStream = memo(function RunStream({
     if (!mx) return pictureRun(i);
     const t = events[i].type;
     if (t === "checks" || t === "rule" || t === "secret_request" || shownLive(i)) return true;
-    return !showAt(i) && t !== "figure" && t !== "report" && t !== "data" && t !== "design" && t !== "offer" && pictureRun(i);
+    return !showAt(i) && t !== "figure" && t !== "report" && t !== "data" && t !== "design" && t !== "browser" && t !== "offer" && pictureRun(i);
   };
 
   // The turn's closing text arrives twice — once streamed as a text block, once
@@ -2622,7 +2717,7 @@ export const RunStream = memo(function RunStream({
   const asksNext = (i: number): boolean => {
     for (let j = i + 1; j < events.length; j++) {
       const t = events[j].type;
-      if (t === "tool_done" || t === "permission_resolved" || t === "question_answered"
+      if (t === "tool_done" || t === "permission_resolved" || t === "question_answered" || t === "background_done" || t === "background_set"
           || t === "thinking" || t === "log" || t === "rule" || t === "checks" || t === "secret_answered") continue;
       return t === "question";
     }
@@ -2666,13 +2761,13 @@ export const RunStream = memo(function RunStream({
           return (
             <FinalResult
               key={i}
-              onOpenFile={onOpenFile}
               views={i === finalText ? placedViews : undefined}
               result={text}
-              label={i === finalText ? "ANSWER" : dossier ? "ANSWER // ASK" : "RESULT // ASK"}
+              label={i === finalText || dossier ? "Answer" : "RESULT // ASK"}
               animate={animate}
               idKey={`${turnId}:${i}`}
               view={i === finalText ? view : null}
+              onOpenFile={onOpenFile}
             />
           );
         const pause = dossier ? pauseAt(i - 1) : 0;
@@ -2888,7 +2983,7 @@ export const RunStream = memo(function RunStream({
       case "tool_done":
         return null;
       case "figure": {
-        if (!mx || ended) return null;
+        if (!mx || ended || galleryOnly) return null;
         const item = proofs.find((p) => p.i === i);
         return item ? <ProofBlock key={i} items={[item]} all={proofs} turn={turnWord} /> : null;
       }
@@ -2902,13 +2997,15 @@ export const RunStream = memo(function RunStream({
         return mx && !ended ? <DataView key={i} ev={event} /> : null;
       case "design":
         return mx && !ended ? <DesignCard key={i} board={event.board} title={event.title} pages={event.pages} /> : null;
+      case "browser":
+        return mx && !ended ? <BrowserCard key={i} session={sessionId} url={event.url} profile={event.profile} /> : null;
       case "report":
         return mx && !ended ? <ReportCard key={i} ev={event} session={sessionId} /> : null;
       case "secret_request": {
         if (!mx) return null;
         const live = !!onRespond && pendingIds.has(event.request_id);
         return (
-          <div key={i} id={ckId(turnId, event.request_id)} className="ml-[var(--rail)] scroll-mt-[94px]">
+          <div key={i} id={ckId(turnId, event.request_id)} className="dask ml-[var(--rail)] scroll-mt-[94px]" data-k="secret" data-wait={live ? "" : undefined}>
             {live && askDocked ? <AskMarker kind="secret" topic={event.name} />
               : live ? <SecretCard ev={event} onRespond={(id, opts) => onRespond?.(id, opts)} />
               : <SecretRecord name={event.name} why={event.why} given={secretGiven.get(event.request_id)} stale={ended} />}
@@ -2924,6 +3021,8 @@ export const RunStream = memo(function RunStream({
           agent={event.agent} profile={event.profile} write={event.write} />;
       case "merge":
         return <MergeLine key={i} name={event.name} state={event.state} />;
+      case "plan":
+        return <PlanLine key={i} ev={event} onOpen={() => window.dispatchEvent(new CustomEvent("hud:rail", { detail: "work" }))} />;
       case "steer": {
         // A ⇄ steer is the channel delivering another agent's message, not you.
         const frame = parseFrame(event.text);
@@ -2944,7 +3043,6 @@ export const RunStream = memo(function RunStream({
         return (
           <FinalResult
             key={i}
-            onOpenFile={onOpenFile}
             views={i === lastResult ? placedViews : undefined}
             result={event.result}
             update={lastResult >= 0 && i !== lastResult}
@@ -2960,6 +3058,7 @@ export const RunStream = memo(function RunStream({
             dossier={dossier}
             onAnswer={onAnswer}
             onQuote={onQuote}
+            onOpenFile={onOpenFile}
             view={view}
             askDocked={askDocked}
           />
@@ -2980,14 +3079,15 @@ export const RunStream = memo(function RunStream({
       case "permission": {
         const live = !!onRespond && pendingIds.has(event.request_id);
         const plan = event.tool_name === "ExitPlanMode";
+        // .dask: a node on the session's spine (spine.css), amber while it waits on you
         if (live && askDocked) return (
-          <div key={i} className="ml-[var(--rail)]">
+          <div key={i} className="dask ml-[var(--rail)]" data-k="permission" data-wait="">
             <AskMarker kind={plan ? "plan" : "permission"} topic={plan ? "ready to build"
               : event.tool_name.startsWith("mcp__") ? mcpParts(event.tool_name).server : event.tool_name} />
           </div>
         );
         if (!live) return (
-          <div key={i} className="ml-[var(--rail)]">
+          <div key={i} className="dask ml-[var(--rail)]" data-k="permission">
             <AskRecord kind="permission" tool={event.tool_name} summary={event.summary} detail={event.detail}
               // The run this belonged to is gone (restart, Stop, crash): nothing listens any more.
               resolved={permResolved.get(event.request_id)} stale={ended && !permResolved.has(event.request_id)}
@@ -2995,12 +3095,14 @@ export const RunStream = memo(function RunStream({
           </div>
         );
         return (
-          <div key={i} className="ml-[var(--rail)]">
+          <div key={i} className="dask ml-[var(--rail)]" data-k="permission" data-wait="">
             <PermissionCard
               toolName={event.tool_name}
               summary={event.summary}
               detail={event.detail}
               onAllow={() => onRespond?.(event.request_id, { behavior: "allow" })}
+              scopes={event.scopes}
+              onAllowScope={(sc) => onRespond?.(event.request_id, { behavior: "allow", answers: scopeAnswer(sc) })}
               onDeny={() => onRespond?.(event.request_id, { behavior: "deny" })}
             />
           </div>
@@ -3009,20 +3111,20 @@ export const RunStream = memo(function RunStream({
       case "question": {
         const live = !!onRespond && pendingIds.has(event.request_id);
         if (live && askDocked) return (
-          <div key={i} id={ckId(turnId, event.request_id)} className="ml-[var(--rail)] scroll-mt-[94px]">
+          <div key={i} id={ckId(turnId, event.request_id)} className="dask ml-[var(--rail)] scroll-mt-[94px]" data-wait="">
             <AskMarker kind="question" topic={event.questions.length > 1 ? `${event.questions.length} questions`
               : event.questions[0]?.header.trim().toLowerCase() === "task" ? "Rivendell task" : event.questions[0]?.header ?? ""} />
           </div>
         );
         if (!live) return (
-          <div key={i} id={ckId(turnId, event.request_id)} className="ml-[var(--rail)] scroll-mt-[94px]">
+          <div key={i} id={ckId(turnId, event.request_id)} className="dask ml-[var(--rail)] scroll-mt-[94px]">
             <AskRecord kind="question" questions={event.questions}
               answered={qAnswered.get(event.request_id)} stale={ended && !qAnswered.has(event.request_id)}
               at={answeredAt.get(event.request_id) ?? event.at} />
           </div>
         );
         return (
-          <div key={i} id={ckId(turnId, event.request_id)} className="ml-[var(--rail)] scroll-mt-[94px]">
+          <div key={i} id={ckId(turnId, event.request_id)} className="dask ml-[var(--rail)] scroll-mt-[94px]" data-wait="">
             <QuestionCard
               questions={event.questions}
               requestId={event.request_id}
@@ -3038,11 +3140,41 @@ export const RunStream = memo(function RunStream({
             className="ev-stop ml-[var(--rail)] flex items-center gap-1.5 text-xs"
           >
             <CircleStop size={14} className="shrink-0" aria-hidden />
-            <span>{readOnly ? "Stopped" : "Stopped — send a message to continue."}</span>
+            {/* on the session's spine the node is the stop (spine.css, A · KNOTS) */}
+            <span><b>{readOnly ? "Stopped" : "You stopped it"}</b>{readOnly ? null : <span className="ev-stop-w"> · send a message to carry on from here</span>}</span>
           </div>
         );
+      case "background": {
+        const end = bgDone.get(event.id);
+        const live = !end && !ended;
+        const rid = `bg:${event.id}`;
+        return (
+          <div key={i} className={`ev-bg ml-[var(--rail)] text-xs${live ? " ev-bg-live" : ""}`}>
+            <div className="flex items-center gap-1.5">
+              <Terminal size={14} className="shrink-0" aria-hidden />
+              <span>{bgLabel(event.kind, end, ended)}{event.text ? `: ${event.text}` : ""}</span>
+            </div>
+            {event.command && <code className="ev-bg-cmd">{event.command}</code>}
+            {live && onRespond && (
+              <div className="ev-bg-acts">
+                <button type="button" onClick={() => void onRespond(rid, { behavior: "deny" })}>Stop</button>
+                <label title={`The wait ends after ${Math.round(bgCap / 60)} min with nothing finishing. Ticked, the agent is told and carries on.`}>
+                  <input
+                    type="checkbox"
+                    checked={bgNotify.get(event.id) ?? false}
+                    onChange={(e) => void onRespond(rid, { answers: [{ header: "notify", labels: e.target.checked ? ["on"] : [] }] })}
+                  />
+                  <span>Prompt the agent if nothing finishes in {Math.round(bgCap / 60)} min</span>
+                </label>
+              </div>
+            )}
+          </div>
+        );
+      }
       case "divider":
         return <DividerRow key={i} text={event.text} />;
+      case "background_done":
+      case "background_set":
       case "permission_resolved":
       case "question_answered":
         return null; // shown inside the relevant card
@@ -3103,12 +3235,12 @@ export const RunStream = memo(function RunStream({
   const segs = segmentsOf(events, 0, inFlow, waiting);
   // Tier 1 and 2 (lib/dossier): the answer, the prose that introduces a card,
   // the cards, your steers, and what ends a turn. Everything else is work.
-  // STEP MESSAGES (hud.stepNotes): Claude's words between steps are tier 1 too,
-  // so each WORK zone holds only the steps between two of them.
-  const notesInFlow = dossier && !saidTier && (hud?.stepNotes ?? true);
   const topAt = (i: number): boolean => {
     const e = events[i];
-    if (e.type === "text") return i === finalText || asksNext(i) || (notesInFlow && !!e.text && !resultTexts.has(e.text.trim()));
+    // Claude's notes between steps are said to you, so they sit in the chat and cut the
+    // work there (Worked → note → Worked); thoughts stay folded. A non-Claude agent's
+    // hundreds of notes keep their own tier (zonesWithSaid).
+    if (e.type === "text") return i === finalText || asksNext(i) || (!saidTier && !!e.text && !resultTexts.has(e.text.trim()));
     if (mx && (e.type === "secret_request" || shownLive(i))) return true;
     return TOP_TYPES.has(e.type);
   };
@@ -3122,7 +3254,7 @@ export const RunStream = memo(function RunStream({
     const cats: StepCat[] = [];
     const pics: Pic[] = [];
     const purposes: BashKind[] = [];
-    let lastPic = -1;
+    let lastPic = -1, shown = 0;
     let notes = 0, steps = 0, failed = 0, out = 0, said = "", openAt: number | undefined, first: number | undefined, last: number | undefined;
     let live: Extract<TimedEvent, { type: "tool" }> | undefined;
     for (const seg of zsegs) for (const i of seg.idx) {
@@ -3139,13 +3271,15 @@ export const RunStream = memo(function RunStream({
         if (mx && e.name === "Bash") purposes.push(bashKind(e.detail ?? e.summary));
         if (!d) { out++; live = e; openAt = e.at; }
         else if (d.is_error) failed++;
+        if (galleryOnly && isShowTool(e.name)) shown += d?.images?.length ?? 0;
         if (!showAt(i)) for (const p of d?.images ?? []) { lastPic = i; pics.push({ path: p, name: shotName(e.summary) || p.split("/").pop() || p, unseen: shotUnseen(p, e.at) }); }
         if (d?.ms && e.at != null) last = Math.max(last ?? 0, e.at + d.ms / 1000);
       }
+      else if (galleryOnly && e.type === "figure") for (const p of e.images ?? []) shown++, pics.push({ path: p, name: e.caption || "Shown", unseen: shotUnseen(p, e.at) });
     }
     const secs = first != null && last != null ? last - first : 0;
     const lookNote = noteLine(looked?.get(lastPic) ?? "");
-    return { cats, pics, notes, steps, failed, running: out > 0, out, live, said, openAt, first, last, span: secs >= 1 ? wall(secs) : "", purposes, lookNote };
+    return { cats, pics, notes, steps, failed, running: out > 0, out, live, said, openAt, first, last, span: secs >= 1 ? wall(secs) : "", purposes, lookNote, shown };
   };
   /** A chapter's name: the note it opens on (lib/dossier cuts there), else
    *  the first words or call in it — one line, without the code ticks. */
@@ -3252,22 +3386,25 @@ export const RunStream = memo(function RunStream({
     while (start > 0 && (waiting(start - 1) || !topAt(start - 1))) start--;
     return `z${start}`;
   };
-  const workZone = (zsegs: Seg[], lastZone: boolean) => {
-    const { cats, pics, notes, steps, failed, running, out, live, said, openAt, last, span, purposes, lookNote } = tally(zsegs);
+  const workZone = (zsegs: Seg[], lastZone: boolean, lastWork = lastZone) => {
+    const { cats, pics, notes, steps, failed, running, out, live, said, openAt, last, span, purposes, lookNote, shown } = tally(zsegs);
     // The last zone of a running turn is live: a tool out is WORKING since it
     // started, nothing out is THINKING since the last thing finished. A card
     // waiting on you is neither — the plate rests until it is answered.
     const state = working && lastZone ? (running ? "work" as const : "think" as const) : null;
-    // What its line says (NowLine): the newest step out, or the agent's newest words.
-    const now: NowData | null = !state ? null : state === "work" && live
+    // What its line says (NowLine): the CLI's retry while it waits on one, else
+    // the newest step out, or the agent's newest words.
+    const now: NowData | null = !state ? null : retry
+      ? { key: `r${retry.e.attempt}`, mark: "think", verb: "Retrying", what: "", code: "", more: 0, retry: retry.e }
+      : state === "work" && live
       ? { key: live.id ?? `${live.at}`, mark: nowMark(live.name), ...nowOf(live), more: out - 1 }
       : { key: `t${said}`, mark: "think", verb: "Thinking", what: said, code: "", more: 0 };
     // A long zone opens on its chapters, and a chapter builds its rows only
     // while open (lib/dossier chapterStarts); a chapter opens on a note.
     const starts = chapterStarts(
       zsegs.map((s) => s.idx.filter((i) => isStep(events[i])).length),
-      // With the notes in their own tier, a thought is what's left to open a chapter on.
-      zsegs.map((s) => s.kind === "prose" && (events[s.idx[0]].type === "text" || (saidTier && events[s.idx[0]].type === "thinking"))),
+      // With the notes in the chat (topAt) or their own tier, a thought is what's left to open a chapter on.
+      zsegs.map((s) => s.kind === "prose" && (events[s.idx[0]].type === "text" || events[s.idx[0]].type === "thinking")),
     );
     const chapter = (segs: Seg[], k: number, count: number, build: () => ReactNode[]) => {
       const c = tally(segs);
@@ -3307,7 +3444,8 @@ export const RunStream = memo(function RunStream({
       <WorkZone
         key={zoneKey(zsegs[0].start)}
         purposes={mx ? purposes : undefined}
-        looked={mx ? { note: lookNote } : undefined}
+        // the note on what it looked at is in the chat now (topAt), unless it's an agent's said tier
+        looked={mx ? { note: saidTier ? lookNote : "", shown } : undefined}
         filtered={filtered}
         filterCounts={filterCounts}
         reveal={reveal && holds(zsegs, reveal.i) ? reveal.n : 0}
@@ -3318,7 +3456,8 @@ export const RunStream = memo(function RunStream({
         pics={pics}
         gallery={galleryAt(zsegs[0].idx[0])}
         state={state}
-        since={running ? openAt : last}
+        since={state && retry ? retry.since ?? last : running ? openAt : last}
+        retried={lastWork && !retry ? retried : 0}   // the turn's last WORK card, an answer after it or not
         hud={hud}
         events={events}
         started={turnStarted}
@@ -3365,11 +3504,15 @@ export const RunStream = memo(function RunStream({
   // while it runs); otherwise there's none yet — before the first event, or
   // after a steer the model is still reading.
   const carried = working && zones.length > 0 && zones[zones.length - 1].kind === "work";
+  // The CLI retrying a request: the turn's last event is a retry (lib/clisignals).
+  const retry = working ? retrying(events) : null;
+  const retried = retries(events);
   // The words in the flow, the work under a row each (lib/segments) — or, in
   // DOSSIER, under one WORK zone per stretch (lib/dossier).
   const rows = dossier
     ? zones.map((z, i) =>
-        z.kind === "top" ? renderEvent(z.segs[0].idx[0]) : z.kind === "said" ? said(z, i) : workZone(z.segs, i === zones.length - 1))
+        z.kind === "top" ? renderEvent(z.segs[0].idx[0]) : z.kind === "said" ? said(z, i)
+          : workZone(z.segs, i === zones.length - 1, i === zones.map((x) => x.kind).lastIndexOf("work")))
     : segs.map((seg) => (seg.kind === "prose" ? renderEvent(seg.idx[0]) : stepsFold(seg)));
   // What a finished turn did, around its answer: what it showed you above it, its receipt below.
   if (mx && ended) {
@@ -3382,14 +3525,17 @@ export const RunStream = memo(function RunStream({
     rows.splice(answerZone >= 0 ? answerZone + 1 : rows.length, 0,
       <Fragment key="turn-end">
         {reports}
-        {!unfinished && onAnswer && answerZone >= 0 && offerOf(events) ? <OfferCard offer={offerOf(events)!} onStart={onAnswer} /> : null}
+        {!unfinished && onAnswer && answerZone >= 0 && offerOf(events) ? (
+          <div className="dask" data-k="review" data-wait=""><OfferCard offer={offerOf(events)!} onStart={onAnswer} /></div>
+        ) : null}
         {receipt && !receiptEmpty(receipt) ? <TurnReceipt r={receipt} onJump={revealAt} /> : null}
       </Fragment>);
     // What it showed comes first, then the answer that talks about it.
     const above = proofs.filter((p) => !named.has(refOfEvent(p.i)));
     const dataAbove = events.flatMap((e, i) => (named.has((e as { ref?: string }).ref ?? "") ? []
       : e.type === "data" ? [<DataView key={`data${i}`} ev={e} />]
-      : e.type === "design" ? [<DesignCard key={`design${i}`} board={e.board} title={e.title} pages={e.pages} />] : []));
+      : e.type === "design" ? [<DesignCard key={`design${i}`} board={e.board} title={e.title} pages={e.pages} />]
+      : e.type === "browser" ? [<BrowserCard key={`browser${i}`} session={sessionId} url={e.url} profile={e.profile} />] : []));
     if (above.length || dataAbove.length) {
       rows.splice(answerZone >= 0 ? answerZone : rows.length, 0,
         <Fragment key="turn-shown">
@@ -3411,8 +3557,9 @@ export const RunStream = memo(function RunStream({
     const verb = boot ? boot[0].toUpperCase() + boot.slice(1) : up ? "Thinking" : "Starting";
     rows.push(
       <WorkZone key={key} cats={[]} notes={0} steps={0} failed={0} pics={[]} gallery={[]}
-        state="think" since={events.length ? events[events.length - 1].at : turnStarted} hud={hud} events={events}
-        started={turnStarted} now={{ key: up ? "t" : "boot", mark: "think", verb, what: "", code: "", more: 0 }}
+        state="think" since={retry ? retry.since : events.length ? events[events.length - 1].at : turnStarted} hud={hud} events={events}
+        started={turnStarted} now={retry ? { key: `r${retry.e.attempt}`, mark: "think", verb: "Retrying", what: "", code: "", more: 0, retry: retry.e }
+          : { key: up ? "t" : "boot", mark: "think", verb, what: "", code: "", more: 0 }}
         span="" chapters={0} defaultOpen={foldsOpen} animate={animate}>
         {[]}
       </WorkZone>,
@@ -3425,9 +3572,29 @@ export const RunStream = memo(function RunStream({
       {boot && !blank ? <BootRow text={boot} /> : null}
       {rows}
       {working && !carried && !dossier ? <WorkingIndicator hud={hud} events={events} boot={boot} started={turnStarted} /> : null}
+      {bgN ? <BgLine n={bgN} since={bgSince} /> : null}
     </div>
   );
 });
+
+/** Where the working indicator sat, once the turn has answered with background
+ *  tasks still running in its process (status `background`): one quiet line,
+ *  how many and how long since the answer, whichever indicator you picked. It
+ *  goes when they finish. */
+function BgLine({ n, since }: { n: number; since?: number }) {
+  const [at, setAt] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    const id = setInterval(() => setAt(Date.now() / 1000), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div className="dbgline">
+      <Spinner className="h-[9px] w-[9px] flex-none border-[1.5px] opacity-100" />
+      <span><b>{n} background task{n === 1 ? "" : "s"}</b> still running</span>
+      {since ? <><span className="sep" aria-hidden>·</span><span className="tm">{clock(Math.max(0, Math.floor(at - since)))}</span></> : null}
+    </div>
+  );
+}
 
 /** "A · TOKEN" (lib/askback's lettered options) wears its key as a badge, the
  *  same one the question card's rows carry. */
@@ -3533,7 +3700,6 @@ export function FinalResult({
   askDocked = false,
   update = false,
 }: {
-  onOpenFile?: OpenFile;
   /** The turn's views the answer names, to draw where it names them. */
   views?: Map<string, ReactNode>;
   result: string;
@@ -3552,6 +3718,8 @@ export function FinalResult({
   dossier?: boolean;
   onAnswer?: (text: string) => void;
   onQuote?: (text: string) => void;
+  /** A path in the answer is a file link, as it is in the notes above it. */
+  onOpenFile?: OpenFile;
   /** Set on a Rivendell job's turn: an answer its kind can read is drawn as the
    *  job's view (a brief, minutes, a review, the newspaper…) instead of as text. */
   view?: JobViewInput | null;
@@ -3581,9 +3749,11 @@ export function FinalResult({
   const ask = onAnswer && !bad && !drawn ? askBack(result) : null;
   const body = ask ? ask.body : result;
   const lines = body.split("\n").length;
+  // One threshold for the fold and its SHOW ALL, so a folded box can always be opened.
+  const foldAt = update ? 3 : RESULT_FOLD_LINES;
   // A live result stays open — you're watching it land. Long ones from earlier in
   // the session arrive folded.
-  const [open, setOpen] = useState(update ? lines <= 3 : land || lines <= RESULT_FOLD_LINES || !!views?.size);
+  const [open, setOpen] = useState(update ? lines <= foldAt : land || lines <= foldAt || !!views?.size);
   return (
     // `--tone` rather than four inline colours: the answer is the loudest thing
     // in a turn, so every language has to be able to re-draw it (a plate, a pair
@@ -3594,16 +3764,17 @@ export function FinalResult({
       <RailNode />
       <div ref={boxRef} className="res group/res" data-land={land ? "" : undefined}>
         <div className="res-head">
-          <span className="res-lab">{update ? "UPDATE" : label ?? (dossier ? (bad ? "ANSWER // ERROR" : "ANSWER") : `RESULT // ${bad ? "ERROR" : "OK"}`)}</span>
+          <span className="res-lab caps">{update ? "Update" : label ?? (dossier ? (bad ? "Answer · error" : "Answer") : `RESULT // ${bad ? "ERROR" : "OK"}`)}</span>
+          {/* how long the turn took sits by the label; the right side says done and when */}
+          {typeof elapsed === "number" && elapsed > 0 && (
+            <span className="res-dur" title="wall time">{wall(elapsed)}</span>
+          )}
           {drawn && view?.job.kind && <span className="res-kind"><JobTag job={view.job} /></span>}
           <span className="res-meta">
             {at != null && <span title="when the answer landed">{hhmm(at, h12)}</span>}
-            {typeof elapsed === "number" && elapsed > 0 && (
-              <span title="wall time">{wall(elapsed)}</span>
-            )}
             {!update && typeof tokens === "number" && tokens > 0 && (
               <span title="tokens this turn spent">
-                {fmtTokens(tokens)} TOK
+                {fmtTokens(tokens)} tokens
               </span>
             )}
           </span>
@@ -3624,7 +3795,7 @@ export function FinalResult({
         {ask && (askDocked
           ? <div className="res-askmark"><AskMarker kind="prose" topic={ask.question.replace(/[*_`]/g, "")} /></div>
           : <AskBackBar ask={ask} onAnswer={onAnswer!} onQuote={onQuote} />)}
-        {!drawn && body && lines > RESULT_FOLD_LINES && (
+        {!drawn && body && lines > foldAt && (
           <button
             type="button"
             onClick={(e) => {

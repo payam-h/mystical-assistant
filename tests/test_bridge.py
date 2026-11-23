@@ -24,7 +24,7 @@ os.environ.setdefault("ALLOWED_CHAT_IDS", "555")
 os.environ.setdefault("BASE_PATH", "/tmp")
 os.environ.setdefault("BRIDGE_DB", os.path.join(tempfile.mkdtemp(), "t.db"))
 
-from bridge import config, machine, pubsub, runner, store, usage   # noqa: E402
+from bridge import config, machine, pubsub, runner, state, store, usage   # noqa: E402
 from bridge.miniapp.server import (                       # noqa: E402
     validate_init_data, normalize_model_effort)
 
@@ -515,7 +515,7 @@ def test_session_brief_shape(monkeypatch):
                         lambda *a, **k: [{"rule": "mcp__github", "name": "github"}])
     s = store.create_session(555, "p6")
     b = _session_brief(s)
-    assert set(b) == {"id", "title", "project", "created", "updated", "asked", "archived",
+    assert set(b) == {"id", "title", "project", "missing", "created", "updated", "asked", "archived",
                       "origin", "cwd", "branch", "fallback_policy", "goal", "job", "device", "team",
                       "lifecycle", "disabled_tools",
                       "ctx_tokens", "ctx_window", "autocompact", "work_cwd",
@@ -967,6 +967,7 @@ def test_ensure_session_existing_ignores_create_args():
 # --- runner: cross-surface run context (cwd + permission per session) --------
 
 def test_resolve_context_new_session_gets_surface_default_permission():
+    os.makedirs("/tmp/ctxnew", exist_ok=True)    # a session's run cwd must exist on disk
     sess, cwd, perm = runner._resolve_run_context(
         572, "/tmp/ctxnew", session_id=None, permission_mode=None, origin="dashboard")
     assert sess["permission_mode"] == config.NEW_SESSION_PERMISSION_MODE
@@ -1078,11 +1079,24 @@ def test_run_context_falls_back_when_session_cwd_removed():
     raises FileNotFoundError, misreported as '`claude` not found on PATH')."""
     from bridge import runner
     chat = 8123
+    os.makedirs(os.path.join(config.BASE_PATH, "wt_proj"), exist_ok=True)
     s = store.create_session(chat, "/wt_proj", origin="dashboard",
                              cwd="/tmp/removed-worktree-zzz")   # does not exist
     sess, cwd, perm = runner._finalize_run_context(
-        s, "/tmp", permission_mode=None, origin="dashboard")    # /tmp = BASE_PATH, exists
-    assert cwd == "/tmp"                                         # fell back to project dir
+        s, "/tmp", permission_mode=None, origin="dashboard")    # the caller's folder: another project's
+    assert cwd == os.path.realpath(os.path.join(config.BASE_PATH, "wt_proj"))   # its own project's folder
+
+
+def test_run_context_resumes_in_the_tree_it_moved_into(tmp_path):
+    """With its cwd removed, a session that moved into a still-existing worktree
+    resumes there, not in the project dir (which may be the removed tree)."""
+    from bridge import runner
+    s = store.create_session(8123, "/wt_proj", origin="dashboard",
+                             cwd="/tmp/removed-worktree-zzz")   # does not exist
+    store.set_work_cwd(s["id"], str(tmp_path))
+    _, cwd, _ = runner._finalize_run_context(
+        store.get_session(s["id"]), "/tmp", permission_mode=None, origin="dashboard")
+    assert cwd == str(tmp_path)
 
 
 # --- websocket framing (terminal transport) ---------------------------------
@@ -1325,6 +1339,19 @@ def test_a_failed_turn_hands_the_queue_its_error(monkeypatch):
     runner._run_streaming(job, "p", [], config.BASE_PATH)
     it = q.snapshot(sid)["items"][0]
     assert (it["status"], it["error"]) == ("failed", "tests red")
+
+
+def test_a_turn_ends_its_flow_step_before_the_queue_starts_the_next(monkeypatch):
+    """The prompt queued behind it may start another flow (paths.end_turn_step)."""
+    from bridge import paths
+    q, sid = _queued_turn(monkeypatch, "p-step-queue")
+    monkeypatch.setattr(runner, "_announce_end", lambda job: None)   # no ping thread
+    seen = []
+    monkeypatch.setattr(paths, "end_turn_step", lambda job: seen.append("step"))
+    done = q.notify_job_done
+    monkeypatch.setattr(q, "notify_job_done", lambda *a, **kw: (seen.append("queue"), done(*a, **kw)))
+    runner._run_streaming(runner.Job("j1", 555, sid), "p", [], config.BASE_PATH)
+    assert seen == ["step", "queue"]
 
 
 # --- restart-safe runs: a stop signal is the restart, not a crash -------------
@@ -1667,6 +1694,35 @@ def test_timeout_auto_resumes_capped(monkeypatch):
     assert timed_out_turn()
 
 
+def test_turn_ending_on_an_echoed_silent_reminder_resumes_capped(monkeypatch):
+    """Claude Code's silent-turn reminder, copied back as the whole answer, ends
+    the turn mid-task: it reads 'done', but nobody stopped it."""
+    s = store.create_session(555, "p-echo")
+    store.set_claude_session_id(s["id"], "csid-echo")
+    started = []
+    monkeypatch.setattr(runner, "start_streaming_job",
+                        lambda *a, **kw: (started.append((a, kw)), object())[1])
+    monkeypatch.setattr(runner, "_notify", lambda *a, **k: None)
+
+    def turn(result, interrupted=False):
+        job = runner.Job(f"je{len(started)}", 555, s["id"])
+        job.status, job.result, job.interrupted = "done", result, interrupted
+        return runner._maybe_auto_resume(job, "/tmp", None, None)
+
+    echo = ("The user hasn't heard from you in a while — say in a few words "
+            "what you're doing, then continue.")                      # the server's wording
+    stock = ("The user hasn't heard from you in a while. As you continue, keep them "
+             "updated when there's something to tell — a finding, a change of plan.")
+    assert not turn("Done: the tests pass.")      # a real answer is left alone
+    assert not turn(echo, interrupted=True)       # so is one the user stopped
+    assert all(turn(echo) for _ in range(runner.AUTO_RESUME_MAX))
+    assert not turn(echo)                         # a model that only echoes stops
+    assert len(started) == runner.AUTO_RESUME_MAX
+    assert started[0][0][1] == runner.ECHO_NUDGE
+    assert not turn("Done.")                      # a real answer resets the cap
+    assert turn(stock)                            # Claude Code's own wording too
+
+
 def test_midrun_no_resume_for_user_stop_or_shutdown(monkeypatch):
     from bridge import state
     s = store.create_session(555, "p-noresume")
@@ -1737,6 +1793,8 @@ def test_watchdog_ends_a_done_turn_held_only_by_background_shells(monkeypatch):
     job.session_id = "csid"
     job.add({"type": "result"})
     job.status = "done"
+    job.bg = {"s1": {"type": "shell", "desc": "Run the suite", "since": 0},
+              "a1": {"type": "agent", "desc": "Review the diff", "since": 0}}
     threading.Thread(target=runner._watchdog, args=(job, proc), daemon=True).start()
     time.sleep(1.5)
     assert not proc.terminated                 # an agent still works: wait for it
@@ -1744,6 +1802,176 @@ def test_watchdog_ends_a_done_turn_held_only_by_background_shells(monkeypatch):
     time.sleep(1.5)
     assert proc.terminated and proc.killed     # SIGTERM, then SIGKILL after INTERRUPT_KILL
     assert not job.timed_out                   # ended, not hung: no error row, no resume
+    assert job.bg_ended == ["Run the suite"]   # what carry_on tells the session it lost
+
+
+def test_every_session_is_told_a_background_command_keeps_its_turn_waiting():
+    """The CLI's Bash tool promises a wake-up when a background command exits. The watchdog
+    keeps the turn waiting for it, up to its cap, so the session prompt says so, with the
+    watchdog's own number."""
+    assert f"{int(runner.BG_WAIT_CAP // 3600)} hours" in runner._LOG_NOTE and "woken" in runner._LOG_NOTE
+
+
+def _bg_started(tid="b1", use="toolu_bg", kind="local_bash"):
+    return {"type": "system", "subtype": "task_started", "task_id": tid, "tool_use_id": use,
+            "description": "Build and test", "task_type": kind, "is_backgrounded": True}
+
+
+def test_a_background_command_gets_a_card_when_it_starts_and_when_it_ends():
+    """The CLI's task events (seen on 2.1.323) become the transcript's card: what
+    is running, then how it ended. A sub-agent's task and an agent are not this
+    chat's commands, and a monitor's per-event notice does not close its card."""
+    job = runner.Job("bg-card", 555)
+    runner._handle_event(job, {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "toolu_bg", "name": "Bash",
+         "input": {"command": "make test", "run_in_background": True}}]}})
+    runner._handle_event(job, _bg_started())
+    runner._handle_event(job, {**_bg_started("a1"), "task_type": "local_agent"})
+    runner._handle_event(job, {**_bg_started("s1"), "owned_by_subagent": True})
+    assert list(job.bg_tasks) == ["b1"]
+    card = [e for e in job.events if e["type"] == "background"]
+    assert len(card) == 1 and card[0]["state"] == "running" and card[0]["id"] == "b1"
+    assert card[0]["command"] == "make test" and card[0]["text"] == "Build and test"
+    assert card[0]["kind"] == "command"
+
+    runner._handle_event(job, {"type": "system", "subtype": "task_notification",
+                               "task_id": "b1", "status": "running", "summary": "an event"})
+    assert "b1" in job.bg_tasks
+    runner._handle_event(job, {"type": "system", "subtype": "task_notification", "task_id": "b1",
+                               "status": "completed", "summary": "completed (exit code 0)"})
+    assert not job.bg_tasks
+    end = job.events[-1]
+    assert end["type"] == "background_done" and end["state"] == "completed" and end["id"] == "b1" and "exit code 0" in end["text"]
+
+
+def test_watchdog_waits_for_a_background_command_then_ends_the_turn(monkeypatch):
+    """An agent that ends its turn to wait for a background command is woken by
+    the CLI when it finishes, in the same process. The 15 s grace used to kill
+    that process and the command with it, so the agent never continued. The
+    turn now waits (BG_WAIT_CAP), reads as waiting, and is ended only once the
+    command is done and nothing else can wake it."""
+    monkeypatch.setattr(config, "RUN_TIMEOUT", 1)       # a wait is not a hang either
+    monkeypatch.setattr(runner, "BG_SHELL_GRACE", 0.5)
+    monkeypatch.setattr(runner, "INTERRUPT_KILL", 0.2)
+    monkeypatch.setattr(runner, "_running_agents", lambda sid: 0)
+    job, proc = runner.Job("wd-wait", 555), _FakeProc()
+    job.session_id = "csid"
+    runner._handle_event(job, _bg_started())
+    runner._handle_event(job, {"type": "result", "result": "waiting", "num_turns": 2})
+    assert job.bg_waiting() and job.activity()["label"] == "waiting on 1 background command"
+    threading.Thread(target=runner._watchdog, args=(job, proc), daemon=True).start()
+    time.sleep(2.5)
+    assert not proc.terminated and not proc.killed and not job.timed_out
+    runner._handle_event(job, {"type": "system", "subtype": "task_notification",
+                               "task_id": "b1", "status": "completed", "summary": "done"})
+    time.sleep(2.0)                            # nothing left to wake it: the old grace
+    assert proc.terminated and not job.timed_out
+
+
+def test_watchdog_gives_up_on_a_background_command_at_the_cap(monkeypatch):
+    """A dev server started as a background command never ends: at the cap the
+    child goes, the card closes as expired and the turn is done, not hung."""
+    monkeypatch.setattr(config, "RUN_TIMEOUT", 60)
+    monkeypatch.setattr(runner, "BG_WAIT_CAP", 1.0)
+    monkeypatch.setattr(runner, "INTERRUPT_KILL", 0.2)
+    monkeypatch.setattr(runner, "_running_agents", lambda sid: 0)
+    job, proc = runner.Job("wd-cap", 555), _FakeProc()
+    job.session_id = "csid"
+    runner._handle_event(job, _bg_started())
+    runner._handle_event(job, {"type": "result", "result": "started", "num_turns": 2})
+    job.bg = {"b1": {"type": "shell", "desc": "dev server", "since": 0}}   # the same task, as the pill lists it
+    threading.Thread(target=runner._watchdog, args=(job, proc), daemon=True).start()
+    time.sleep(2.5)
+    assert proc.terminated and not job.timed_out and not job.bg_tasks
+    last = job.events[-1]
+    assert (last["type"], last["id"], last["state"]) == ("background_done", "b1", "expired")
+    assert job.bg_ended == []      # the card's checkbox tells the session here, never carry_on as well
+
+
+def test_a_new_message_ends_the_wait_on_a_background_command(monkeypatch):
+    """The waiting child holds the session's run slot. A new prompt does not
+    queue behind it for hours: the wait ends, the slot comes free."""
+    sid = "sess-bgwait"
+
+    class _Proc(_FakeProc):
+        def terminate(self):
+            super().terminate()
+            self._returncode = -15
+            state.release_run(sid)             # what the turn's finally does once the child is gone
+
+    job, proc = runner.Job("bg-pre", 555, sid), _Proc()
+    job.proc = proc
+    runner._register(job)
+    assert state.acquire_run(sid, 555)
+    try:
+        assert not runner.end_bg_wait(sid)     # a turn at work is not a wait
+        assert not proc.terminated
+        runner._handle_event(job, _bg_started())
+        runner._handle_event(job, {"type": "result", "result": "waiting", "num_turns": 2})
+        assert runner.end_bg_wait(sid)
+        assert proc.terminated and not state.is_running(sid)
+        assert job.events[-1]["state"] == "replaced"
+    finally:
+        state.release_run(sid)
+
+
+def test_a_background_cards_stop_and_checkbox_answer_through_respond():
+    """The card's Stop asks the CLI to end that one task (stop_task), and its
+    checkbox is remembered on the task; both ride the respond route as
+    `bg:<task id>`. A task that isn't running takes neither."""
+    job = runner.Job("bg-act", 555)
+    job.proc = _FakeProc()
+    runner._handle_event(job, _bg_started())
+    assert job.respond("bg:b1", answers=[{"header": "notify", "labels": ["on"]}])
+    assert job.bg_tasks["b1"]["notify"] is True
+    assert job.events[-1] == {**job.events[-1], "type": "background_set", "id": "b1", "notify": True}
+    assert not job.proc.stdin.data              # a tick stops nothing
+    assert job.respond("bg:b1", answers=[{"header": "notify", "labels": []}])
+    assert job.bg_tasks["b1"]["notify"] is False
+    assert job.respond("bg:b1", behavior="deny")
+    sent = _last_sent(job)
+    assert sent["type"] == "control_request"
+    assert sent["request"] == {"subtype": "stop_task", "task_id": "b1"}
+    assert not job.respond("bg:nope", behavior="deny")
+
+
+def test_the_agent_sets_its_own_wait_never_past_the_cap(monkeypatch):
+    job = runner.Job("bg-cap", 555)
+    assert job.set_bg_cap(20 * 60) == 1200 and runner._bg_cap(job) == 1200
+    assert job.events[-1]["type"] == "background_set" and job.events[-1]["cap"] == 1200
+    assert job.set_bg_cap(9 * 3600) == int(runner.BG_WAIT_CAP)      # 2 hours at most
+    assert job.set_bg_cap(1) == 60
+
+
+def test_a_wait_that_runs_out_prompts_the_agent_only_when_its_card_says_so(monkeypatch):
+    """At the cap the command is stopped. With the card's checkbox ticked the
+    session is queued a turn saying so; without it nothing is sent."""
+    from bridge import queue_manager
+    monkeypatch.setattr(config, "RUN_TIMEOUT", 60)
+    monkeypatch.setattr(runner, "BG_WAIT_CAP", 1.0)
+    monkeypatch.setattr(runner, "INTERRUPT_KILL", 0.2)
+    monkeypatch.setattr(runner, "_running_agents", lambda sid: 0)
+    queued = []
+    monkeypatch.setattr(queue_manager, "enqueue", lambda sid, **kw: queued.append((sid, kw)))
+    for tick in (False, True):
+        job, proc = runner.Job(f"wd-notify-{tick}", 555, "sess-bg-notify"), _FakeProc()
+        job.session_id = "csid"
+        job.proc = proc
+        runner._handle_event(job, {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_bg", "name": "Bash",
+             "input": {"command": "make deploy", "run_in_background": True}}]}})
+        runner._handle_event(job, _bg_started())
+        if tick:
+            job.background("b1", notify=True)
+        runner._handle_event(job, {"type": "result", "result": "waiting", "num_turns": 2})
+        threading.Thread(target=runner._watchdog, args=(job, proc), daemon=True).start()
+        time.sleep(2.0)
+        assert proc.terminated
+        job.exited.set()                       # the turn's finally
+        time.sleep(0.5)
+        assert len(queued) == (1 if tick else 0)
+    sid, kw = queued[0]
+    assert sid == "sess-bg-notify" and "make deploy" in kw["prompt"] and "Build and test" in kw["prompt"]
 
 
 def test_watchdog_does_not_count_sleep_as_silence(monkeypatch):
@@ -1805,6 +2033,100 @@ def test_a_replayed_notice_leaves_stdin_open_for_the_real_turn(monkeypatch):
     runner._run_streaming(job, "p", [], config.BASE_PATH)
     assert open_for_real_turn == [True]
     assert (job.status, job.result, job.proc.stdin.closed) == ("done", "pineapple", True)
+
+
+def _scripted(monkeypatch, project, script):
+    """A started turn whose claude child plays script(job, stdin), a generator of
+    stream events that can read what the bridge wrote, then exits. Returns the
+    job and whether stdin was closed when the script ran out: the CLI exits on
+    EOF, and not before."""
+    exited = []
+
+    class Child(_child(0)):
+        def __init__(self, cmd, **kw):
+            super().__init__(cmd, **kw)
+            self.stdin = _FakeStdin()
+
+            def out():
+                for d in script(job, self.stdin):
+                    yield json.dumps(d) + "\n"
+                exited.append(self.stdin.closed)
+            self.stdout = out()
+
+    sid, job = _dying_turn(monkeypatch, project, 0)
+    monkeypatch.setattr(runner.subprocess, "Popen", Child)
+    monkeypatch.setattr(runner, "notify_awaiting", lambda *a, **k: None)   # a card's ping is a real sendMessage
+    runner._run_streaming(job, "p", [], config.BASE_PATH)
+    return job, exited
+
+
+_ASK = {"questions": [{"question": "Which color?", "header": "Color", "multiSelect": False,
+                       "options": [{"label": "Red"}, {"label": "Blue"}]}]}
+_INIT = {"type": "system", "subtype": "init", "session_id": "c1"}
+_BG = {"type": "system", "subtype": "background_tasks_changed",
+       "tasks": [{"task_id": "b1", "task_type": "local_bash", "description": "sleep 6"}]}
+_BG_DONE = [{"type": "system", "subtype": "task_notification", "task_id": "b1", "status": "completed"},
+            {"type": "system", "subtype": "background_tasks_changed", "tasks": []}]
+
+
+def _state(s):
+    return {"type": "system", "subtype": "session_state_changed", "state": s}
+
+
+def _said(text):
+    return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}], "usage": {}}}
+
+
+def _result(text):
+    return {"type": "result", "subtype": "success", "result": text, "num_turns": 2}
+
+
+def _woken_ask(before):
+    """The CLI plays `before`, then the woken model asks the color question."""
+    def script(job, stdin):
+        yield from before
+        yield {"type": "assistant", "message": {"usage": {}, "content": [
+            {"type": "tool_use", "id": "t1", "name": "AskUserQuestion", "input": _ASK}]}}
+        yield _state("requires_action")
+        if stdin.closed:   # the CLI's own answer when it has no stdin to ask over
+            answer = "Tool permission request failed: AbortError: Stream closed"
+        else:
+            yield {"type": "control_request", "request_id": "q1", "request": {
+                "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": _ASK}}
+            job.respond("q1", answers=[{"header": "Color", "labels": ["Blue"]}])
+            answer = json.loads(stdin.data[-1])["response"]["response"]["message"]
+        yield from (_state("running"), _said(answer), _result(answer), _state("idle"))
+    return script
+
+
+@pytest.mark.parametrize("project, before", [
+    # claude 2.1.319's order (haiku, 2026-11-06): the task still runs at the result...
+    ("p-bg-running-at-result",
+     [_state("running"), _INIT, _BG, _said("WAITING"), _result("WAITING"), _state("idle"),
+      *_BG_DONE, _state("running"), _INIT]),
+    # ...or it ends while the reply is being written, and the wake follows the
+    # result with no idle in between.
+    ("p-bg-done-mid-reply",
+     [_state("running"), _INIT, _BG, *_BG_DONE, _said("one, two"), _result("one, two"), _INIT]),
+])
+def test_a_background_task_wake_can_still_ask(monkeypatch, project, before):
+    """A turn that ends with a background task out (a survey agent, a
+    run_in_background command) gets its result, and the CLI wakes the model in
+    the same process when the task reports. Closed at that first result, stdin
+    left the woken turn nothing to ask over: its AskUserQuestion failed at once
+    with "Tool permission request failed: AbortError: Stream closed", no card
+    opened, and the questions came back as prose (2026-11-06)."""
+    job, exited = _scripted(monkeypatch, project, _woken_ask(before))
+    assert job.result == 'The user answered. For "Color": Blue'
+    assert exited == [True]          # and the turn's real end still lets the CLI go
+
+
+def test_a_cli_without_state_events_exits_on_its_result(monkeypatch):
+    """No session_state_changed (an older CLI): its result is the only end there
+    is, and stdin closes on it as it always did."""
+    job, exited = _scripted(monkeypatch, "p-no-state",
+                            lambda job, stdin: iter([_INIT, _said("hi"), _result("hi")]))
+    assert (job.result, exited) == ("hi", [True])
 
 
 if __name__ == "__main__":

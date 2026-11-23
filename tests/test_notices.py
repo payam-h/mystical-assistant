@@ -242,6 +242,25 @@ def test_turn_done_emits_done_with_closing_line(monkeypatch, sent):
     assert (row["kind"], row["body"], row["meta"]["elapsed"]) == ("done", "All green — both shots attached.", 252)
 
 
+def test_turn_done_line_is_the_answer_under_the_to_do_box(monkeypatch, sent):
+    from bridge import runner
+    sid = _sess()
+    monkeypatch.setattr(store, "last_turn", lambda s: {"status": "done", "elapsed": 9, "outcome": None})
+    runner.notify_turn_done(555, sid, False, body="> [!IMPORTANT]\n> - Press ⟳ on the right rail.\n\nThe box is built.\nMore")
+    assert notices.feed()[0]["body"] == "The box is built."
+
+
+def test_a_ticket_turn_line_is_its_to_do(monkeypatch, sent):
+    from bridge import runner
+    sid = _sess(origin="ticket")                     # nobody reads a ticket session: its to-do is the news
+    monkeypatch.setattr(store, "last_turn", lambda s: {"status": "done", "elapsed": 9, "outcome": None})
+    runner.notify_turn_done(555, sid, False, body="> [!IMPORTANT]\n> - Decide the sign-in rule.\n> - Say go.\n\nTicket 13 is done.")
+    assert notices.feed()[0]["body"] == "To do: Decide the sign-in rule. (+1 more)"
+    assert sent and sent[0].endswith("\nTo do: Decide the sign-in rule. (+1 more)")   # Telegram hears it too
+    runner.notify_turn_done(555, sid, False, body="Ticket 14 is done.")
+    assert notices.feed()[0]["body"] == "Ticket 14 is done." and "\n" not in sent[-1]
+
+
 def test_plugin_session_turn_emits_nothing(monkeypatch, sent):
     from bridge import runner
     sid = _sess(origin="rivendell:prod")
@@ -329,6 +348,12 @@ def test_account_needs_outlive_their_own_failed_and_parked(monkeypatch):
     assert sorted(n["kind"] for n in notices.needs(parked)) == ["limit_choice", "login"]
     # Running again (a prompt sent by hand) answers it too.
     assert [n["kind"] for n in notices.needs({**parked, "s1": {"state": "working"}})] == ["limit_choice"]
+
+
+def test_a_credits_stop_needs_you_while_it_stands():
+    notices.emit("credits", "s3", body="Its login needs extra-usage credits.")
+    assert [n["kind"] for n in notices.needs({"s3": {"state": "credits"}})] == ["credits"]
+    assert notices.needs({}) == []                               # a new turn, or left
 
 
 # --- emitters: Rivendell and PRs ------------------------------------------------

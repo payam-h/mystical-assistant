@@ -75,14 +75,26 @@ def test_the_registry_covers_every_model_call_the_bridge_makes():
     don't delete this line."""
     assert set(KEYS) == {"title", "relevance", "nextup", "preview", "commitmsg",
                          "learn", "dream", "ponytail", "graph",
-                         "rvtrack", "changelog", "logostyle", "translate", "explain", "design_critic", "refine"}
+                         "rvtrack", "changelog", "logostyle",
+                         "router", "autopick", "nextstep",
+                         "smartzone", "grillcards", "ticketruns", "ticketapprove", "mergereview",
+                         "translate", "explain", "design_critic", "refine"}
+
+
+def test_state_carries_the_parent_of_a_sub_switch():
+    """The AI tab nests a sub-switch under its parent from this field alone."""
+    parents = {f["key"]: f.get("parent") for f in aifeatures.state()}
+    assert parents["autopick"] == "router"
+    assert parents["mergereview"] == parents["ticketapprove"] == "ticketruns"
+    assert parents["router"] is None and parents["grillcards"] is None
 
 
 def test_shipped_defaults_are_off_for_anything_automatic():
     """Automatic features ship off; the press-to-run ones ship on, and so do the
     two that shaped every run before this tab existed (ponytail, the project
     map) — listing them is about making that spend visible and stoppable, not
-    about changing what a fresh install does.
+    about changing what a fresh install does. The skill router's
+    sub-switches ship on too, but they obey SKILL ROUTER, which ships off.
 
     Read out of the source rather than from config's attributes: those reflect
     whatever .env this machine has, and reloading the module to clear that takes
@@ -94,7 +106,17 @@ def test_shipped_defaults_are_off_for_anything_automatic():
                "DREAM_ENABLE": "0",
                "PONYTAIL_ENABLE": "1", "GRAPH_ENABLE": "1",
                "RIVENDELL_TRACK": "1", "CHANGELOG_ENABLE": "1",
-               "LOGO_STYLE_AI": "1"}
+               "LOGO_STYLE_AI": "1",
+               "ROUTER_ENABLE": "0", "ROUTER_AUTO": "1",
+               "ROUTER_NEXT": "1", "ROUTER_ZONE": "1",
+               "GRILL_CARDS": "0", "TICKET_RUNS": "0", "TICKET_APPROVE": "0",
+               "MERGE_REVIEW": "1"}      # on, but it obeys TICKETS, which ships off
     assert set(shipped) == {f["env"] for f in aifeatures.FEATURES}
     for var, default in shipped.items():
         assert f'os.environ.get("{var}", "{default}")' in src, f"{var} ships wrong"
+
+
+def test_a_saved_file_with_removed_switches_loads_without_them(tmp_path):
+    (tmp_path / "ai_features.json").write_text('{"askmatt": false, "setupnudge": true, "tickets": true, "nextup": true}')
+    assert aifeatures.enabled("nextup") is True
+    assert aifeatures.enabled("askmatt") is False

@@ -19,7 +19,6 @@ import json
 import mimetypes
 import os
 import queue
-import shutil
 import socket
 import subprocess
 import sys
@@ -40,7 +39,7 @@ from bridge import (acp_agents, acp_setup, agents, attribution, browser, config,
                     device_ask, device_setup, device_share, device_side, device_view,
                     devserver, fmt, git,
                     github, graphmap, httpgz, integrations, logostyle,
-                    models, native, notices, preview_detect, profiles, project_config, projectmarks,
+                    meter, models, native, notices, preview_detect, profiles, project_config, projectmarks,
                     prstatus,
                     pubsub, queue_manager, relevance, report, rivendell,
                     rivendell_instances, rivendell_video, runner, selfupdate,
@@ -100,7 +99,7 @@ def web_built() -> bool:
 def _self_rel() -> "str | None":
     """The bridge's own checkout as a project rel, or None when it lives outside BASE_PATH."""
     real = os.path.realpath(selfupdate.REPO)
-    return browser.rel(real) if real.startswith(config.BASE_PATH + os.sep) else None
+    return browser.rel(real) if browser.within_base(real) and real != config.BASE_PATH else None
 
 
 def _abs_project(project) -> str | None:
@@ -119,6 +118,86 @@ def _abs_within(path: str) -> str | None:
     return cand if browser.within_base(cand) and os.path.isdir(cand) else None
 
 
+def _rehome_moved(s: dict) -> bool:
+    """Re-file a session whose own dir is gone under the tree its shell moved into
+    (runner._note_work_cwd), when that tree still exists. True if it was."""
+    wt = _abs_within(s.get("work_cwd") or "")
+    if wt is None:
+        return False
+    s.update(project=browser.rel(wt), cwd=wt, work_cwd=None)
+    store.rehome(s["id"], s["project"], wt)
+    return True
+
+
+# Every open tab polls /local/sessions every 5 s, and a build is ~0.2 s of GIL-bound
+# work answered with ~700 KB. Without this, a few tabs pile builds up until each
+# takes 30 s (2026-11-17: four orphaned headless dashboards pinned the bridge).
+# The lock makes concurrent pollers wait for one build instead of each running it;
+# a dashboard POST clears the cache so the user's own change shows on the next poll.
+_SESSIONS_TTL = 2.0
+_sessions_lock = threading.Lock()
+_sessions_cache: dict = {}    # (chat, project) -> (built_at, payload)
+
+
+def _sessions_payload(chat, project) -> dict:
+    """The /local/sessions answer for one chat (and project, or all when None)."""
+    native.refresh(chat)           # surface VSCode sessions started since last poll
+    rows = (store.list_sessions(chat, project) if project is not None
+            else store.list_sessions_all(chat))
+    # Sessions of a since-deleted dir (e.g. a removed worktree checkout)
+    # stay out of the lists; their transcripts remain viewable by id.
+    # One that had moved into a tree that still exists is re-filed there
+    # instead: removing the tree it started in must not hide its work.
+    # Plugin-worker sessions are exempt: their default workdir is
+    # BASE_PATH itself ("/", never a project), and a run the PLUGINS
+    # tab exists to show must not be filtered into invisibility.
+    # A real project that moved or was deleted keeps its sessions listed,
+    # marked missing (browser.gone), for MOVE TO PROJECT.
+    rows = [r for r in rows if integrations.is_plugin_origin(r.get("origin"))
+            or browser.project_exists(r["project"]) or _rehome_moved(r)
+            or browser.gone(r["project"])]
+    # Ticket and merge sessions name their super session; that one carries its set's count.
+    from bridge import tickets
+    of, counts = tickets.owners()
+    return {"sessions": [{**b, **({"ticket_of": of[b["id"]]} if b["id"] in of else {}),
+                          **({"tickets": counts[b["id"]]} if b["id"] in counts else {})}
+                         for b in map(_session_brief, rows)]}
+
+
+def _sessions_cached(chat, project) -> dict:
+    key = (chat, project)
+    with _sessions_lock:
+        hit = _sessions_cache.get(key)
+        if hit is None or time.time() - hit[0] > _SESSIONS_TTL:
+            hit = (time.time(), _sessions_payload(chat, project))
+            _sessions_cache[key] = hit
+        return hit[1]
+
+
+def _reveal_target(path) -> str | None:
+    """The real path behind an absolute one the OS file manager may be shown, or
+    None. The roots are the ones the dashboard already serves files from: the
+    editor reads any tree under BASE_PATH, and UPLOAD_DIR (the attachments) sits
+    inside it. exists() comes first because realpath() raises on a NUL byte."""
+    if not isinstance(path, str) or not os.path.isabs(path) or not os.path.exists(path):
+        return None
+    real = os.path.realpath(path)
+    return real if browser.within_base(real) else None
+
+
+def _reveal_argv(real: str) -> list[str]:
+    """The file manager's command for a checked path: an argv, never a shell."""
+    if sys.platform == "darwin":
+        return ["open", "-R", real]    # -R selects it in Finder; plain `open` would launch it
+    from bridge import startup
+    if startup._wsl():                 # a Windows bridge runs in WSL: hand Explorer a Windows path
+        win = subprocess.run(["wslpath", "-w", real], capture_output=True, text=True,
+                             timeout=10, check=True).stdout.strip()
+        # Windows exes aren't on a WSL PATH (startup._POWERSHELL says the same).
+        return ["/mnt/c/Windows/explorer.exe", "/select,", win]
+    return ["xdg-open", os.path.dirname(real)]
+
+
 def _server_cwd(chat, body) -> str:
     """The run directory a dev-server request targets: an absolute
     worktree cwd if given, else a project rel, else the chat's active project.
@@ -128,19 +207,13 @@ def _server_cwd(chat, body) -> str:
             or state.project_dir(chat))
 
 
-# Managed git worktrees live under a hidden dir at the workspace root, so the
-# project browser (which skips dotdirs) never surfaces them as projects.
-_WT_ROOT = os.path.join(config.BASE_PATH, ".worktrees")
-_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-def _slug(s: str) -> str:
-    return _SLUG_RE.sub("-", (s or "").strip().strip("/")).strip("-") or "wt"
+# Managed git worktrees live under a hidden dir at the workspace root (see
+# git.worktree_path_for), so the project browser never surfaces them as projects.
+_slug = git.slug
 
 
 def _worktree_path(project_rel: str, branch: str) -> str:
-    repo = _slug(os.path.basename((project_rel or "").rstrip("/")) or "repo")
-    return os.path.join(_WT_ROOT, repo, _slug(branch))
+    return git.worktree_path_for(project_rel, branch)
 
 
 def _worktree_for_branch(abs_p: str, branch: str) -> "str | None":
@@ -365,6 +438,12 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/local/") and self.headers.get(
                     "Sec-Fetch-Site") not in (None, "same-origin", "none"):
                 return self._json({"error": "cross-site request"}, 403)
+            if path == "/local/runs" or path.startswith("/local/runs/"):
+                # Another program's runs (bridge/run_api.py): its own token on
+                # every route, reads too, and nothing else here answers to it.
+                from bridge import run_api
+                return self._json(*run_api.http("GET", path, qs, None,
+                                                self.headers.get("X-Run-Token")))
             if path == "/local/ws/terminal":
                 return self._terminal_ws(qs)
             if path.startswith("/local/stream/"):
@@ -415,6 +494,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "bad json"}, 400)
                 out, code = gateway.hook(self.headers.get("X-Gateway-Token"), body)
                 return self._json(out, code)
+            if path == "/local/runs" or path.startswith("/local/runs/"):
+                # The run API (bridge/run_api.py), on its own token like the two
+                # above: a program holding it starts and stops its runs only.
+                from bridge import run_api
+                return self._json(*run_api.http("POST", path, {}, self._read_json(),
+                                                self.headers.get("X-Run-Token")))
             if not _tok_ok(self.headers.get("X-Dash-Token", "")):
                 return self._json({"error": "unauthorized"}, 401)
             body = self._read_json()
@@ -428,7 +513,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "not installed"}, 404)
                 return self._json(*plugins_ext.dispatch("POST", path, {}, body, _chat()))
             # --- /fork ---
-            return self._post_api(path, body)
+            try:
+                return self._post_api(path, body)
+            finally:
+                _sessions_cache.clear()    # a user change shows on the next poll, not 2 s later
         except Exception as e:  # noqa: BLE001
             self._safe500(e)
 
@@ -447,6 +535,20 @@ class Handler(BaseHTTPRequestHandler):
         if (owner := integrations.route_owner(path)) and not integrations.installed(owner):
             return self._json({"error": "not installed"}, 404)
         chat = _chat()
+        if path.startswith("/local/council/"):
+            from bridge import council
+            sid = path[len("/local/council/"):]
+            if sid == "settings":
+                s = council.settings()
+                return self._json({**s, "accounts": council.candidates(s["reviewers"])})
+            s = store.get_session(sid)
+            if not s or s["chat_id"] != chat:
+                return self._json({"error": "no such session"}, 404)
+            full = qs.get("full", ["0"])[0] == "1"
+            cwd = team._session_dir(s)  # noqa: SLF001 - its worktree while that exists, as its turns
+            if full and not os.path.isdir(cwd):
+                return self._json({"error": "the session has no checkout"}, 400)
+            return self._json(council.brief(sid, cwd, full))
         if path == "/local/chat-images/file":
             got = multi_api.image_file(qs, chat)
             if not got:
@@ -488,7 +590,12 @@ class Handler(BaseHTTPRequestHandler):
                                "marks": projectmarks.marks(projects),
                                # The bridge's own checkout, so the dashboard
                                # knows which project's logo is ours.
-                               "self": _self_rel()})
+                               "self": _self_rel(),
+                               # Folders outside BASE_PATH you allowed, and the
+                               # folder chats live in: how the sidebar tells a
+                               # chat from a repo, and what SETTINGS can remove.
+                               "roots": browser.roots.listing(),
+                               "chats": browser.rel(os.path.join(config.BASE_PATH, browser.CHATS_DIR))})
         if path.startswith("/local/project-mark/logo/"):
             got = projectmarks.logo(path[len("/local/project-mark/logo/"):])
             if got is None:
@@ -548,7 +655,29 @@ class Handler(BaseHTTPRequestHandler):
             sid = (qs.get("session", [""])[0] or "").strip()
             return self._json(queue_manager.snapshot(sid) if sid else
                               {"session_id": "", "seq": 0, "paused": False, "items": []})
+        if path == "/local/flows":
+            from bridge import flowsettings
+            return self._json(flowsettings.state())
+        if path == "/local/flow":
+            from bridge import paths, tickets
+            sid = (qs.get("session", [""])[0] or "").strip()
+            s = store.get_session(sid) if sid else None
+            if not s or s["chat_id"] != chat:
+                return self._json({"error": "not found"}, 404)
+            try:
+                tset = tickets.flow_set(sid)
+            except Exception:
+                tset = None
+            flow = paths.get(sid)
+            if flow:
+                flow["stations"] = paths.stations(sid)   # the steps as they stand: FLOW draws these
+            return self._json({"flow": flow, "past": paths.past(sid), "set": tset})
+        if path == "/local/tickets":
+            from bridge import tickets
+            return self._json({"sets": [x for x in tickets.summaries()   # this chat's flows' sets only
+                                        if (store.get_session(x.get("parent_session") or "") or {}).get("chat_id") == chat]})
         if path == "/local/usage":
+            from bridge import usage
             return self._json(usage.get_usage())
         if path == "/local/today":
             # Local midnight, not "24h ago" — the header chip reads "TODAY".
@@ -556,13 +685,20 @@ class Handler(BaseHTTPRequestHandler):
             midnight = datetime.datetime.now().replace(
                 hour=0, minute=0, second=0, microsecond=0).timestamp()
             return self._json(store.today(chat, midnight))
+        if path == "/local/wins":
+            # HOME's spine: what shipped today, the stretches worked, the gaps away.
+            from bridge import wins
+            return self._json(wins.today(chat))
         if path == "/local/report":
             # back=1 → the completed week (what the Monday push covers).
             return self._json(report.weekly(chat, back=_qs_int(qs, "back") or 0))
         if path == "/local/accounts":
-            from bridge import accounts, ladder
+            from bridge import accounts, ladder, usage
+            # ?fresh=N reads any login whose meter is older than N s (0 = now):
+            # the PROFILE menu on open, and its Check now.
+            fresh = _qs_int(qs, "fresh")
             return self._json({
-                "accounts": accounts.with_meters(),
+                "accounts": accounts.with_meters(usage.CACHE_TTL if fresh is None else max(0, fresh)),
                 "default_policy": ladder.default_policy(),
                 "pending_login": accounts.pending_login()})
         if path == "/local/profiles":
@@ -570,6 +706,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/local/aifeatures":
             from bridge import aifeatures
             return self._json({"features": aifeatures.state()})
+        if path == "/local/savers":
+            from bridge import savers
+            return self._json({"savers": savers.state()})
         if path == "/local/integrations":
             return self._json({"plugins": integrations.state()})
         if path == "/local/envsettings":
@@ -599,18 +738,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "since must be epoch seconds"}, 400)
             return self._json(shots.since(chat, since))
         if path == "/local/sessions":
-            native.refresh(chat)           # surface VSCode sessions started since last poll
-            project = qs.get("project", [None])[0]
-            rows = (store.list_sessions(chat, project) if project is not None
-                    else store.list_sessions_all(chat))
-            # Sessions of a since-deleted dir (e.g. a removed worktree checkout)
-            # stay out of the lists; their transcripts remain viewable by id.
-            # Plugin-worker sessions are exempt: their default workdir is
-            # BASE_PATH itself ("/", never a project), and a run the PLUGINS
-            # tab exists to show must not be filtered into invisibility.
-            rows = [r for r in rows if integrations.is_plugin_origin(r.get("origin"))
-                    or browser.project_exists(r["project"])]
-            return self._json({"sessions": [_session_brief(s) for s in rows]})
+            return self._json(_sessions_cached(chat, qs.get("project", [None])[0]))
         # Before the transcript route below, which would otherwise swallow this
         # (it takes the first path segment and ignores the rest).
         if path.startswith("/local/sessions/") and path.endswith("/breakdown"):
@@ -619,6 +747,13 @@ class Handler(BaseHTTPRequestHandler):
             if not s or s["chat_id"] != chat:
                 return self._json({"error": "not found"}, 404)
             return self._json(attribution.breakdown(sid))
+        # The SESSION tab's window, time and spend, from the CLI's own transcript.
+        if path.startswith("/local/sessions/") and path.endswith("/meter"):
+            sid = path[len("/local/sessions/"):-len("/meter")]
+            s = store.get_session(sid)
+            if not s or s["chat_id"] != chat:
+                return self._json({"error": "not found"}, 404)
+            return self._json(meter.read(s, store.turn_metrics(sid)) or {})
         if path.startswith("/local/sessions/"):
             sid = path[len("/local/sessions/"):].split("/")[0]
             s = store.get_session(sid)
@@ -628,9 +763,11 @@ class Handler(BaseHTTPRequestHandler):
                 cursor = int(qs.get("cursor", ["0"])[0])
             except ValueError:
                 cursor = 0
-            return self._json(transcript_for(s, cursor,
-                                             tail=_qs_int(qs, "tail"),
-                                             before=_qs_int(qs, "before")))
+            from bridge import savers
+            # savers: the trials this session drew the saver in (its prompts' tag)
+            return self._json({**transcript_for(s, cursor, tail=_qs_int(qs, "tail"),
+                                                before=_qs_int(qs, "before")),
+                               "savers": savers.arms_for(sid)})
         if path == "/local/attachment":
             return self._attachment(qs.get("path", [""])[0])
         if path.startswith("/local/run/"):
@@ -664,6 +801,33 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 200
             return self._json({"commits": git.log_graph(cwd, limit)})
+        if path == "/local/git/incoming":
+            # The GIT tab's COMING IN (origin's commits HEAD lacks) and, diverged,
+            # the dry run the hero shows before you press Merge.
+            cwd = _worktree_cwd(qs.get("project", [None])[0],
+                                (qs.get("branch", [""])[0] or "").strip())
+            if cwd is None:
+                return self._json({"error": "invalid project"}, 400)
+            st = git.status(cwd)
+            diverged = st.get("ahead", 0) > 0 and st.get("behind", 0) > 0
+            return self._json({"commits": git.incoming(cwd) if st.get("behind") else [],
+                               "clash": git.merge_check(cwd) if diverged else None})
+        if path == "/local/git/ledger":
+            # The GIT tab's line: commits only here, commits on origin the base
+            # lacks, and how far the base moved. The base is your Target pick,
+            # else the PR's, else the default branch; a branch is never its own.
+            project, branch = qs.get("project", [None])[0], (qs.get("branch", [""])[0] or "").strip()
+            cwd = _worktree_cwd(project, branch)
+            abs_p = _abs_project(project)
+            if cwd is None or abs_p is None:
+                return self._json({"error": "invalid project"}, 400)
+            name = git.current_branch(cwd)
+            picks = project_config.branch_targets(browser.rel(git.main_checkout(abs_p) or abs_p))
+            base = {**prstatus.cached_bases(abs_p), **picks}.get(name)
+            if base is None:
+                base = git.default_branch(abs_p)
+            return self._json({**git.ledger(cwd, "" if base == name else base),
+                               "branches": [b for b in git.branches(abs_p) if b != name]})
         if path == "/local/git/show":
             # One commit from the graph: its changed files, or one file's diff.
             cwd = _worktree_cwd(qs.get("project", [None])[0],
@@ -708,6 +872,13 @@ class Handler(BaseHTTPRequestHandler):
             # working-tree diff: target the selected branch's worktree
             cwd = _worktree_cwd(project, (qs.get("branch", [""])[0] or "").strip())
             return self._json({"path": fpath, "diff": git.diff(cwd, fpath)})
+        if path in ("/local/complete/paths", "/local/complete/symbols"):
+            # The composer's completions from disk (bridge/complete.py): this dashboard only.
+            from bridge import complete
+            cwd = _worktree_cwd(qs.get("project", [None])[0], (qs.get("branch", [""])[0] or "").strip())
+            if path.endswith("/symbols"):
+                return self._json({"symbols": complete.symbols(cwd) if cwd else []})
+            return self._json({"paths": complete.paths(cwd or os.path.expanduser("~"), qs.get("prefix", [""])[0])})
         if path == "/local/files/tree":
             # EDITOR tab: the whole working tree of the selected branch/worktree
             cwd = _worktree_cwd(qs.get("project", [None])[0],
@@ -715,7 +886,8 @@ class Handler(BaseHTTPRequestHandler):
             if cwd is None:
                 return self._json({"error": "invalid project"}, 400)
             return self._json({"files": git.list_tree(cwd),
-                               "ignored": git.ignored_paths(cwd)})
+                               "ignored": git.ignored_paths(cwd),
+                               "root": cwd})   # absolute, for Show in Finder
         if path == "/local/files/read":
             cwd = _worktree_cwd(qs.get("project", [None])[0],
                                 (qs.get("branch", [""])[0] or "").strip())
@@ -811,9 +983,11 @@ class Handler(BaseHTTPRequestHandler):
             if abs_p is None:
                 return self._json({"error": "invalid project"}, 400)
             slug, answer = rivendell._slug_answer(abs_p)
-            if slug is None:
-                return self._json({"slug": None, "instances": None,
-                                   "projects": [], "tasks": [], "errors": []})
+            # No project links this checkout (or it has no GitHub remote): the
+            # tab shows the owner's tasks across every project instead.
+            if slug is None or (answer.get("instances") and not answer.get("projects")
+                                and not answer.get("errors")):
+                return self._json({"slug": slug, "everywhere": True, **rivendell.everywhere()})
             return self._json({"slug": slug, **answer})
         if path == "/local/rivendell/taskstate":
             # The task tab (docs/superpowers/specs/rivendell-task-check.md): the
@@ -891,6 +1065,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(sysinfo.host_stats())
         if path == "/local/weather":
             return self._json(weather.current())
+        if path == "/local/weather/search":
+            return self._json(weather.search((qs.get("q", [""])[0] or "")[:80]))
         if path == "/local/git/branches":
             abs_p = _abs_project(qs.get("project", [None])[0])
             if abs_p is None:
@@ -899,11 +1075,14 @@ class Handler(BaseHTTPRequestHandler):
                                "current": git.current_branch(abs_p),
                                "default": git.default_branch(abs_p)})
         if path == "/local/git/branchstatus":
-            # The BRANCHES rail tab: every branch and checkout, status only.
+            # The BRANCHES rail tab: every branch and checkout against where it goes.
+            # A PR's base (cached, no gh here) sets that, and your Target ▸ pick beats it.
             abs_p = _abs_project(qs.get("project", [None])[0])
             if abs_p is None:
                 return self._json({"error": "invalid project"}, 400)
-            return self._json(git.branch_status(abs_p))
+            picks = project_config.branch_targets(browser.rel(git.main_checkout(abs_p) or abs_p))
+            return self._json({**git.branch_status(abs_p, {**prstatus.cached_bases(abs_p), **picks}),
+                               "picks": picks})
         if path == "/local/github/prs":
             # The BRANCHES tab's PR chips: one cached read per repo, no pings.
             abs_p = _abs_project(qs.get("project", [None])[0])
@@ -940,6 +1119,17 @@ class Handler(BaseHTTPRequestHandler):
             if base not in refs or head not in refs:
                 return self._json({"error": "invalid ref"}, 400)
             return self._json(git.compare(abs_p, base, head, three_dot))
+        if path in ("/local/team", "/local/team/agent"):
+            # The Agents view (bridge/agent_team.py): a chat's Claude sub-agents as a tree, and one up close.
+            from bridge import agent_team
+            sid = qs.get("session", [""])[0]
+            s = store.get_session(sid) if sid else None
+            if not s or s["chat_id"] != chat:
+                return self._json({"error": "not found"}, 404)
+            if path == "/local/team":
+                return self._json(agent_team.team(s))
+            one = agent_team.agent(s, qs.get("agent", [""])[0])
+            return self._json(one) if one else self._json({"error": "not found"}, 404)
         if path == "/local/agents":
             sid = qs.get("session", [""])[0]
             s = store.get_session(sid) if sid else None
@@ -962,6 +1152,8 @@ class Handler(BaseHTTPRequestHandler):
         # subagent viewer, an unrelated feature this must not shadow.
         if path == "/local/acp/agents":
             return self._json(acp_agents.api_info())
+        if path == "/local/graph/install":
+            return self._json(graphmap.install_state())
         if path == "/local/graph/state":
             abs_p = _abs_project(qs.get("project", [None])[0])
             if abs_p is None:
@@ -1123,6 +1315,8 @@ class Handler(BaseHTTPRequestHandler):
             if abs_p is None:
                 return self._json({"error": "invalid project"}, 400)
             return self._json(graphmap.update_async(abs_p))
+        if path == "/local/graph/install":
+            return self._json(graphmap.install_async())
         if path == "/local/learn/toggle":
             from bridge import learn
             abs_p = _abs_project(body.get("project"))
@@ -1226,6 +1420,12 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json({"error": "slot must be a number"}, 400)
                     getattr(accounts, action)(slot)
                     return self._json({"ok": True})
+                if action == "auto_switch":
+                    slot, on = body.get("slot"), body.get("on")
+                    if not isinstance(slot, int) or not isinstance(on, bool):
+                        return self._json({"error": "slot must be a number and on true or false"}, 400)
+                    accounts.set_auto_switch(slot, on)
+                    return self._json({"ok": True})
             except accounts.NoLogin:
                 return self._json({"error": "No login in ~/.claude to copy. Run "
                                             "`claude /login` in a terminal first."}, 400)
@@ -1271,7 +1471,61 @@ class Handler(BaseHTTPRequestHandler):
                 aifeatures.set_enabled(str(body.get("key") or ""), body.get("enabled"))
             except ValueError as e:
                 return self._json({"error": str(e)}, 400)
+            if body.get("key") in ("router", "ticketruns") and body.get("enabled"):
+                # Switched back on: ticket sets carry on where they stopped (idempotent, as at a restart).
+                from bridge import tickets
+                threading.Thread(target=tickets.boot, daemon=True).start()
             return self._json({"ok": True, "features": aifeatures.state()})
+        if path == "/local/flows":
+            # The FLOWS sheet (the prompt box's gear): one change, a reset or a browser's
+            # presets (bridge/flowsettings.py), answered with every setting.
+            from bridge import flowsettings
+            try:
+                flowsettings.change(body)
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+            if "reset" in body or body.get("value") is True and (body.get("key") == "tickets"
+                                                                  or (body.get("key") == "on" and "flow" not in body)):
+                # FLOWS or a flow's TICKETS back on, or a reset (it re-seeds TICKETS), which is what
+                # tickets._on reads: ticket sets carry on
+                # where they stopped (idempotent, as at a restart).
+                from bridge import tickets
+                threading.Thread(target=tickets.boot, daemon=True).start()
+            return self._json(flowsettings.state())
+        if path == "/local/route":
+            # Asked after every typing pause (bridge/route.py), so anything that goes
+            # wrong, in the body or in the rules, is "no route", never a 500.
+            from bridge import aifeatures, commands, route
+            picked = None
+            if aifeatures.enabled("router"):
+                try:
+                    # The session's own checkout (a worktree's tickets are there), as _server_cwd reads it.
+                    root = _abs_within((body.get("cwd") or "").strip()) or _abs_project(body.get("project"))
+                    from bridge import paths   # the session's own overrides (the FLOW chip) win
+                    sid = str(body.get("session") or "")
+                    flow = paths.get(sid) or {}
+                    own = flow.get("overrides") or {}
+                    off = {k for k in route.SUBS if not own.get(k, aifeatures.enabled(k))}
+                    from bridge import flowsettings   # TICKETS as the session's flow has it, BUILD's with none
+                    ticketruns = flowsettings.tickets(paths.flow_id(flow.get("path")))
+                    picked = route.pick(
+                        body.get("text") or "",
+                        prompts=[p for p in body.get("prompts") or [] if isinstance(p, str)],
+                        last_status=body.get("last_status"), ctx_tokens=body.get("ctx_tokens"),
+                        first=body.get("first") is True,
+                        cmds={c["name"]: c["description"] for c in commands.available(root)},
+                        root=root, off=frozenset(off), ticketruns=ticketruns,
+                        flow_next=paths.pending(sid))
+                except Exception:  # noqa: BLE001 — a body or a rule that fails is just "no route"
+                    pass
+            return self._json({"route": picked})
+        if path == "/local/savers":
+            from bridge import savers
+            try:
+                savers.set_mode(str(body.get("key") or ""), str(body.get("mode") or ""))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+            return self._json({"ok": True, "savers": savers.state()})
         if path == "/local/integrations":
             action = body.get("action")
             if action not in ("install", "remove"):
@@ -1412,6 +1666,110 @@ class Handler(BaseHTTPRequestHandler):
             rules = toolsets.clean(body.get("disabled_tools"))
             store.set_disabled_tools(sid, rules)
             return self._json({"ok": True, "disabled_tools": rules})
+        if path in ("/local/tickets/retry", "/local/tickets/cleanup", "/local/tickets/build", "/local/tickets/approve",
+                    "/local/tickets/decline", "/local/tickets/go"):
+            from bridge import tickets
+            folder = body.get("folder")
+            if not isinstance(folder, str) or folder not in {r.get("folder") for r in tickets.sets()} \
+                    or (store.get_session(tickets.load(folder).get("parent_session") or "") or {}).get("chat_id") != chat:
+                return self._json({"error": "not a registered ticket set"}, 404)
+            if path == "/local/tickets/approve":
+                try:
+                    return self._json({"text": tickets.approve(folder) or "Building."})
+                except Exception as e:  # noqa: BLE001
+                    return self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+            if path == "/local/tickets/decline":   # Not now on a set waiting for Approve & build
+                try:
+                    return self._json({"text": tickets.decline(folder) or "Stopped."})
+                except Exception as e:  # noqa: BLE001
+                    return self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+            if path == "/local/tickets/build":   # a stopped set, once what stopped it is fixed
+                try:
+                    return self._json({"text": tickets.start_build(tickets.load(folder).get("parent_session") or "",
+                                                                   folder) or "Building."})
+                except Exception as e:  # noqa: BLE001
+                    return self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+            if path in ("/local/tickets/retry", "/local/tickets/go"):   # go: a ticket of yours is done
+                n = body.get("n")
+                if not isinstance(n, str) or not n:
+                    return self._json({"error": "n is required"}, 400)
+                try:
+                    if path == "/local/tickets/go":
+                        return self._json({"text": tickets.go(folder, n) or "Done."})
+                    return self._json({"text": tickets.retry(folder, n) or "Started."})
+                except Exception as e:  # noqa: BLE001
+                    return self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+            try:
+                removed, skipped = tickets.cleanup(folder)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": f"{type(e).__name__}: {e}"}, 400)
+            return self._json({"removed": removed, "skipped": skipped})
+        if path in ("/local/flow/settings", "/local/flow/step"):
+            # The prompt box's FLOW chip: this session's overrides of three SETTINGS
+            # switches, and skipping steps (bridge/paths.py). Answers carry the flow.
+            from bridge import paths
+            sid = str(body.get("session") or "")
+            s = store.get_session(sid)
+            if not s or s["chat_id"] != chat or not paths.get(sid):
+                return self._json({"error": "not found"}, 404)
+            if path == "/local/flow/step":
+                err = paths.skip_to(sid, str(body.get("to") or ""))
+                if err:
+                    return self._json({"error": err}, 400)
+            elif body.get("reset"):
+                paths.reset(sid)
+            else:
+                on = body.get("on")
+                try:
+                    paths.set_option(sid, str(body.get("key") or ""), None if on is None else bool(on))
+                except ValueError as e:
+                    return self._json({"error": str(e)}, 400)
+            return self._json({"ok": True, "flow": paths.get(sid)})
+        if path in ("/local/flow/set", "/local/flow/done", "/local/flow/auto", "/local/flow/review"):
+            # The goals MCP's SetPath / StepDone (bridge/goal_mcp.py), and the dashboard's
+            # auto switch (bridge/paths.py) and Skip on a REVIEW (bridge/tickets.py).
+            # Answers to Claude are text.
+            from bridge import paths
+            if path in ("/local/flow/auto", "/local/flow/review"):
+                sid = str(body.get("session") or "")
+                s = store.get_session(sid)
+                if not s or s["chat_id"] != chat:
+                    return self._json({"error": "not found"}, 404)
+                if path == "/local/flow/review":
+                    from bridge import tickets
+                    return self._json({"ok": tickets.skip_review(sid)})
+                paths.set_auto(sid, bool(body.get("on")))
+                return self._json({"ok": True})
+            s = store.get_by_claude_session_id(str(body.get("claude_session_id") or ""))
+            if not s or s["chat_id"] != chat:
+                return self._json({"text": "No session is bound to this tool, so it can't set a path."})
+            if path == "/local/flow/set":
+                p = str(body.get("path") or "")
+                from bridge import flowsettings
+                name = paths.OLD.get(p, p).removesuffix("-here")
+                if not paths.on():
+                    return self._json({"text": "Path not recorded: FLOWS is off in the prompt box's gear. Start nothing."})
+                if name in flowsettings.FLOWS and not flowsettings.flow_on(name):
+                    return self._json({"text": f"Path not recorded: {name.upper()} is switched off in FLOWS. "
+                                               "Pick another path, or start nothing."})
+                try:
+                    f = paths.claude_path(s["id"], p, str(body.get("why") or ""), str(body.get("skill") or "") or None,
+                                          store.running_turn_id(s["id"]) or store.latest_turn_id(s["id"]) or "")
+                except ValueError as e:   # an HTTP error would reach Claude as "Could not reach the bridge"
+                    return self._json({"text": f"Path not recorded: {e}."})
+                if (f["next"] or {}).get("station") == "build-here":   # BUILD with its grill off
+                    return self._json({"text": f"Path recorded: {f['path']}. End your turn now: the build "
+                                               "starts on its own branch when it ends."})
+                return self._json({"text": f"Path recorded: {f['path']}."})   # an old name: its flow's
+            if not paths.get(s["id"]):
+                return self._json({"text": "No path is running in this session."})
+            turn = store.running_turn_id(s["id"]) or store.latest_turn_id(s["id"]) or ""
+            choice = body.get("choice")
+            nxt = paths.step_done(s["id"], turn, choice if choice in ("here", "tickets") else None,
+                                  str(body.get("branch") or ""))
+            return self._json({"text": f"Step done. Next: {nxt}, which starts when this turn ends. "
+                               f"Make this your last tool call: {nxt} does its own work."
+                               if nxt else "Step done. That was the last step."})
         if path == "/local/wait":
             # The goals MCP's WaitForSession (bridge/goal_mcp.py). Every answer,
             # a refusal too, is text for Claude.
@@ -1465,19 +1823,57 @@ class Handler(BaseHTTPRequestHandler):
             if act not in ("resume", "cancel"):
                 return self._json({"error": "action is resume or cancel"}, 400)
             return self._json({"ok": waits.resume(sid) if act == "resume" else waits.drop(sid)})
-        if path.startswith("/local/sessions/") and path.endswith("/goal"):
+        if path.startswith("/local/council/"):
+            from bridge import council
+            sid = path[len("/local/council/"):]
+            if sid == "settings":
+                s = council.save_settings(body)
+                return self._json({**s, "accounts": council.candidates(s["reviewers"])})
+            s = store.get_session(sid)
+            if not s or s["chat_id"] != chat:
+                return self._json({"error": "no such session"}, 404)
+            act = body.get("action")
+            try:
+                if act == "run":
+                    cwd = team._session_dir(s)  # noqa: SLF001 - as the GET above
+                    if not os.path.isdir(cwd):
+                        return self._json({"error": "the session has no checkout"}, 400)
+                    return self._json(council.start(s, cwd))
+                return self._json(council.act(s, act, body.get("key") or ""))
+            except ValueError as e:     # running | busy | nothing | action
+                return self._json({"error": str(e)}, 409)
+        if path.startswith("/local/sessions/") and path.endswith(("/goal", "/goal/act")):
             from bridge import goals
-            sid = path[len("/local/sessions/"):-len("/goal")]
+            act_path = path.endswith("/goal/act")
+            sid = path[len("/local/sessions/"):-len("/goal/act" if act_path else "/goal")]
             s = store.get_session(sid)
             if not s or s["chat_id"] != chat:
                 return self._json({"error": "not found"}, 404)
-            objective = (body.get("objective") or "").strip()[:2000]
-            if objective and profiles.claude_only_refusal(s, "goal"):   # clearing one is always fine
+            if not act_path:
+                # /goal: an objective sets it, a blank one clears it (goals.set_by_user,
+                # as on every surface).
+                goal, refusal = goals.set_by_user(s, body.get("objective") or "")
+                if refusal:
+                    return self._json({"error": refusal}, 409)
+                return self._json({"ok": True, "goal": goals.brief(goal)})
+            # The goal sheet's buttons (GoalPill). Their own path, so a bridge
+            # older than the dashboard 404s instead of reading {action} as a
+            # blank /goal and clearing it.
+            act = body.get("action")
+            if act == "keep" and profiles.claude_only_refusal(s, "goal"):
                 return self._json({"error": profiles.claude_only_refusal(s, "goal")}, 409)
-            if not objective:
-                goals.clear(sid)          # empty objective = abandon the goal
-                return self._json({"ok": True, "goal": None})
-            return self._json({"ok": True, "goal": goals.create(sid, objective)})
+            if act == "done":
+                goal = goals.mark(sid, goals.COMPLETE, "Marked done by you.")
+            elif act == "keep":                 # Keep going, on a met, stalled or capped goal
+                goal = goals.rearm(sid)
+                goals.kick(sid)
+            elif act == "edit":
+                goal = goals.edit(sid, (body.get("objective") or "")[:2000])
+            else:
+                return self._json({"error": "action is done, keep or edit"}, 400)
+            if not goal:
+                return self._json({"error": "this session has no goal"}, 409)
+            return self._json({"ok": True, "goal": goals.brief(goals.get(sid))})
         if path.startswith("/local/sessions/") and path.endswith("/lifecycle"):
             sid = path[len("/local/sessions/"):-len("/lifecycle")]
             s = store.get_session(sid)
@@ -1534,6 +1930,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": team.refusal(s["origin"])}, 409)
             copy = store.duplicate(sid)
             return self._json({"ok": True, "session": _session_brief(copy)})
+        if path.startswith("/local/sessions/") and path.endswith("/move"):
+            # MOVE TO PROJECT: a session whose project folder is gone (browser.gone) into one of
+            # yours, its folder and the paths in its transcript with it (store.relocate).
+            sid = path[len("/local/sessions/"):-len("/move")]
+            s = store.get_session(sid)
+            if not s or s["chat_id"] != chat:
+                return self._json({"error": "not found"}, 404)
+            if team.refusal(s["origin"]):
+                return self._json({"error": team.refusal(s["origin"])}, 409)
+            dest = _abs_project(body.get("project")) if isinstance(body.get("project"), str) else None
+            if not dest or not browser.project_exists(browser.rel(dest)):
+                return self._json({"error": "That isn't one of your projects."}, 400)
+            if state.is_running(sid):
+                return self._json({"error": "It has a turn running: move it when that ends."}, 409)
+            store.relocate(sid, dest, project=browser.rel(dest))
+            return self._json({"ok": True, "session": _session_brief(store.get_session(sid))})
         if path.startswith("/local/sessions/") and path.endswith("/relocate"):
             sid = path[len("/local/sessions/"):-len("/relocate")]
             s = store.get_session(sid)
@@ -1595,6 +2007,29 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "invalid project"}, 400)
             ok, output = git.pull(cwd)
             return self._json({"ok": ok, "output": output})
+        if path == "/local/git/update-base":
+            # The ledger's Update: the base merged into this branch, as Merge does
+            # with the upstream (dry run first; a clash changes nothing).
+            cwd = _worktree_cwd(body.get("project"), (body.get("branch") or "").strip())
+            ref = git.base_ref(cwd, (body.get("base") or "").strip()) if cwd else ""
+            if not ref:
+                return self._json({"error": "invalid project or base"}, 400)
+            ok, output, clash = git.merge_upstream(cwd, ref)
+            return self._json({"ok": ok, "output": output, "clash": clash})
+        if path == "/local/git/undo-commit":
+            cwd = _worktree_cwd(body.get("project"), (body.get("branch") or "").strip())
+            if cwd is None:
+                return self._json({"error": "invalid project"}, 400)
+            ok, output = git.undo_commit(cwd)
+            return self._json({"ok": ok, "output": output})
+        if path == "/local/git/merge-upstream":
+            # The GIT tab's Merge on a diverged branch: a merge commit, never a
+            # rebase; a clash changes nothing and names its files.
+            cwd = _worktree_cwd(body.get("project"), (body.get("branch") or "").strip())
+            if cwd is None:
+                return self._json({"error": "invalid project"}, 400)
+            ok, output, clash = git.merge_upstream(cwd)
+            return self._json({"ok": ok, "output": output, "clash": clash})
         if path == "/local/update":
             # pull the platform's new commits; on success the bridge restarts
             # shortly after this response flushes.
@@ -1670,6 +2105,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 return self._json({"error": "unknown op"}, 400)
             return self._json({"ok": ok, "path": output} if ok else {"ok": False, "error": output})
+        if path == "/local/files/reveal":
+            # Right-click › Show in Finder: a file the dashboard shows, in the OS file manager
+            real = _reveal_target(body.get("path"))
+            if real is None:
+                return self._json({"error": "no such file in the workspace"}, 404)
+            subprocess.Popen(_reveal_argv(real), start_new_session=True, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return self._json({"ok": True})
         if path == "/local/github/issue":
             abs_p = _abs_project(body.get("project"))
             if abs_p is None:
@@ -1873,9 +2316,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(e)}, 400)
             return self._json({"ok": True, "share": share})
         if path in ("/local/rivendell/team/continue", "/local/rivendell/team/clone", "/local/rivendell/team/install",
-                    "/local/rivendell/team/unpack", "/local/rivendell/team/state"):
+                    "/local/rivendell/team/unpack", "/local/rivendell/team/state", "/local/rivendell/team/adopt"):
             share_id = str(body.get("id") or "")
             try:
+                if path.endswith("/adopt"):      # CONTINUE HERE: their session as yours, its history on screen
+                    sid = team.adopt(share_id, str(body.get("project") or ""),
+                                     body.get("cwd") if isinstance(body.get("cwd"), str) else None)
+                    return self._json({"ok": True, "session": _session_brief(store.get_session(sid))})
                 if path.endswith("/continue"):
                     return self._json(team.continue_plan(share_id, into="yours" if body.get("into") == "yours" else None,
                                                           project=body.get("project") if isinstance(body.get("project"), str) else None))
@@ -1953,6 +2400,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "invalid project"}, 400)
             ok, output = git.checkout(abs_p, (body.get("ref") or "").strip())
             return self._json({"ok": ok, "output": output})
+        if path == "/local/git/branch/target":
+            # Target ▸: the branch this one goes into ("" none, null back to the guess),
+            # kept per repo, so every worktree of it agrees.
+            abs_p = _abs_project(body.get("project"))
+            if abs_p is None:
+                return self._json({"error": "invalid project"}, 400)
+            branch, target = (body.get("branch") or "").strip(), body.get("target")
+            names = set(git.branches(abs_p))
+            if branch not in names or (target is not None and not isinstance(target, str)):
+                return self._json({"error": "unknown branch"}, 400)
+            target = target.strip() if isinstance(target, str) else None
+            if target and (target == branch or target not in names):
+                return self._json({"error": "unknown target"}, 400)
+            rel = browser.rel(git.main_checkout(abs_p) or abs_p)
+            return self._json({"targets": project_config.set_branch_target(rel, branch, target)})
         if path == "/local/git/branch/delete":
             abs_p = _abs_project(body.get("project"))
             if abs_p is None:
@@ -1981,10 +2443,14 @@ class Handler(BaseHTTPRequestHandler):
             wt = os.path.realpath((body.get("path") or "").strip())
             if not browser.within_base(wt):
                 return self._json({"error": "invalid path"}, 400)
+            if store.running_in(wt):
+                return self._json({"ok": False, "output": "A session is working in that worktree, so it stays."})
+            # archive: its git-ignored scratch (.mystical, .superpowers) moves to the repo's archive first
+            kept = git.archive_scratch(abs_p, wt) if body.get("archive") else ""
             ok, output = git.worktree_remove(abs_p, wt)
             if ok and body.get("delete_branch") and body.get("branch"):
                 git.delete_branch(abs_p, (body.get("branch") or "").strip(), force=True)
-            return self._json({"ok": ok, "output": output})
+            return self._json({"ok": ok, "output": output, "kept": kept})
         if path == "/local/github/pr":
             abs_p = _abs_project(body.get("project"))
             if abs_p is None:
@@ -1996,10 +2462,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": ok, **info})
         if path == "/local/projects/create":
             return self._create_project(chat, body)
-        if path == "/local/weather/city":
-            return self._json(weather.set_location((body.get("city") or "")[:120]))
+        if path == "/local/roots/remove":
+            # Stop allowing a folder outside BASE_PATH. Nothing on disk changes.
+            # Named by its project key, the way every other project route is.
+            from bridge import roots
+            rel = str(body.get("project") or "")
+            ok = roots.remove(os.path.join(config.BASE_PATH, rel.lstrip("/"))) if rel else False
+            return self._json({"ok": ok, "roots": roots.listing()})
         if path == "/local/weather/unit":
             return self._json(weather.set_unit((body.get("unit") or "")[:20]))
+        if path == "/local/weather/place":
+            return self._json(weather.set_place(body.get("lat"), body.get("lon"), body.get("name")))
         if path == "/local/skills/check":
             # Network sweep (one request per installed catalog skill), so it is
             # a POST behind the token rather than a free GET.
@@ -2057,10 +2530,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "path": existing,
                                "rel": browser.rel(existing), "branch": branch,
                                "output": f"branch already checked out at {existing}"})
-        wt = base = _worktree_path(project, branch)
-        n = 2
-        while os.path.isdir(wt):     # taken by another branch — pick a free path
-            wt, n = f"{base}-{n}", n + 1
+        wt = git.worktree_path_for(project, branch, free=True)   # taken by another branch → -2, -3
         rel = browser.rel(wt)
         os.makedirs(os.path.dirname(wt), exist_ok=True)
         parent = (body.get("parent") or git.current_branch(abs_p) or "main").strip()
@@ -2068,19 +2538,12 @@ class Handler(BaseHTTPRequestHandler):
         ok, output = git.worktree_add(abs_p, wt, branch, parent, create=bool(create))
         if not ok:
             return self._json({"ok": False, "output": output})
-        # git checks out tracked files only, so everything git-ignored is missing —
-        # .env above all, without which this repo's own bin/mystical dies on every
-        # command. Copying it is what the worktree skill tells a human to do by
-        # hand; doing it here is why a worktree session isn't born broken.
+        # .env above all is missing from a fresh worktree; without it this repo's own
+        # bin/mystical dies on every command, so a worktree session isn't born broken.
         # ponytail: .env only. node_modules is a build concern — symlink the launch
         # checkout's if you must build inside the worktree.
-        src_env = os.path.join(abs_p, ".env")
-        dst_env = os.path.join(wt, ".env")
-        if os.path.isfile(src_env) and not os.path.exists(dst_env):
-            try:
-                shutil.copy2(src_env, dst_env)
-            except OSError as e:
-                output = f"{output}\nworktree created, .env not copied: {e}".strip()
+        if (err := git.copy_env(abs_p, wt)):
+            output = f"{output}\n{err}".strip()
         return self._json({"ok": True, "path": wt, "rel": rel, "branch": branch,
                            "output": output})
 
@@ -2131,24 +2594,19 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": ok, "output": output, "message": message})
 
     def _create_project(self, chat, body):
-        """Scaffold a new git repo under BASE_PATH and start a session on it with
-        the user's first instruction streaming in immediately."""
-        name = _slug((body.get("name") or "").strip().lower())
-        prompt = (body.get("prompt") or "").strip()
-        if not name or name.startswith("."):
-            return self._json({"error": "invalid name"}, 400)
-        dest = os.path.realpath(os.path.join(config.BASE_PATH, name))
-        if not browser.within_base(dest):
-            return self._json({"error": "invalid name"}, 400)
-        if os.path.exists(dest):
-            return self._json({"error": "already exists"}, 409)
+        """NEW PROJECT: a fresh repo, a folder you name, a clone or a chat
+        (bridge/newproject.py), then a session on it with your first instruction
+        streaming in. A step that needs your yes comes back as `confirm`, with
+        nothing done."""
+        from bridge import newproject
         try:
-            os.makedirs(dest)
-        except OSError as e:
-            return self._json({"error": str(e)}, 500)
-        git._run(dest, "init")
-        git._run(dest, "commit", "--allow-empty", "-m", "init")
-        rel = browser.rel(dest)
+            got = newproject.prepare(body)
+        except newproject.Refused as e:
+            return self._json({"error": str(e)}, e.code)
+        if "confirm" in got:
+            return self._json(got)
+        rel, dest = got["rel"], got["cwd"]
+        prompt = (body.get("prompt") or "").strip()
         # Bound like /local/sessions, but keeping the seeded mode: its first
         # turn starts here, with no picks from a composer to fill one in.
         s = store.create_session(chat, rel, origin="dashboard", cwd=dest,
@@ -2159,9 +2617,9 @@ class Handler(BaseHTTPRequestHandler):
             job = runner.start_streaming_job(chat, prompt, [], dest,
                                              session_id=s["id"], origin="dashboard")
             job_id = job.id if job else None
-        return self._json({"project": {"rel": rel, "name": name},
+        return self._json({"project": {"rel": rel, "name": got["name"]},
                            "session": _session_brief(store.get_session(s["id"])),
-                           "job_id": job_id})
+                           "job_id": job_id, "notes": got["notes"]})
 
     def _run(self, chat, body):
         prompt = (body.get("prompt") or "").strip()
@@ -2193,6 +2651,10 @@ class Handler(BaseHTTPRequestHandler):
         # Hold a prompt that doesn't belong in the session it would resume; the
         # client re-sends with force=true (or against a fresh session). Before
         # _save_images so a held prompt writes nothing.
+        from bridge import paths as flows   # `paths` below is the image paths
+        flow = body.get("flow") or None
+        if flow and (why := flows.flow_refusal(str(flow), str(body.get("by") or ""), prompt, agent)):
+            return self._json({"error": why}, 400)
         held = relevance.gate(chat, project_path, session_id, prompt,
                               bool(body.get("force")))
         if held:
@@ -2204,13 +2666,18 @@ class Handler(BaseHTTPRequestHandler):
             runner._cleanup_uploads(job_id)
             return self._json({"error": str(e)}, 413)
         native_sync.catch_up_id(session_id, wait=True)       # fork: native catch-up, before our turn lands
+        # Esc took an auto-applied skill out of this prompt: tell the run there is no path.
+        # After the gate and the empty check, so neither sees the prefix.
+        if prompt and body.get("no_path") is True and not flow and not prompt.startswith("/"):
+            prompt = flows.NO_PATH + prompt
         job = runner.start_streaming_job(chat, prompt, paths, project_path, job_id=job_id,
                                          model=model, effort=effort,
                                          permission_mode=permission_mode,
                                          session_id=session_id, profile_id=profile_id,
                                          origin="dashboard",
                                          ponytail=ponytail, account_slot=account_slot,
-                                         runtime=runtime)
+                                         runtime=runtime, flow=flow,
+                                         flow_by=body.get("by") if flow else None)
         if job is None:
             runner._cleanup_uploads(job_id)
             return self._json({"error": "busy"}, 409)
@@ -2220,8 +2687,10 @@ class Handler(BaseHTTPRequestHandler):
         # save_pick, so a pick that matches the bound profile follows it
         # instead of pinning an override.
         s = store.get_session(job.store_session_id) or {"id": job.store_session_id}
-        for field, value in (("model", model), ("permission_mode", permission_mode),
-                             ("effort", effort)):
+        # pick_once: a kind's preset is for that prompt only; the session's own picks change only by hand.
+        for field, value in (() if body.get("pick_once") is True else
+                             (("model", model), ("permission_mode", permission_mode),
+                              ("effort", effort))):
             profiles.save_pick(s, field, value)
             s = store.get_session(job.store_session_id) or s
         self._json({"job_id": job.id, "session_id": job.store_session_id})
@@ -2285,9 +2754,21 @@ class Handler(BaseHTTPRequestHandler):
             images = body.get("images") or []
             if not isinstance(images, list) or len(images) > config.UPLOAD_MAX_COUNT:
                 return self._json({"error": f"too many images (max {config.UPLOAD_MAX_COUNT})"}, 413)
-            # No model or mode: a queued prompt runs on the session's when it
-            # starts, so a pick made while it waits still applies.
+            # A plain prompt takes the session's model and mode when it starts, so a
+            # pick made while it waits still applies; a kind prompt carries its own.
             _ok, _model, effort = normalize_model_effort(None, body.get("effort"))
+            model = permission_mode = None
+            if body.get("model") or body.get("permission_mode"):
+                err, model, permission_mode, _e = profiles.run_values(
+                    body.get("model"), body.get("permission_mode"), None)
+                if err:
+                    return self._json({"error": err}, 400)
+            from bridge import paths as flows   # `paths` below is the image paths
+            flow = body.get("flow") or None
+            if flow and (why := flows.flow_refusal(
+                    str(flow), str(body.get("by") or ""), prompt,
+                    profiles.agent_for(store.get_session(sid)))):
+                return self._json({"error": why}, 400)
             agent = (body.get("agent") or "").strip()
             try:
                 from bridge import ladder
@@ -2306,11 +2787,11 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 width = 0
             item_id = queue_manager.enqueue(
-                sid, text=(text or prompt), prompt=prompt, images=paths, model=None,
-                effort=effort, permission_mode=None, width=width, sel=sel,
+                sid, text=(text or prompt), prompt=prompt, images=paths, model=model,
+                effort=effort, permission_mode=permission_mode, width=width, sel=sel,
                 surface=(body.get("surface") or "dashboard"), chat_id=chat,
                 project=_abs_project(body.get("project")), run_job_id=run_job_id,
-                agent=agent or None)
+                agent=agent or None, flow=flow, flow_by=body.get("by") if flow else None)
             return self._json({"item_id": item_id, **queue_manager.snapshot(sid)})
         if not sid:
             return self._json({"error": "session required"}, 400)
@@ -2727,6 +3208,10 @@ _httpd: ThreadingHTTPServer | None = None
 
 def start() -> ThreadingHTTPServer:
     global _httpd
+    from bridge import newproject
+    newproject.ensure_general()
+    from bridge import site_browser
+    site_browser.serve_if_used()      # a Mystical browser left open keeps reaching its chats
     _httpd = ThreadingHTTPServer((config.DASH_HOST, config.DASH_PORT), Handler)
     Thread(target=_httpd.serve_forever, daemon=True).start()
     return _httpd

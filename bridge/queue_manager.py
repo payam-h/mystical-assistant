@@ -56,6 +56,10 @@ class QueueItem:
     created: float = 0.0
     started: "float | None" = None
     agent: "str | None" = None      # who runs it (ladder.resolve_agent vocabulary)
+    flow: "str | None" = None       # the prompt box's flow, started when this prompt runs (paths.start_flow)
+    flow_by: "str | None" = None    # "you" | "guess"
+    sent_by: "str | None" = None    # who sent it when you didn't type it (store.start_turn)
+    sent_why: "str | None" = None
     # A Rivendell queue-mode batch's turns: what the row says, where it links,
     # and the "<instance id>:<request id>" its worker finds them by (also after
     # a restart — these persist with the item).
@@ -91,6 +95,7 @@ class PreviewQueue:
         self._path = persist_path
         self._lock = threading.RLock()
         self._q: dict = {}                     # sid -> {"items": [...], "paused": bool, "rev": int}
+        self._cut: dict = {}                   # turn id a restart cut -> the item that sent it (adopt)
         if persist_path:
             self._load()
 
@@ -152,7 +157,8 @@ class PreviewQueue:
 
     def enqueue(self, sid: str, *, text, prompt, images, model, effort,
                 permission_mode, width, sel, surface, chat_id, project,
-                run_job_id=None, agent=None, label=None, link=None, ref=None) -> str:
+                run_job_id=None, agent=None, label=None, link=None, ref=None,
+                flow=None, flow_by=None, sent_by=None, sent_why=None) -> str:
         with self._lock:
             b = self._bucket(sid)
             item = QueueItem(
@@ -160,7 +166,8 @@ class PreviewQueue:
                 text=text, prompt=prompt, images=list(images or []), model=model,
                 effort=effort, permission_mode=permission_mode, width=width,
                 sel=list(sel or []), surface=surface, run_job_id=run_job_id,
-                agent=agent, label=label, link=link, ref=ref, created=time.time())
+                agent=agent, label=label, link=link, ref=ref, created=time.time(),
+                flow=flow, flow_by=flow_by, sent_by=sent_by, sent_why=sent_why)
             b["items"].append(item)
             self._advance(sid, b)
             self._touch(sid, b)
@@ -185,6 +192,20 @@ class PreviewQueue:
                 it.elapsed = elapsed
             self._advance(sid, b)
             self._touch(sid, b)
+
+    def adopt(self, sid: str, turn_id: str, job_id: str) -> bool:
+        """Boot recovery carried on `turn_id`, the turn a restart cut, as `job_id`.
+        The item that sent that turn follows the new run instead of being sent
+        again when it ends: one prompt, one turn."""
+        with self._lock:
+            b = self._q.get(sid)
+            item_id = self._cut.pop(turn_id, None)
+            it = next((x for x in b["items"] if x.id == item_id and x.status == "queued"), None) if b else None
+            if it is None:
+                return False
+            it.status, it.job_id, it.started = "running", job_id, time.time()
+            self._touch(sid, b)
+            return True
 
     def kick(self) -> None:
         """Boot: start what a restart left queued. A prompt enqueued while the
@@ -404,7 +425,10 @@ class PreviewQueue:
                 except TypeError:
                     continue  # stale schema — drop the item, keep the rest
                 if it.status == "running":
-                    # The job died with the server; re-queue so it runs again.
+                    # The job died with the server; re-queue so it runs again,
+                    # unless boot recovery carries its turn on (adopt).
+                    if it.job_id:
+                        self._cut[it.job_id] = it.id
                     it.status = "queued"
                     it.job_id = None
                     it.started = None
@@ -440,7 +464,8 @@ def _default_run_fn(item: QueueItem):
         project=item.project, job_id=item.run_job_id, model=item.model,
         effort=item.effort, permission_mode=item.permission_mode,
         session_id=item.session_id, origin="preview-queue",
-        account_slot=slot, runtime=runtime)
+        account_slot=slot, runtime=runtime, flow=item.flow, flow_by=item.flow_by,
+        sent_by=item.sent_by, sent_why=item.sent_why)
     return job.id if job else None
 
 
@@ -494,6 +519,10 @@ def sessions():
 
 def owns_session(sid):
     return get().owns_session(sid)
+
+
+def adopt(sid, turn_id, job_id):
+    return get().adopt(sid, turn_id, job_id)
 
 
 def pause(sid):

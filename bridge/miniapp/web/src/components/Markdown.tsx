@@ -1,10 +1,12 @@
-import { cloneElement, isValidElement, memo, useMemo, useState, type ReactNode } from "react";
+import { memo, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, Copy } from "lucide-react";
 import { addressFromSrc, addressKind } from "../lib/embeds";
 import { selectionMd } from "../lib/selmd";
+import { ADMONITION_RE, stripMarker } from "../lib/admonition";
 import { widgetLang, widgetValue } from "../lib/widgetblock";
+import { mermaidFlow } from "../lib/mermaid";
 import type { ToolStyle } from "../lib/toolwidget";
 import { ChatImage } from "./ChatImage";
 import { useExperimental } from "../lib/multi";
@@ -12,6 +14,7 @@ import { stripViews } from "../lib/dataview";
 import { refOf, remarkFileRefs } from "../lib/refs";
 import { FileRef, RefImages } from "./FileRef";
 import { BlockWidget, drawWidget } from "./ResultWidgets";
+import { Flow } from "./DataView";
 
 // Renders assistant text as GitHub-flavored Markdown. Styling lives in the
 // `.md` block in index.css. Links open in a new tab.
@@ -74,26 +77,10 @@ const ADMONITIONS: Record<string, { label: string; color: string }> = {
   warning: { label: "WARNING", color: "var(--warn)" },
   caution: { label: "CAUTION", color: "var(--err)" },
 };
-const ADMONITION_RE = /^\s*\[!(note|tip|important|warning|caution)\]\s*\n?/i;
 
 /** A bold that is really a label: short, one line, ending in a colon. Mirrors
  *  the dashboard's rule — the same reply has to read the same on both. */
 const LEAD_RE = /^[^\n]{2,24}:$/;
-
-/** The same tree with the `[!NOTE]` marker cut out of its first text node. */
-function stripMarker(node: unknown): unknown {
-  if (typeof node === "string") return node.replace(ADMONITION_RE, "");
-  if (Array.isArray(node)) {
-    const i = node.findIndex((n) => n !== null && n !== undefined && n !== "");
-    return i < 0 ? node : node.map((n, k) => (k === i ? stripMarker(n) : n));
-  }
-  if (isValidElement(node)) {
-    const props = node.props as { children?: unknown };
-    if (props.children === undefined) return node;
-    return cloneElement(node, undefined, stripMarker(props.children) as ReactNode);
-  }
-  return node;
-}
 
 /** An image in an agent's text. Local ones draw through the file route. A remote one
  *  becomes a link, so an answer can't load a tracking pixel by being read; only your own
@@ -209,6 +196,12 @@ export const Markdown = memo(function Markdown({ children, className = "", toolS
             // ```widget:table — the tag arrives verbatim from remark.
             const lang = /language-([\w:+-]+)/.exec(el?.props?.className ?? "")?.[1] ?? "";
             const code = textOf(el?.props?.children).replace(/\n$/, "");
+            // A Mermaid flowchart, drawn as show_data's flow (lib/mermaid). One it can't
+            // read, or another kind of diagram, stays the code block below.
+            if (lang.toLowerCase() === "mermaid") {
+              const flow = mermaidFlow(code);
+              if (flow) return <div className="dv" data-view="diagram"><Flow ev={flow} full={false} /></div>;
+            }
             // A typed block the model drew on purpose (lib/widgetblock). Every
             // step here can decline — an unknown type, a body still streaming
             // in, a payload that isn't the shape its type promised — and each

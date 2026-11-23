@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "check": "tsc -b && node --import ./tools/strict-assert.mjs --test 'src/**/*.check.ts' 'tools/*.check.mjs'",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.20.4",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/lang-markdown": "^6.5.2",
     "@codemirror/language": "^6.12.4",

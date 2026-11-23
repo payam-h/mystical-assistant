@@ -96,9 +96,19 @@ def test_branch_status_endpoint(monkeypatch):
     name, d = _mkproject("proj_branches")
     h, box = _handler()
     from bridge import git
-    monkeypatch.setattr(git, "branch_status", lambda cwd: {"base": "main", "branches": [], "cwd": cwd})
+    monkeypatch.setattr(git, "branch_status", lambda cwd, targets=None: {"base": "main", "branches": [], "cwd": cwd})
     h._get_api("/local/git/branchstatus", {"project": [name]})
     assert box["code"] == 200 and box["obj"]["base"] == "main"
     assert os.path.realpath(box["obj"]["cwd"]) == os.path.realpath(d)
     h._get_api("/local/git/branchstatus", {"project": ["../../etc"]})
     assert box["code"] == 400
+
+
+def test_graph_install_endpoints(monkeypatch):
+    monkeypatch.setattr(graphmap, "install_state", lambda: {"installed": False})
+    monkeypatch.setattr(graphmap, "install_async", lambda: {"installed": False, "state": "running"})
+    h, box = _handler()
+    h._get_api("/local/graph/install", {})
+    assert box["code"] == 200 and box["obj"] == {"installed": False}
+    h._post_api("/local/graph/install", {})
+    assert box["code"] == 200 and box["obj"]["state"] == "running"

@@ -384,6 +384,8 @@ class Turn:
             job.todos = _mask([{"content": e.get("content"), "status": e.get("status"),
                                 "activeForm": e.get("content")}
                                for e in u.get("entries") or []], self.hide)
+            from bridge import chatplan     # an ACP agent's plan, mirrored into the Work list
+            chatplan.from_todos(job.store_session_id, job.todos, job)
         elif kind == "usage_update":
             if isinstance(u.get("used"), int):
                 job.ctx_tokens = u["used"]
@@ -640,7 +642,10 @@ def run_turn(job, *, argv, env, cwd, label, login_hint, text, agent_session_id, 
              mcp_servers=()) -> None:
     """One prompt on a fresh agent process. Never raises: the job ends done,
     stopped or error, with every card answered and the process group gone.
-    auth_method: the ACP authenticate id for a key account, None to skip."""
+    auth_method: the ACP authenticate id for a key account, None to skip.
+    opts["must"]: the opts keys whose knob must apply; one the live session
+    won't take fails the turn before the prompt goes, where any other knob
+    falls back to the agent's default (a council reviewer's read-only mode)."""
     turn = job.turn = Turn(job, label, _secrets(env))
     conn = None
     try:
@@ -662,8 +667,10 @@ def run_turn(job, *, argv, env, cwd, label, login_hint, text, agent_session_id, 
             except Exception as e:  # noqa: BLE001 - a picker cache never fails a turn
                 print(f"[acp] options cache: {e!r}", file=sys.stderr)
         for knob, key in (("model", "model"), ("mode", "permission_mode"), ("effort", "effort")):
-            if opts.get(key):
-                turn.apply(conn, sid, knob, opts[key], 30)
+            if (opts.get(key) and not turn.apply(conn, sid, knob, opts[key], 30)
+                    and key in (opts.get("must") or ())):
+                return _fail(job, f"{label} wouldn't switch to {knob} {opts[key]!r}, "
+                                  "so the prompt wasn't sent.")
         # Live switches (set_options) wait for turn.sid: by now the options are
         # known and this turn's own picks are in, so none overwrites a newer one.
         turn.sid = job.agent_session_id = sid

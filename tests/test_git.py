@@ -246,6 +246,34 @@ def test_upstream_distinguishes_unpushed_from_synced():
     assert st["ahead"] == 1 and st["behind"] == 0, st
 
 
+def test_upstream_that_origin_does_not_have_reads_as_unpushed():
+    """A branch can name an upstream that isn't on the remote: config copied
+    from another clone, or a branch deleted there. Porcelain v2 still prints
+    `# branch.upstream`; only a remote ref that exists adds `# branch.ab`.
+    The Git tab said such a branch was on origin when it never was."""
+    bare = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "--bare", "-q", bare], check=True)
+    d = _mkrepo()
+    _write(d, "a.txt", "one\n")
+    _run(d, "add", "-A")
+    _run(d, "commit", "-qm", "init")
+    branch = g.current_branch(d)
+    _run(d, "remote", "add", "origin", bare)
+    # configured, never pushed
+    _run(d, "config", f"branch.{branch}.remote", "origin")
+    _run(d, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")
+    st = g.status(d)
+    assert st["upstream"] == "" and "unpublished" in st, st
+    assert g.badge(d)["upstream"] == ""
+    # pushed, then deleted on the remote (a side branch: a bare remote won't
+    # delete its default one): its tracking ref goes with it
+    _run(d, "checkout", "-q", "-b", "gone")
+    _run(d, "push", "-q", "-u", "origin", "gone")
+    assert g.status(d)["upstream"] == "origin/gone"
+    _run(d, "push", "-q", "origin", "--delete", "gone")
+    assert g.status(d)["upstream"] == ""
+
+
 def _published():
     """A repo whose branch is pushed to a bare origin: (bare, repo, branch)."""
     bare = tempfile.mkdtemp()
@@ -283,6 +311,117 @@ def test_fetch_says_why_it_failed():
     _run(d, "remote", "add", "origin", os.path.join(tempfile.mkdtemp(), "gone"))
     ok, out = g.fetch(d)
     assert ok is False and out, out
+
+
+def test_fetch_never_waits_on_a_password_prompt(monkeypatch):
+    """Auto-fetch runs it unasked: a remote that wants a password must fail, not prompt."""
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw.get("env") or {})
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(g.subprocess, "run", fake_run)
+    assert g.fetch(tempfile.mkdtemp())[0] is True
+    assert seen.get("GIT_TERMINAL_PROMPT") == "0"
+
+
+def _diverged(clash):
+    """A clone that has a commit origin lacks while origin got one it lacks,
+    fetched: the GIT tab's diverged state. `clash` makes both sides edit a.txt."""
+    bare, a, branch = _published()
+    b = tempfile.mkdtemp()
+    subprocess.run(["git", "clone", "-q", "-b", branch, bare, b], check=True)
+    for k, v in (("user.email", "t@example.com"), ("user.name", "Tester"), ("commit.gpgsign", "false")):
+        _run(b, "config", k, v)
+    _write(a, "a.txt", "theirs\n")
+    g.commit(a, "theirs")
+    _run(a, "push", "-q")
+    _write(b, "a.txt" if clash else "b.txt", "mine\n")
+    g.commit(b, "mine")
+    _run(b, "fetch", "-q")
+    st = g.status(b)
+    assert (st["ahead"], st["behind"]) == (1, 1), st
+    return b
+
+
+def _head(d):
+    return subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+
+def test_merge_check_is_a_dry_run():
+    """The hero's verdict before you press Merge: [] merges cleanly, a clash names
+    its files, and neither touches the tree or HEAD."""
+    clean = _diverged(clash=False)
+    before = _head(clean)
+    assert g.merge_check(clean) == []
+    assert _head(clean) == before and g.status(clean)["files"] == []
+    d = _diverged(clash=True)
+    before = _head(d)
+    assert g.merge_check(d) == ["a.txt"]
+    st = g.status(d)
+    assert _head(d) == before and st["files"] == [] and (st["ahead"], st["behind"]) == (1, 1), st
+    assert not os.path.exists(os.path.join(d, ".git", "MERGE_HEAD"))
+
+
+def test_merge_check_without_an_upstream_cannot_tell():
+    d = _mkrepo()
+    _write(d, "a.txt", "one\n")
+    g.commit(d, "init")
+    assert g.merge_check(d) is None
+
+
+def test_merge_upstream_makes_a_merge_commit_and_keeps_your_commits():
+    d = _diverged(clash=False)
+    mine = _head(d)
+    ok, out, clash = g.merge_upstream(d)
+    assert ok is True and clash == [], out
+    st = g.status(d)
+    assert (st["ahead"], st["behind"]) == (2, 0) and st["files"] == [], st
+    parents = subprocess.run(["git", "-C", d, "log", "-1", "--format=%P"], capture_output=True, text=True).stdout.split()
+    assert len(parents) == 2 and parents[0] == mine, parents     # a merge, not a rebase: your commit kept its sha
+
+
+def test_merge_upstream_never_starts_a_clash():
+    d = _diverged(clash=True)
+    before = _head(d)
+    ok, _out, clash = g.merge_upstream(d)
+    assert ok is False and clash == ["a.txt"]
+    assert _head(d) == before and g.status(d)["files"] == []
+    assert not os.path.exists(os.path.join(d, ".git", "MERGE_HEAD"))
+
+
+def test_merge_upstream_undoes_a_clash_the_dry_run_missed(monkeypatch):
+    """A race (or a git too old for merge-tree): the real merge clashes, so it is
+    aborted at once and its files come back; nothing is left half-merged."""
+    d = _diverged(clash=True)
+    before = _head(d)
+    monkeypatch.setattr(g, "merge_check", lambda cwd, **kw: [])
+    ok, out, clash = g.merge_upstream(d)
+    assert ok is False and clash == ["a.txt"] and "CONFLICT" in out, out
+    assert _head(d) == before and g.status(d)["files"] == []
+    assert not os.path.exists(os.path.join(d, ".git", "MERGE_HEAD"))
+
+
+def test_merge_upstream_keeps_your_edits_safe(monkeypatch):
+    """Edits to a file origin changed: git refuses before starting, so they stay.
+    With no dry run it won't merge over edits at all, since an abort could lose them."""
+    d = _diverged(clash=False)
+    _write(d, "a.txt", "my uncommitted edit\n")
+    ok, out, clash = g.merge_upstream(d)
+    assert ok is False and clash == [] and out, out
+    assert open(os.path.join(d, "a.txt")).read() == "my uncommitted edit\n"
+    d2 = _diverged(clash=False)
+    _write(d2, "b.txt", "edited, not committed\n")
+    monkeypatch.setattr(g, "merge_check", lambda cwd, **kw: None)
+    ok, out, clash = g.merge_upstream(d2)
+    assert ok is False and "uncommitted" in out and clash == []
+    assert open(os.path.join(d2, "b.txt")).read() == "edited, not committed\n"
+
+
+def test_incoming_commits_carry_their_time():
+    d = _diverged(clash=False)
+    got = g.incoming(d)
+    assert [c["subject"] for c in got] == ["theirs"] and got[0]["sha"] and got[0]["ts"] > 0, got
 
 
 def test_fetched_at_counts_a_fetch_from_any_worktree():
@@ -644,3 +783,92 @@ def test_current_branch_of_a_removed_tree_runs_no_git(monkeypatch):
     monkeypatch.setattr(g, "_run", lambda *a, **k: calls.append(a) or (128, "", ""))
     assert g.current_branch(os.path.join(tempfile.mkdtemp(), "gone")) == ""
     assert calls == []
+
+
+def test_drop_pr_copy_deletes_a_review_copy_only_when_nothing_is_lost():
+    """A Rivendell review reads a PR by fetching pull/<n>/head into a local pr-<n>
+    branch, which then sits in every branch list. It goes once every commit on it is
+    on a remote branch, or it is exactly the PR's head on GitHub. A commit of its
+    own, or a checkout using it, keeps it."""
+    bare = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "--bare", "-q", bare], check=True)
+    d = _mkrepo()
+    _write(d, "a.txt", "one\n")
+    _run(d, "add", "-A")
+    _run(d, "commit", "-qm", "init")
+    _run(d, "remote", "add", "origin", bare)
+    base = g.current_branch(d)
+    for n in (7, 8, 9):
+        _run(d, "push", "-q", "origin", f"HEAD:refs/pull/{n}/head")
+        _run(d, "fetch", "-q", "origin", f"pull/{n}/head:pr-{n}")
+    _run(d, "checkout", "-q", "pr-8")
+    _write(d, "b.txt", "two\n")
+    _run(d, "add", "-A")
+    _run(d, "commit", "-qm", "local work")
+    _run(d, "checkout", "-q", base)
+    _run(d, "worktree", "add", "-q", os.path.join(tempfile.mkdtemp(), "wt"), "pr-9")
+
+    assert g.drop_pr_copy(d, 7) is True      # exactly the PR's head on GitHub
+    assert g.drop_pr_copy(d, 8) is False     # has a commit GitHub never got
+    assert g.drop_pr_copy(d, 9) is False     # a checkout is using it
+    assert g.drop_pr_copy(d, 10) is False    # no such branch
+    # The PR moved on after the review fetched it, but its commits are on a remote branch.
+    _run(d, "fetch", "-q", "origin", "pull/9/head:pr-11")
+    _run(d, "push", "-q", "origin", "pr-8:refs/pull/11/head", f"HEAD:refs/heads/{base}")
+    _run(d, "fetch", "-q", "origin")
+    assert g.drop_pr_copy(d, 11) is True
+    assert sorted(g.branches(d)) == sorted([base, "pr-8", "pr-9"])
+
+
+def _feature():
+    """origin has main; `feat` (made from it) has one pushed and one local commit,
+    and main moved on by one since."""
+    bare, d, branch = _published()
+    _run(d, "checkout", "-q", "-b", "feat")
+    _write(d, "f1.txt", "1\n"); _run(d, "add", "-A"); _run(d, "commit", "-q", "-m", "pushed one")
+    _run(d, "push", "-q", "-u", "origin", "feat")
+    _write(d, "f2.txt", "2\n"); _run(d, "add", "-A"); _run(d, "commit", "-q", "-m", "local one")
+    _run(d, "checkout", "-q", branch)
+    _write(d, "m.txt", "m\n"); _run(d, "add", "-A"); _run(d, "commit", "-q", "-m", "main moved")
+    _run(d, "push", "-q", "origin", branch)
+    _run(d, "checkout", "-q", "feat")
+    return d, branch
+
+
+def test_ledger_splits_local_from_shipped_and_counts_the_base():
+    d, base = _feature()
+    got = g.ledger(d, base)
+    assert [c["subject"] for c in got["local"]] == ["local one"], got
+    assert [c["subject"] for c in got["shipped"]] == ["pushed one"] and got["shipped_n"] == 1, got
+    assert (got["ahead"], got["behind"], got["ref"]) == (2, 1, f"origin/{base}"), got
+    # No base (the branch is its own, or the name is unknown): only what a push sends.
+    for none in ("", "nope"):
+        bare = g.ledger(d, none)
+        assert bare["base"] == "" and bare["shipped"] == [] and len(bare["local"]) == 1, bare
+
+
+def test_ledger_without_an_upstream_lists_everything_the_base_lacks():
+    _bare, d, base = _published()
+    _run(d, "checkout", "-q", "-b", "solo")
+    _write(d, "s.txt", "s\n"); _run(d, "add", "-A"); _run(d, "commit", "-q", "-m", "never pushed")
+    got = g.ledger(d, base)
+    assert [c["subject"] for c in got["local"]] == ["never pushed"] and got["shipped"] == [] and got["ahead"] == 1, got
+
+
+def test_update_from_the_base_merges_it_in():
+    d, base = _feature()
+    ok, out, clash = g.merge_upstream(d, g.base_ref(d, base))
+    assert ok is True and clash == [], out
+    assert g.ledger(d, base)["behind"] == 0 and os.path.exists(os.path.join(d, "m.txt"))
+
+
+def test_undo_commit_takes_back_only_an_unpushed_commit():
+    d, _base = _feature()
+    ok, out = g.undo_commit(d)
+    assert ok is True, out
+    st = g.status(d)
+    assert st["ahead"] == 0 and [f["path"] for f in st["files"]] == ["f2.txt"], st   # its change is kept, staged
+    _run(d, "stash", "-q", "-u")
+    before = _head(d)
+    ok, out = g.undo_commit(d)
+    assert ok is False and "origin" in out and _head(d) == before

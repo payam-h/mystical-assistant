@@ -4,7 +4,7 @@
 // wrong shape (Teamwork sends 20261002 as often as 2026-10-02) turning a late
 // task into no date at all, and a request state mapped to the wrong action —
 // OPEN SESSION with no session to open, or IMPLEMENT on a task already queued.
-import { cardState, closeCode, dueLabel, groupTasks, initials, linkChip, nextUp, resultBits, sentryPrompt, splitTitle, testText, workPrompt } from "./rivendelltasks.ts";
+import { cardState, closeCode, dueLabel, groupTasks, inProgress, initials, taskSession, linkChip, nextUp, resultBits, sentryPrompt, splitTitle, testText, workPrompt } from "./rivendelltasks.ts";
 
 const ok = (cond: boolean, what: string) => {
   if (!cond) throw new Error(`FAIL: ${what}`);
@@ -80,10 +80,10 @@ const g = groupTasks([tk("a", true), tk("b", false, true, "IN_PROGRESS"), tk("c"
   tk("e", true, false, "IN_PROGRESS"), tk("f", false, false, "COMPLETED"), tk("h", true, false, "FAILED"),
   tk("i", false, false, "CANCELLED"), tk("j", false, false, null, "T28 — Cashflow ⏸️ (deferred to Phase 3)"),
   tk("k", false, false, "IN_PROGRESS", "T29 — Sync ⏸️ (deferred to Phase 3)")]);
-eq([g.needs, g.running, g.done, g.mine, g.team, g.later].map((x: { id: string }[]) => x.map((t) => t.id)),
-  [["b"], ["d", "e", "k"], ["f"], ["a", "h"], ["c", "i"], ["j"]],
-  "by what each needs from you: a question, then runs in flight, then finished ones; a failed run stays with " +
-  "its owner (RETRY); a deferred task waits in LATER — unless a run is already on it");
+eq([g.needs, g.failed, g.running, g.done, g.mine, g.team, g.later].map((x: { id: string }[]) => x.map((t) => t.id)),
+  [["b"], ["h"], ["d", "e", "k"], ["f"], ["a"], ["c", "i"], ["j"]],
+  "by what each needs from you: a question, a failed run (RETRY), runs in flight, finished ones; " +
+  "a deferred task waits in LATER — unless a run is already on it");
 
 eq(splitTitle("T26 — Moneybird OAuth + connection storage"),
   { code: "T26", title: "Moneybird OAuth + connection storage", later: null }, "the code gets its own line");
@@ -132,3 +132,21 @@ eq(testText({ ok: true, rtt_ms: 182, detail: "", at: 1 }), "✓ round trip 182 m
 eq(testText({ ok: false, rtt_ms: null, detail: "no pong in 5s", at: 1 }), "✕ no pong in 5s", "no pong");
 eq(testText({ ok: null, rtt_ms: null, detail: "re-dialing with the saved token", at: 1 }),
   "↻ re-dialing with the saved token", "a parked token re-dials");
+
+// MOVING: a task the board has In progress, whatever the board calls that column.
+ok(inProgress("In progress") && inProgress("IN PROGRESS") && inProgress("Doing"), "In progress / Doing count as moving");
+ok(!inProgress("To do") && !inProgress(null) && !inProgress("Done"), "To do, Done and no column don't");
+
+// The session working a task: the run's own, else one whose branch carries the key.
+const ss = [
+  { id: "s1", title: "Other", branch: "feat/riv-640-x", archived: 0 },
+  { id: "s2", title: "Staging feedback", branch: "feat/RIV-64-staging-site-feedback", archived: 0 },
+  { id: "s3", title: "Old", branch: "fix/RIV-7", archived: 1 },
+];
+eq(taskSession({ key: "RIV-64", session_id: null }, ss)?.id, "s2", "a branch carrying the key, not RIV-640's");
+eq(taskSession({ key: "riv-64", session_id: null }, ss)?.id, "s2", "the key matches in any case");
+eq(taskSession({ key: "RIV-64", session_id: "s1" }, ss)?.id, "s1", "the run's own session wins");
+eq(taskSession({ key: "RIV-7", session_id: null }, ss), null, "an archived session doesn't count");
+eq(taskSession({ key: null, session_id: null }, ss), null, "no key, no run: no session");
+eq(taskSession({ key: "RIV-64", session_id: "gone" }, ss)?.id, "s2", "a run session not listed falls back to the branch");
+eq(taskSession({ key: "RIV-64", session_id: "s3" }, ss)?.id, "s2", "an archived run session gives way to the branch match");

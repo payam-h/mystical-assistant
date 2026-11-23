@@ -33,19 +33,20 @@ import {
 } from "lucide-react";
 import { ToolWidget } from "./ResultWidgets";
 import { widgetForRun, type ToolStyle, type WebSource } from "../lib/toolwidget";
-import { api, type AnswerSelection, type PendingRequest, type RunEvent, type SecretAnswer } from "../lib/api";
+import { api, scopeAnswer, type AnswerSelection, type PendingRequest, type RunEvent, type SecretAnswer } from "../lib/api";
 import { Card } from "./ui";
 import { foldChips, runsOf, headSafeCut, insideRun, byFile, type EditEv } from "../lib/toolfold";
 import { segmentsOf, stepsTitle, type Seg, type StepCat } from "../lib/segments";
 import { endedWithout, saidLayout } from "../lib/said";
 import { parseFrame } from "../lib/frame";
 import { DelegationRow, IncomingNote, MergeLine, SaidTier, SwitchDivider } from "./MultiRows";
+import { PlanLine } from "./PlanLine";
 import { useFoldsOpen } from "../lib/folds";
 import { ImageLightbox, MediaThumb, isVideo, type Clip } from "./ImageLightbox";
 import { Markdown } from "./Markdown";
 import { useExperimental } from "../lib/multi";
 import { AnswerParts, DataView } from "./DataView";
-import { DesignCard } from "./DesignPane";
+import { BrowserCard, DesignCard } from "./DesignPane";
 import { OfferCard, offerOf } from "./OfferCard";
 import { viewsNamed } from "../lib/dataview";
 import { bashKind, bashLine, parseTests, testWords } from "../lib/bashkind";
@@ -64,6 +65,19 @@ import { hostOf, mcpParts, toolAccent, toolKind, cmdKind, type CmdKind } from ".
 /** The two edges a tool's accent draws: the card's hairline and the tag's box. */
 const edge = (accent: string) => `color-mix(in srgb, ${accent} 24%, transparent)`;
 const tagEdge = (accent: string) => `color-mix(in srgb, ${accent} 35%, transparent)`;
+
+/** What a background command's card says: running, or how it ended. `end` is
+ *  its background_done state; none on a turn that is over means the process
+ *  went without saying (a restart, a Stop). */
+function bgLabel(kind: "command" | "monitor", end: string | undefined, ended: boolean): string {
+  const what = kind === "monitor" ? "Background monitor" : "Background command";
+  if (!end) return ended ? `${what} stopped when the turn ended` : `${what} running. The agent continues when it finishes`;
+  if (end === "completed") return `${what} finished`;
+  if (end === "failed") return `${what} failed`;
+  if (end === "replaced") return `${what} stopped by your next message`;
+  if (end === "expired") return `${what} stopped: the wait ran out`;
+  return `${what} stopped`;
+}
 
 /** The directory takes the truncation, the filename never gets cut — on a phone
  *  a middle-truncated path is the difference between useful and noise. */
@@ -669,11 +683,11 @@ function ToolImages({ paths, clip }: { paths: string[]; clip?: Clip }) {
 }
 
 /** Multi-agent rows: each its own line in the flow, never inside a work fold. */
-const MULTI_ROW = new Set(["switch", "delegation", "merge"]);
+const MULTI_ROW = new Set(["switch", "delegation", "merge", "plan"]);
 
 /** The Mystical tools' rows: drawn only with the switch on, and each its own line in the
  *  flow. `secret_answered` is bookkeeping for its card, so it cuts nothing. */
-const EVIDENCE_ROW = new Set(["figure", "data", "design", "offer", "checks", "report", "secret_request", "rule"]);
+const EVIDENCE_ROW = new Set(["figure", "data", "design", "browser", "offer", "checks", "report", "secret_request", "rule"]);
 const NEW_ROW = new Set([...EVIDENCE_ROW, "secret_answered"]);
 
 /** Tool kinds that draw a block of their own, so they never fold into a
@@ -1127,11 +1141,19 @@ export const RunStream = memo(function RunStream({
   };
   const permResolved = new Map<string, "allow" | "deny">();
   const qAnswered = new Map<string, AnswerSelection[]>();
+  const bgDone = new Map<string, string>();
+  const bgNotify = new Map<string, boolean>();
+  let bgCap = 7200;            // seconds the turn waits on background commands (runner.BG_WAIT_CAP)
   const secretGiven = new Map<string, boolean>();
   const toolDone = new Map<string, Done>();
   for (const e of events) {
     if (e.type === "secret_answered") secretGiven.set(e.request_id, e.given);
     if (e.type === "permission_resolved") permResolved.set(e.request_id, e.behavior);
+    if (e.type === "background_done") bgDone.set(e.id, e.state);
+    if (e.type === "background_set") {
+      if (e.id && e.notify !== undefined) bgNotify.set(e.id, e.notify);
+      if (e.cap) bgCap = e.cap;
+    }
     if (e.type === "question_answered") qAnswered.set(e.request_id, e.answers);
     if (e.type === "tool_done" && e.id) toolDone.set(e.id, e);
   }
@@ -1222,7 +1244,7 @@ export const RunStream = memo(function RunStream({
   const asksNext = (i: number): boolean => {
     for (let j = i + 1; j < events.length; j++) {
       const t = events[j].type;
-      if (t === "tool_done" || t === "permission_resolved" || t === "question_answered"
+      if (t === "tool_done" || t === "permission_resolved" || t === "question_answered" || t === "background_done" || t === "background_set"
           || t === "secret_answered" || t === "thinking" || t === "log") continue;
       return t === "question" || t === "secret_request";
     }
@@ -1404,6 +1426,8 @@ export const RunStream = memo(function RunStream({
           <DelegationRow key={i} name={event.name} brief={event.brief} agent={event.agent} profile={event.profile}
             write={event.write} onOpen={onOpenAgent && event.session_id ? () => onOpenAgent(event.session_id) : undefined} />
         );
+      case "plan":
+        return <PlanLine key={i} ev={event} />;
       case "merge":
         return <MergeLine key={i} name={event.name} state={event.state} />;
       case "result":
@@ -1419,7 +1443,8 @@ export const RunStream = memo(function RunStream({
           <Fragment key={i}>
           {i === lastResult && figures.some((f) => !named.has(refAt(f.at))) ? <Figures items={figures.filter((f) => !named.has(refAt(f.at)))} /> : null}
           {i === lastResult ? events.map((e, j) => (e.type === "data" && !named.has(e.ref ?? "") ? <DataView key={`data${j}`} ev={e} />
-            : e.type === "design" && !named.has(e.ref ?? "") ? <DesignCard key={`design${j}`} board={e.board} title={e.title} pages={e.pages} /> : null)) : null}
+            : e.type === "design" && !named.has(e.ref ?? "") ? <DesignCard key={`design${j}`} board={e.board} title={e.title} pages={e.pages} />
+            : e.type === "browser" ? <BrowserCard key={`browser${j}`} url={e.url} profile={e.profile} /> : null)) : null}
           <div className="relative -ml-3 pl-3">
             <RailNode />
             <FinalResult
@@ -1448,6 +1473,8 @@ export const RunStream = memo(function RunStream({
         return multiOn && lastResult < 0 ? <DataView key={i} ev={event} /> : null;
       case "design":
         return multiOn && lastResult < 0 ? <DesignCard key={i} board={event.board} title={event.title} pages={event.pages} /> : null;
+      case "browser":
+        return multiOn && lastResult < 0 ? <BrowserCard key={i} url={event.url} profile={event.profile} /> : null;
       case "checks":
         return <ChecksRow key={i} ev={event} />;
       case "report":
@@ -1491,6 +1518,8 @@ export const RunStream = memo(function RunStream({
             // nothing is listening for an answer any more.
             stale={ended && !permResolved.has(event.request_id)}
             onAllow={() => onRespond?.(event.request_id, { behavior: "allow" })}
+            scopes={event.scopes}
+            onAllowScope={(sc) => onRespond?.(event.request_id, { behavior: "allow", answers: scopeAnswer(sc) })}
             onDeny={() => onRespond?.(event.request_id, { behavior: "deny" })}
           />
         );
@@ -1520,6 +1549,49 @@ export const RunStream = memo(function RunStream({
             <span>Stopped — send a message to continue.</span>
           </div>
         );
+      case "background": {
+        const end = bgDone.get(event.id);
+        const live = !end && !ended;
+        const rid = `bg:${event.id}`;
+        return (
+          <div key={i} className="text-xs text-[var(--tg-hint)]">
+            <div className="flex items-center gap-1.5">
+              <Terminal
+                size={14}
+                className={`shrink-0 ${live ? "text-[var(--brand)]" : "text-[var(--brand-soft)]"}`}
+                aria-hidden
+              />
+              <span>{bgLabel(event.kind, end, ended)}{event.text ? `: ${event.text}` : ""}</span>
+            </div>
+            {event.command && (
+              <code className="mt-1 ml-5 block max-h-[4.5em] overflow-hidden whitespace-pre-wrap break-words font-mono text-[11px] opacity-80">
+                {event.command}
+              </code>
+            )}
+            {live && onRespond && (
+              <div className="mt-2 ml-5 flex flex-wrap items-center gap-x-3 gap-y-2">
+                <button
+                  type="button"
+                  className="rounded border border-[var(--destructive)] px-3 py-1 text-[var(--destructive)]"
+                  onClick={() => void onRespond(rid, { behavior: "deny" })}
+                >
+                  Stop
+                </button>
+                <label className="inline-flex items-center gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={bgNotify.get(event.id) ?? false}
+                    onChange={(e) => void onRespond(rid, { answers: [{ header: "notify", labels: e.target.checked ? ["on"] : [] }] })}
+                  />
+                  <span>Prompt the agent if nothing finishes in {Math.round(bgCap / 60)} min</span>
+                </label>
+              </div>
+            )}
+          </div>
+        );
+      }
+      case "background_done":
+      case "background_set":
       case "permission_resolved":
       case "question_answered":
         return null; // shown inside the relevant card

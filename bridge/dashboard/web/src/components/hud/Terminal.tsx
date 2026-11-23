@@ -1,11 +1,13 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type DragEvent, type MutableRefObject, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MutableRefObject, type ReactNode, type RefObject } from "react";
 import { AgentGrid, type MainCard } from "../AgentGrid";
+import { TicketBrief, TicketList, TicketPart } from "./TicketMap";
+import { AgentsView } from "../AgentsView";
 import { ChatSearch } from "../ChatSearch";
 import { openSession as openAgentSession } from "../../lib/devicerun";
 import { promptLabel } from "../../lib/multi";
 import { useMultiOn, useTreeRows } from "../../lib/multistore";
 import { ProjectTile } from "../ui/ProjectTile";
-import { type AccountInfo, type CardAnswer, type DevServerInfo, type EnrichedSession, type NextItem, type SessionBrief } from "../../api";
+import { type AccountInfo, type CardAnswer, type DevServerInfo, type EnrichedSession, type NextItem, type SessionBrief, type SessionStatus } from "../../api";
 import type { Turn } from "../../chat";
 import type { Anchor } from "../../lib/scrollmem";
 import { projectName, projectTint } from "../../lib/surfaces";
@@ -27,10 +29,12 @@ import { ScrollRail } from "./Checkpoints";
 import { PrChip } from "./PrChip";
 import { TaskChip } from "./TaskChip";
 import { ChatChromeContext } from "../../lib/chatchrome";
+import { HEAD_DEFAULT, fadeBand, fadeMask } from "../../lib/headlook";
 import { isDeviceRun } from "../../lib/devicerun";
 import { readOnly } from "../../lib/team";
 import { DeviceTile } from "../DeviceRunPlate";
 import { EarlierPlate, TeamTile } from "../TeamBar";
+import { LiveHostCtx, type LiveHost } from "../LiveRow";
 
 /** The header is an island this far in from the chat column's top and sides;
  *  16 clears the ScrollRail on the right edge. */
@@ -225,9 +229,13 @@ export function Terminal({
   liveTurns, trailingWorking, boot,
   loading, sessionId, hud, onRunCommand, onQuote, onOpenFile, onAnswer, askDocked,
   hasOlder, olderLoading, onLoadOlder, renderFrom, navRef, restoringRef, correctingRef,
-  run, onOpenRun, onDropFiles, chrome, onSendText, onArchive, onStartHere, teamMe,
-  limit, logins, gridMain,
+  run, onOpenRun, onDropFiles, chrome, onSendText, onSteerText, onStopTurn, onArchive, onStartHere, teamMe, paused, onTogglePause,
+  limit, logins, status, savers, gridMain, statusAll, superTitle,
 }: {
+  /** Every session's status: TICKETS colours a super session's ticket rows from it. */
+  statusAll?: Map<string, SessionStatus>;
+  /** The open ticket session's super session, for its way back. */
+  superTitle?: string;
   /** The chat behind the open session, as the grid's main card: null with no multi-agent chats. */
   gridMain?: MainCard | null;
   view: View;
@@ -291,6 +299,13 @@ export function Terminal({
   chrome?: ReactNode;
   /** The PR chip's SEND buttons: a message to this session, queued if it's mid-turn. */
   onSendText?: (text: string) => void;
+  /** Into the running turn when there is one, else a new turn: what the Agents view's box sends. */
+  onSteerText?: (text: string) => void;
+  /** Stop the running turn (the Agents view's "Stop everything", the live row's Stop). */
+  onStopTurn?: () => void;
+  /** The queue's hold: the live row's Pause (LiveRow). */
+  paused?: boolean;
+  onTogglePause?: () => void;
   /** PrChip's RESOLVE IN A NEW SESSION: a fresh session in this session's checkout. */
   onStartHere?: (text: string) => void;
   /** The PR chip's ARCHIVE SESSION, after a merge. */
@@ -299,6 +314,10 @@ export function Terminal({
   limit?: LimitLive | null;
   /** The Claude logins, for the limit's names. */
   logins?: AccountInfo[];
+  /** The open session's status: answered with background tasks still running, the transcript says so. */
+  status?: SessionStatus | null;
+  /** The Savers trials the open session drew the saver in: its prompts' tag. */
+  savers?: string[];
 }) {
   const sessionProject = selected?.project ?? activeProject ?? null;
   // A teammate's device run (lib/devicerun) or a session a teammate sent (lib/team):
@@ -321,8 +340,26 @@ export function Terminal({
   const chatId = helperChat ?? sessionId ?? null;
   const agentRows = useTreeRows(multiOn ? chatId : null);
   const [gridFor, setGridFor] = useState<string | null>(null);
-  const hasAgents = multiOn && !!chatId && agentRows.length > 0;
+  // GRID is for Mystical's own helpers; AGENTS for Claude's sub-agents (components/AgentsView). Each
+  // shows only in a chat that has that kind, and a chat remembers whether you left it on AGENTS.
+  const hasAgents = multiOn && !!chatId && agentRows.some((r) => r.kind !== "subagent");
+  // `asked`: the composer's "Agents view" pill opened it (hud:agents-view). The pill knows a chat has
+  // sub-agents from its own roster, so the way in doesn't wait on the sidebar's tree having loaded.
+  const [asked, setAsked] = useState<string | null>(null);
+  const hasSubs = multiOn && !!sessionId && !helperChat && (asked === sessionId || agentRows.some((r) => r.kind === "subagent"));
   const grid = isChat && hasAgents && gridFor === chatId;
+  const teamKey = sessionId ? `mystical.agents-view.${sessionId}` : "";
+  const [teamOn, setTeamOn] = useState(false);
+  useEffect(() => { try { setTeamOn(!!teamKey && localStorage.getItem(teamKey) === "1"); } catch { setTeamOn(false); } }, [teamKey]);
+  // TICKETS (a super session) takes the transcript's place too: a CHAT or AGENTS pick ends a TICKETS one.
+  const setTeam = (on: boolean) => { setTeamOn(on); if (sessionId) setLivePick({ id: sessionId, on: false }); try { if (on) localStorage.setItem(teamKey, "1"); else localStorage.removeItem(teamKey); } catch { /* private mode */ } };
+  const team = isChat && hasSubs && teamOn && !grid;
+  useEffect(() => {
+    const open = () => { if (!sessionId) return; setAsked(sessionId); setGridFor(null); setTeamOn(true); try { localStorage.setItem(`mystical.agents-view.${sessionId}`, "1"); } catch { /* private mode */ } };
+    window.addEventListener("hud:agents-view", open);
+    return () => window.removeEventListener("hud:agents-view", open);
+  }, [sessionId]);
+  const subsWorking = agentRows.filter((r) => r.kind === "subagent" && r.status === "running").length;
   // Opening a helper or the chat from a card lands on its conversation.
   const openedFrom = useRef(sessionId);
   useEffect(() => {
@@ -334,13 +371,30 @@ export function Terminal({
     window.addEventListener("hud:open-session", toChat);
     return () => window.removeEventListener("hud:open-session", toChat);
   }, []);
+  // A super session (the flow that made a ticket set) opens on TICKETS while its tickets
+  // build or merge; CHAT | TICKETS switches, and the strip's Sessions button asks for TICKETS.
+  const tset = selected?.tickets;
+  const [livePick, setLivePick] = useState<{ id: string; on: boolean } | null>(null);
+  const tkLive = isChat && !grid && !team && !!tset && !!sessionId
+    && (livePick?.id === sessionId ? livePick.on : tset.status === "building" || tset.status === "merging");
+  useEffect(() => {
+    const on = (e: Event) => { if (sessionId) { setTeam(false); setLivePick({ id: sessionId, on: !!(e as CustomEvent).detail }); } };
+    window.addEventListener("hud:tickets-live", on);
+    return () => window.removeEventListener("hud:tickets-live", on);
+  }, [sessionId]);
   const empty = isChat && turns.length === 0;
   // COMPACT: the nameplate leaves the header for the composer's control row,
   // and the header shrinks to a pill of readouts on the right.
   const compact = hud?.layout === "compact";
-  // COMPACT's TABS and CONSOLE composers lay the nameplate's pieces out
-  // themselves; CLASSIC keeps it whole, as the row it always was.
-  const flat = compact && (hud?.composer ?? "tabs") !== "classic";
+  // COMPACT's composer lays the nameplate's pieces out itself; DEFAULT
+  // keeps it whole, as the row it always was.
+  const flat = compact;
+  // SETTINGS ▸ CHAT ▸ HEADER (lib/headlook). BAR stretches COMPACT's readouts
+  // across the column's top; `pill` is COMPACT as the pill it always was.
+  const head = hud?.head ?? HEAD_DEFAULT;
+  const pill = compact && head.shape === "pill";
+  // The header row's bottom edge: COMPACT's row is 34 tall, DEFAULT's 40.
+  const isleBottom = compact ? ISLE_TOP + 34 + 2 : ISLE_EDGE;
   // A fresh session's whole screen is a drop target: a file dragged anywhere on
   // it lands where a drop on the prompt box would. Files only — a row or text
   // drag passes through untouched.
@@ -365,7 +419,7 @@ export function Terminal({
     // how the old peek got stuck showing the tail at the top of the scroll.
     const measure = () => {
       raf = 0;
-      const edge = root.getBoundingClientRect().top + ISLE_EDGE;
+      const edge = root.getBoundingClientRect().top + isleBottom;
       let best: number | null = null;
       for (const el of root.querySelectorAll<HTMLElement>("[data-prompt-idx]")) {
         if (el.getBoundingClientRect().top >= edge) continue;
@@ -386,7 +440,7 @@ export function Terminal({
       ro.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [scrollRef, contentRef, view, empty, turns.length]);
+  }, [scrollRef, contentRef, view, empty, turns.length, isleBottom]);
 
   // What the bar says. Held past the point the bar hides so leaving the top of a
   // turn is a fade-out, not a blank bar sliding away.
@@ -398,7 +452,61 @@ export function Terminal({
       label: `${(peekIdx ?? 0) + 1}/${turns.length}`,
     };
   }
-  const showPeek = !empty && peekIdx !== null && !!held.current;
+  // No LAST row beside a pill (it has no row to fold out of), nor when HEADER ▸ LAST LINE is off.
+  const showPeek = !empty && !pill && head.last && peekIdx !== null && !!held.current;
+  // HEADER ▸ FADE: a mask on the scroller, so the words fade into whatever ground is behind them.
+  const bandAt = (peek: boolean) => fadeBand(head.fade, isleBottom + (peek ? PEEK_H : 0), pill);
+  // HEADER ▸ HIDE WHILE READING: the island slides away while you scroll down,
+  // and back on any scroll up, near the top, or when the pointer nears it.
+  const isleRef = useRef<HTMLDivElement | null>(null);
+  const crumbRef = useRef<HTMLDivElement | null>(null);
+  const [tucked, setTucked] = useState(false);
+  const tuckOn = head.hide && isChat && !empty && !grid && !team && !tkLive;
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!tuckOn || !root) { setTucked(false); return; }
+    let last = root.scrollTop;
+    const on = () => {
+      const y = root.scrollTop, d = y - last;
+      last = y;
+      if (y < 80 || d < -4) setTucked(false);
+      // Off the tail only: following a streaming reply scrolls down too, and that isn't reading.
+      else if (d > 4 && root.scrollHeight - y - root.clientHeight > 40 && !isleRef.current?.matches(":focus-within") && !crumbRef.current?.matches(":focus-within")) setTucked(true);
+    };
+    setTucked(false);
+    root.addEventListener("scroll", on, { passive: true });
+    return () => root.removeEventListener("scroll", on);
+  }, [scrollRef, tuckOn, view, sessionId]);
+  // COMPACT CHAT with nothing to read out draws no readouts pill.
+  const readoutsShown = !(compact && isChat && !chrome && !hasAgents && !hasSubs && !tset);
+  // A helper's or a ticket's way back. DEFAULT keeps it in the nameplate; COMPACT puts it in the
+  // header, never in the prompt box (.mystical/design-drafts/ticket-back-in-header, A · OWN PILL):
+  // its own pill on the left, or the bar's left end.
+  const crumbs = helperChat || selected?.ticket_of ? (
+    <>
+      {helperChat && (
+        <button type="button" className="ma-crumb" title={`Back to ${gridMain?.title || "its chat"}`} onClick={() => openAgentSession(helperChat)}>
+          <span aria-hidden>‹</span> <span className="ma-crumb-t">{gridMain?.title || "chat"}</span>
+        </button>
+      )}
+      {selected?.ticket_of && (
+        <button type="button" className="ma-crumb" title={`Back to ${superTitle || "the session it is a part of"}`} onClick={() => openAgentSession(selected.ticket_of!)}>
+          <span aria-hidden>‹</span> <span className="ma-crumb-t">{superTitle || "its session"}</span>
+          {sessionId && <TicketPart superId={selected.ticket_of} sessionId={sessionId} />}
+        </button>
+      )}
+    </>
+  ) : null;
+  // COMPACT's crumb pill floats over CHAT only; HIST and NEXT stack their island in the flow.
+  const crumbPill = pill && isChat && !!crumbs;
+  // The island holds the readouts, and COMPACT's crumb when it has no pill of its own.
+  const islandShown = readoutsShown || (compact && !!crumbs && !crumbPill);
+  // A tucked header is gone, and a header that isn't there gets no fade.
+  const isleShown = islandShown || crumbPill;
+  const band = isleShown && !tucked ? bandAt(showPeek) : null;
+  // The words' top padding clears the band at rest, without the LAST row, so
+  // that row opening (or the header tucking) never moves the transcript.
+  const restTo = isleShown ? bandAt(false)?.to ?? 0 : 0;
 
   // Presentation only: whether the load has run long enough to be worth showing.
   // The retune below still gates on the raw `loading`, which is what actually
@@ -467,8 +575,12 @@ export function Terminal({
 
   // The transcript itself, so both readings of it — the page and the board —
   // render the same scroller, the same virtualiser and the same rails.
+  const [liveHost, setLiveHost] = useState<HTMLElement | null>(null);
+  const live = useMemo<LiveHost>(() => ({ host: liveHost, atBottom, onJump: onJumpBottom,
+    onStop: theirs ? undefined : onStopTurn, paused, onTogglePause: theirs ? undefined : onTogglePause }),
+  [liveHost, atBottom, onJumpBottom, theirs, onStopTurn, paused, onTogglePause]);
   const body = (
-    <div ref={swapRef} className="swapwrap" style={{ position: "relative", display: grid ? "none" : "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+    <div ref={swapRef} className="swapwrap" style={{ position: "relative", display: grid || tkLive || team ? "none" : "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       <div aria-hidden className="swapline" />
       {dropping && (
         <div aria-hidden style={{ position: "absolute", inset: 10, zIndex: 7, pointerEvents: "none", display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 26, border: "1px dashed color-mix(in srgb, var(--acc) 55%, transparent)", background: "color-mix(in srgb, var(--acc) 5%, transparent)", fontSize: "var(--t10)", letterSpacing: 3, color: "var(--acc)" }}>
@@ -481,7 +593,9 @@ export function Terminal({
       {/* --isle-b: where an open WORK zone's header pins (index.css, DOSSIER): level with the
           compact pill, which then floats over the plate's right end (data-isle=pill hides those
           chips while pinned); under the island bar and its LAST row otherwise */}
-      <div ref={scrollRef} data-style="dossier" data-isle={compact ? "pill" : "bar"} className="mscroll mscroll-bare" style={{ ...({ "--isle-b": `${compact ? ISLE_TOP : ISLE_EDGE + 6 + (showPeek ? PEEK_H : 0)}px` } as CSSProperties), flex: 1, minHeight: 0, padding: "0 18px", fontFamily: "'JetBrains Mono',monospace", fontSize: "var(--t13)", lineHeight: 1.6, overflowWrap: "break-word" }}
+      <div ref={scrollRef} data-style="dossier" data-isle={pill && !restTo ? "pill" : "bar"} className="mscroll mscroll-bare" style={{ ...({ "--isle-b": `${pill ? restTo || ISLE_TOP : isleBottom + 6 + (showPeek ? PEEK_H : 0)}px` } as CSSProperties),
+          // Faded, a pinned WORK header waits below the fade, not level with the pill.
+          ...(band ? { maskImage: fadeMask(band), WebkitMaskImage: fadeMask(band) } : {}), flex: 1, minHeight: 0, padding: "0 18px", fontFamily: "'JetBrains Mono',monospace", fontSize: "var(--t13)", lineHeight: 1.6, overflowWrap: "break-word" }}
         onDragOver={(e) => { if (!fileDrag(e)) return; e.preventDefault(); if (!dropping) setDropping(true); }}
         // relatedTarget is where the drag went: still inside, it only crossed a child
         onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropping(false); }}
@@ -490,7 +604,7 @@ export function Terminal({
             below it: parked at the top nothing has slid under it, so the
             LAST row stays folded and the transcript opens on its first
             message, not on a header repeating it. */}
-        <div ref={contentRef} style={{ minHeight: "100%", padding: `${ISLE_EDGE + 12}px 0 16px`, position: "relative" }}>
+        <div ref={contentRef} style={{ minHeight: "100%", padding: `${Math.max(ISLE_EDGE + 12, restTo)}px 0 16px`, position: "relative" }}>
           {/* A switch that lands inside the delay renders neither: no
               scanline for a load that's already over, and no FreshState
               flashing in front of a transcript that's about to arrive. */}
@@ -506,15 +620,21 @@ export function Terminal({
             <ChatImagesScope remote={!theirs && !deviceRun && !selected?.parent_session && !(selected && isJob(selected))}>
             {multiOn ? <SelectionPop root="[data-chat-read]" onQuote={theirs ? undefined : onQuote} canTranslate={aiFeatures.translate !== false} canExplain={aiFeatures.explain !== false} /> : null}
             <div data-chat-read="" style={{ display: "contents" }}>
+            <LiveHostCtx.Provider value={live}>
             <Transcript agentSession={!!selected?.agent && selected.agent !== "claude"} turns={turns} activeId={activeId} boot={boot} who={who} onRespond={onRespond} liveTurns={liveTurns} trailingWorking={trailingWorking} hud={hud} onRunCommand={theirs ? undefined : onRunCommand} onQuote={theirs ? undefined : onQuote} onOpenFile={onOpenFile} onAnswer={theirs ? undefined : onAnswer} askDocked={!theirs && !!askDocked} hasOlder={hasOlder} olderLoading={olderLoading} onLoadOlder={onLoadOlder} renderFrom={renderFrom} scrollRef={scrollRef} sessionKey={sessionId} navRef={navRef} restoringRef={restoringRef} correctingRef={correctingRef}
               job={selected && isJob(selected) && selected.job?.kind ? selected.job : null} jobTitle={selected?.title} project={sessionProject}
               top={theirs && selected?.team?.earlier
-                ? <EarlierPlate share={selected.team.share} facts={selected.team.earlier} by={selected.team.from.name} me={teamMe} /> : undefined}
+                ? <EarlierPlate share={selected.team.share} facts={selected.team.earlier} by={selected.team.from.name} me={teamMe} />
+                : selected?.ticket_of && sessionId ? <TicketBrief superId={selected.ticket_of} sessionId={sessionId} superTitle={superTitle} /> : undefined}
               unfinished={theirs && selected?.team?.unfinished?.length ? { turns: selected.team.unfinished, by: selected.team.from.name } : null}
-              limit={theirs ? null : limit} logins={logins} />
+              limit={theirs ? null : limit} logins={logins}
+              status={status} onSend={theirs ? undefined : onSendText} savers={savers} />
+            </LiveHostCtx.Provider>
             </div>
             </ChatImagesScope>
           )}
+          {/* the running turn's current action, the chat's last row (LiveRow): sticky, so it stays when you scroll up */}
+          <div ref={setLiveHost} className="live-host" />
         </div>
       </div>
       {!empty && <ScrollRail turns={turns} scrollRef={scrollRef} />}
@@ -595,11 +715,7 @@ export function Terminal({
           {sessionId && !helperChat && <span aria-hidden style={{ flex: "none", fontSize: "var(--t9)", color: titleHov ? "var(--txb)" : "var(--txl)" }}>▾</span>}
         </button>
         <div className="np-meta" style={flat ? { display: "contents" } : { display: "flex", alignItems: "center", gap: 9, height: 12, minWidth: 0, overflow: "hidden" }}>
-          {helperChat && (
-            <button type="button" className="ma-crumb" title={`Back to ${gridMain?.title || "its chat"}`} onClick={() => openAgentSession(helperChat)}>
-              <span aria-hidden>‹</span> {gridMain?.title || "chat"}
-            </button>
-          )}
+          {!compact && crumbs}
           <button
             className="np-proj"
             title={sessionProject ? "project — analyze, design system, new session here" : undefined}
@@ -661,11 +777,20 @@ export function Terminal({
   // (FILES, BRANCHES, DESIGN) and in SETTINGS (Skills, Projects ▸ Project map).
   const readouts = (
       <div className="isle-reads" style={{ display: "flex", alignItems: "center", gap: 10, flex: "none" }}>
-        {isChat && !empty && sessionId && multiOn && onJumpTo && <ChatSearch sessionId={sessionId} turns={turns} onJump={onJumpTo} />}
-        {isChat && hasAgents && (
-          <span className="ma-viewsw" role="group" aria-label="Chat or grid">
-            <button type="button" aria-pressed={!grid} onClick={() => setGridFor(null)}>CHAT</button>
-            <button type="button" aria-pressed={grid} onClick={() => setGridFor(chatId)}>GRID</button>
+        {isChat && !empty && sessionId && multiOn && onJumpTo && head.search && <ChatSearch sessionId={sessionId} turns={turns} onJump={onJumpTo} />}
+        {/* One switch for every view of this chat: there were two, each with its own CHAT. */}
+        {isChat && (hasAgents || hasSubs || (!!tset && !!sessionId)) && (
+          <span className="ma-viewsw" role="group" aria-label="Chat views">
+            <button type="button" aria-pressed={!grid && !team && !tkLive} onClick={() => { setGridFor(null); setTeam(false); if (tset && sessionId) setLivePick({ id: sessionId, on: false }); }} className="caps">Chat</button>
+            {hasSubs && <button type="button" aria-pressed={team} onClick={() => { setGridFor(null); setTeam(true); }} title="This chat's sub-agents: who's working, what they're doing, what they said" className="caps">Agents{subsWorking ? ` ${subsWorking}` : ""}</button>}
+            {hasAgents && <button type="button" aria-pressed={grid} onClick={() => setGridFor(chatId)} className="caps">Grid</button>}
+            {!!tset && sessionId && (
+              <button type="button" aria-pressed={tkLive} onClick={() => { setGridFor(null); setTeam(false); setLivePick({ id: sessionId, on: true }); }}
+                title={`This chat's parts: ${tset.done} of ${tset.total} done`} className="caps">
+                Parts {tset.done}/{tset.total}
+                <i aria-hidden className="vs-prog" style={{ "--p": `${tset.total ? (100 * tset.done) / tset.total : 0}%` } as CSSProperties} />
+              </button>
+            )}
           </span>
         )}
         <ViewTabs view={view} onView={onView} />
@@ -678,7 +803,8 @@ export function Terminal({
       </div>
   );
   const header = compact ? (
-    <div style={{ display: "flex", alignItems: "center", padding: "0 16px", height: 34, flex: "none", minWidth: 0 }}>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "0 16px", height: 34, flex: "none", minWidth: 0 }}>
+      {!crumbPill && crumbs && <>{crumbs}<span style={{ flex: 1, minWidth: 12 }} /></>}
       {readouts}
     </div>
   ) : (
@@ -696,29 +822,51 @@ export function Terminal({
   // makes it the theme's own card: brackets and hard corners in the HUD themes,
   // a soft radius in the reading ones. The blur sits on a layer of its own so
   // it isn't the containing block for anything fixed inside the row.
+  // The header keeps the column's measure: its gutters with the transcript, none in the Agents view.
+  const isleGutter = team ? "0px" : chatPad;
+  // What the crumb pill shares with the island: glass, edge, and the tuck.
+  const isleShell = { "data-glass": head.glass, "data-tucked": tucked || undefined, inert: tucked || undefined };
+  const isleLook: CSSProperties = {
+    zIndex: 12, flex: "none",
+    transform: tucked ? `translateY(calc(-100% - ${ISLE_TOP + 2}px))` : undefined, opacity: tucked ? 0 : undefined,
+    transition: "transform .22s cubic-bezier(.2,.8,.2,1), opacity .18s ease",
+    border: "1px solid color-mix(in srgb, var(--acc) 20%, transparent)",
+    boxShadow: "0 10px 28px var(--shadow-pop)",
+  };
+  const isleGlass = <div aria-hidden className="isle-glass" style={{ position: "absolute", inset: 0, borderRadius: "inherit", background: `color-mix(in srgb, var(--panel) ${pill ? 97 : 88}%, transparent)`, backdropFilter: "blur(10px) saturate(1.15)" }} />;
+  // A ticket's (or a helper's) way back, top-left, opposite the readouts pill.
+  const crumbIsle = crumbPill && (
+    // The two pills split the header's measure 40/60, less a gap, so they never meet.
+    <div ref={crumbRef} className="isle isle-pill" {...isleShell} style={{
+      position: "absolute", top: ISLE_TOP, left: `calc(${isleGutter} + ${ISLE_X}px)`, maxWidth: `calc((100% - 2 * (${isleGutter} + ${ISLE_X}px)) * 0.4 - 8px)`,
+      ...isleLook, borderRadius: 999,
+    }}>
+      {isleGlass}
+      <div style={{ position: "relative", display: "flex", alignItems: "center", gap: 10, height: 34, padding: "0 16px", minWidth: 0 }}>{crumbs}</div>
+    </div>
+  );
   const island = (
     // `isle` / `isle-glass`: VOID re-inks both (index.css) — the border and the
     // glass are inline here, and a theme can only outrank an inline rule by name.
     // COMPACT: the same island shrink-wrapped to its readouts and parked on the
     // right as a pill — a thing that holds numbers, not a bar pretending to be
     // the column's top edge. No corner brackets: they belong to a rectangle.
-    <div className={compact ? "isle isle-pill" : "panel isle"} style={{
-      ...(compact
+    // HEADER ▸ GLASS rides data-glass (index.css); tucked, it slides up out of the column.
+    <div ref={isleRef} className={pill ? "isle isle-pill" : "panel isle"} {...isleShell} style={{
+      ...(pill
         ? isChat
-          ? { position: "absolute", top: ISLE_TOP, right: `calc(${chatPad} + ${ISLE_X}px)`, maxWidth: `calc(100% - 2 * (${chatPad} + ${ISLE_X}px))` }
+          ? { position: "absolute", top: ISLE_TOP, right: `calc(${isleGutter} + ${ISLE_X}px)`, maxWidth: `calc((100% - 2 * (${isleGutter} + ${ISLE_X}px)) * ${crumbPill ? 0.6 : 1})` }
           : { position: "relative", alignSelf: "flex-end", margin: `${ISLE_TOP}px ${ISLE_X}px 0` }
         : isChat
-          ? { position: "absolute", top: ISLE_TOP, left: `calc(${chatPad} + ${ISLE_X}px)`, right: `calc(${chatPad} + ${ISLE_X}px)` }
+          ? { position: "absolute", top: ISLE_TOP, left: `calc(${isleGutter} + ${ISLE_X}px)`, right: `calc(${isleGutter} + ${ISLE_X}px)` }
           : { margin: `${ISLE_TOP}px ${ISLE_X}px 0` }),
-      zIndex: 12, flex: "none",
-      borderRadius: compact ? 999 : undefined,
-      border: "1px solid color-mix(in srgb, var(--acc) 20%, transparent)",
-      boxShadow: "0 10px 28px var(--shadow-pop)",
+      ...isleLook,
+      borderRadius: pill ? 999 : undefined,
     }}>
-      <div aria-hidden className="isle-glass" style={{ position: "absolute", inset: 0, borderRadius: "inherit", background: `color-mix(in srgb, var(--panel) ${compact ? 97 : 88}%, transparent)`, backdropFilter: "blur(10px) saturate(1.15)" }} />
+      {isleGlass}
       <div style={{ position: "relative" }}>
         {header}
-        {isChat && !empty && !compact && (
+        {isChat && !empty && !pill && head.last && (
           // Stays mounted and folds: mounting it on the crossing popped a row
           // into place mid-scroll. A fixed height is what lets the observer's
           // edge and the anchors' scroll-margin agree on where the island ends.
@@ -755,10 +903,16 @@ export function Terminal({
       // auto-placed side columns, and would take the first track from SESSIONS.
       data-bg={hud?.chatBg ?? "none"}
       data-layout={compact ? "compact" : "default"}
-      style={{ position: "relative", gridColumn: 2, backgroundColor: "color-mix(in srgb, var(--panel2) 60%, transparent)", display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden", paddingInline: chatPad, animation: "enterZoom .65s cubic-bezier(.2,.8,.2,1) both .12s" }}
+      data-tklive={tkLive || undefined}
+      // A tucked header comes back when the pointer nears the column's top.
+      onMouseMove={tucked ? (e) => { if (e.clientY - e.currentTarget.getBoundingClientRect().top < 64) setTucked(false); } : undefined}
+      style={{ position: "relative", gridColumn: 2, backgroundColor: "color-mix(in srgb, var(--panel2) 60%, transparent)", display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden",
+        // The gutters are a reading measure for the transcript. The Agents view is three panes, and takes the column.
+        paddingInline: team ? 0 : chatPad, animation: "enterZoom .65s cubic-bezier(.2,.8,.2,1) both .12s" }}
     >
-      {/* COMPACT CHAT with no chrome has nothing left to hold: no empty pill. */}
-      {!(compact && isChat && !chrome) && island}
+      {/* COMPACT CHAT with no chrome and no crumb has nothing left to hold: no empty pill. */}
+      {islandShown && island}
+      {crumbIsle}
 
       {view === "history" ? (
         <div style={{ minHeight: 0, flex: 1, overflowY: "auto" }}>
@@ -772,9 +926,15 @@ export function Terminal({
         <>
           {body}
           {grid && chatId && <AgentGrid sessionId={chatId} main={gridMain ?? null} top={compact ? ISLE_TOP + 40 : ISLE_EDGE + 8} />}
-          <ChatChromeContext.Provider value={{ compact, lead: compact ? nameplate : null, composer: hud?.composer ?? "tabs", sendKey: hud?.sendKey ?? "enter", busyEnter: hud?.busyEnter ?? "steer" }}>
-            {composer}
-          </ChatChromeContext.Provider>
+          {tkLive && sessionId && <TicketList key={sessionId} top={compact ? ISLE_TOP + 40 : ISLE_EDGE + 8} sessionId={sessionId} status={statusAll ?? new Map()} onOpenSession={openAgentSession} />}
+          {team && sessionId && <AgentsView sessionId={sessionId} top={compact ? ISLE_TOP + 40 : ISLE_EDGE + 8} running={!!activeId}
+            onSay={(text) => (onSteerText ?? onSendText)?.(text)} onStop={() => onStopTurn?.()} onChat={() => setTeam(false)} />}
+          {/* The Agents view has its own box, which says what each message will do: the composer would only compete with it. */}
+          {!team && (
+            <ChatChromeContext.Provider value={{ compact, lead: compact ? nameplate : null, sendKey: hud?.sendKey ?? "enter", busyEnter: hud?.busyEnter ?? "steer" }}>
+              {composer}
+            </ChatChromeContext.Provider>
+          )}
         </>
       )}
     </div>

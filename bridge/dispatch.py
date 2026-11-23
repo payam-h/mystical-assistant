@@ -5,7 +5,7 @@ import sys
 import threading
 
 from bridge import (accounts, config, graphmap, integrations, ladder, limits, notices, profiles,
-                    report, state, store, tgask, tgfiles, tglive, tgtopics, usage)
+                    report, state, store, tgask, tgboard, tgfiles, tglive, tgtopics, usage)
 from bridge.browser import browser_view, list_dirs, open_browser, rel, within_base
 from bridge.devserver import handle_logs, handle_server, server_status
 from bridge.telegram import answer_cb, edit, edit_markup, panel_kb, send
@@ -25,6 +25,7 @@ HELP = (
     "/report — this week per project (time · tokens) · /report last\n"
     "/accounts — Claude logins and their usage · /accounts add\n"
     "/policy — what to do when a chat hits the usage limit\n"
+    "/goal <objective> — keep Claude working until it's true · /goal alone clears it\n"
     "/profile [name|none] — show or set this chat's run profile\n"
     "/status — everything at a glance\n"
     "/help — this message\n\n"
@@ -34,7 +35,7 @@ HELP = (
 
 _EXPERIMENTAL_HELP = ("/agents — this chat's agents · /agents stop|hold|release\n"
                       "/tell <agent> <text> — message one agent in this chat\n"
-                      "/work — the project's work list · /work run [n] · /work pause|resume|stop\n")
+                      "/work — the project's work list\n")
 
 
 def help_text() -> str:
@@ -362,7 +363,7 @@ def on_message(msg: dict):
         back = 1 if text[len("/report"):].strip() == "last" else 0
         send(chat_id, report.render(report.weekly(chat_id, back=back)))
         return
-    if cmd0 in ("/accounts", "/policy"):
+    if cmd0 in ("/accounts", "/policy", "/goal"):
         # /accounts reads every account's usage meter — network, so off-thread.
         threading.Thread(target=handle_fallback_command, args=(chat_id, text),
                          daemon=True).start()
@@ -374,9 +375,12 @@ def on_message(msg: dict):
         send(chat_id, handle_agents_command(chat_id, text, thread), thread=thread)
         return
     if cmd0 == "/work":
-        send(chat_id, handle_work_command(chat_id, text, thread), thread=thread, markdown=False)
+        send(chat_id, handle_work_command(chat_id, thread), thread=thread, markdown=False)
         return
     if text == "/status":
+        from bridge import tgboard
+        if tgboard.status(chat_id, msg["chat"].get("type") == "private"):
+            return
         running = state.running_chats()
         st = f"busy · {len(running)} run(s)" if running else "idle"
         key = state.project_key(chat_id)
@@ -392,16 +396,15 @@ def on_message(msg: dict):
     _run_prompt(chat_id, text, thread=thread, msg_id=msg.get("message_id"))
 
 
-def handle_work_command(chat_id: int, text: str, thread=None) -> str:
-    """/work: the project's list, and its run (bridge/workrun.py)."""
-    from bridge import channel, experimental, workrun
+def handle_work_command(chat_id: int, thread=None) -> str:
+    """/work: the project's list. A task starts from the dashboard's Work panel (bridge/worklist.py)."""
+    from bridge import experimental, worklist
     if not experimental.enabled():
         return "The work list is experimental. Turn it on in the dashboard's Settings."
     s = (store.session_by_thread(chat_id, thread) if thread else None) \
         or store.latest_session(chat_id, state.project_key(chat_id))
-    if not s:
-        return "No chat here yet. Send a prompt first: that chat's agent manages a run."
-    return workrun.on_command(channel._main_of(s), text.strip().partition(" ")[2])
+    root = worklist.root_of((s or {}).get("cwd"))
+    return worklist.briefly(root) if root else "No project here yet. Send a prompt first."
 
 
 def handle_agents_command(chat_id: int, text: str, thread=None) -> str:
@@ -497,7 +500,7 @@ def _fallback_callback(cb: dict, chat_id: int, msg_id: int, data: str) -> None:
     kind = parts[1]
     if kind == "w":
         answer_cb(cb["id"], "Waiting for reset")
-        edit(chat_id, msg_id, "⏳ Waiting for the usage limit to reset.")
+        _fallback_line(cb, chat_id, msg_id, tgboard.CARD_LINE["w"])
         # The card's answer, so the bell stops asking (bridge/notices.py needs()),
         # and so does the dashboard chat's card (the parked status's offer).
         limits.offer(sid, None)
@@ -511,9 +514,17 @@ def _fallback_callback(cb: dict, chat_id: int, msg_id: int, data: str) -> None:
         return
     answer_cb(cb["id"], "Starting…")
     taken = ladder.take(session, chat_id, rung)
-    edit(chat_id, msg_id,
-         f"↪ Continuing on {rung['label']}." if taken else
-         "⚠️ Couldn't hand the work over — still parked until the limit resets.")
+    _fallback_line(cb, chat_id, msg_id,
+                   f"↪ Continuing on {rung['label']}." if taken else
+                   "⚠️ Couldn't hand the work over — still parked until the limit resets.")
+
+
+def _fallback_line(cb: dict, chat_id: int, msg_id: int, line: str) -> None:
+    """The card's answer: its text rewritten, or its caption when it is a limit card."""
+    if (cb.get("message") or {}).get("widget") is not None:
+        tgboard.card_caption(chat_id, msg_id, line)
+    else:
+        edit(chat_id, msg_id, line)
 
 
 def _relogin_callback(cb: dict, chat_id: int, msg_id: int, data: str) -> None:
@@ -566,6 +577,7 @@ def _accounts_text() -> str:
             "usage unknown" if m["logged_in"] else "login expired — /accounts login")
         tags = " (default)" if a["default"] else ""
         tags += " (disabled)" if a["disabled"] else ""
+        tags += " (out of Auto-switch)" if not a["auto_switch"] else ""
         plan = f"{a['plan']} · " if a.get("plan") else ""
         lines.append(f"{a['slot']}. {a['email'] or 'unknown'} — {plan}{meter}{tags}")
     return ("Claude accounts:\n" + "\n".join(lines) +
@@ -575,9 +587,28 @@ def _accounts_text() -> str:
 
 
 def handle_fallback_command(chat_id: int, text: str) -> bool:
-    """Handle /accounts and /policy. Returns whether the text was ours."""
+    """Handle /accounts, /policy and /goal. Returns whether the text was ours."""
     cmd, _, arg = text.strip().partition(" ")
     arg = arg.strip()
+    if cmd == "/goal":
+        # This chat's session, as /policy: goals.set_by_user is /goal on every
+        # surface — set it (and start now when idle), or clear it when bare.
+        from bridge import goals
+        s = store.latest_session(chat_id, state.project_key(chat_id))
+        if not s:
+            send(chat_id, "No chat here yet — send a prompt first.")
+            return True
+        had = goals.get(s["id"])
+        goal, refusal = goals.set_by_user(s, arg)
+        if refusal:
+            send(chat_id, refusal)
+        elif goal:
+            send(chat_id, f"◎ Goal set — {goals.title_of(goal)}\nClaude re-prompts itself after "
+                          f"each turn until it's done, {goals.MAX_ITER} turns at most. /goal alone clears it.")
+        else:
+            send(chat_id, "Goal cleared." if had else
+                 "No goal here. /goal <objective> keeps Claude working until it's true.")
+        return True
     if cmd == "/policy":
         if not arg:
             send(chat_id, _policy_text())

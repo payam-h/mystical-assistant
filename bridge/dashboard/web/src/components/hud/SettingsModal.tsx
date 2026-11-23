@@ -1,5 +1,5 @@
 import {
-  Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore,
+  Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore,
   type CSSProperties, type ReactNode,
 } from "react";
 import {
@@ -10,15 +10,20 @@ import {
   Monitor, Moon, Network, Palette, Play, Plug, Puzzle, Wrench,
   Power, ScanLine, ScrollText, Search, Server, 
   SlidersHorizontal, Sparkles, SquareTerminal, TriangleAlert, Type,
-  Upload, Waypoints, type LucideIcon,
+  Upload, Waypoints, RotateCw, Send, type LucideIcon,
   ChevronDown, ChevronRight, FileArchive, FolderGit2, Layers, HardDrive, HardDriveDownload, HardDriveUpload, 
-  ListChecks, Package, PackageOpen, Truck, AppWindow, AppWindowMac, Pin,
+  ListChecks, Package, PackageOpen, Truck, AppWindow, AppWindowMac, Pin, AlignLeft, Clock3, GitFork, Plus,
 } from "lucide-react";
 import { CHAT_BGS, type ChatBg } from "../../lib/toolwidget";
 import { toolAccent } from "../../lib/tools";
+import { fadeBand, fadeMask, type HeadLook } from "../../lib/headlook";
 
-import { ago, projectName, windowLabels } from "../../lib/surfaces";
-import { ExtrasFold, SkillsPage } from "./SkillsFold";
+import { ago, projectName, setClock12, useClock12, windowLabels } from "../../lib/surfaces";
+import { fmtOffset, matchZones, placeName, zoneCity, zoneList, zoneTime } from "../../lib/almanac";
+import { ExtrasFold, FLOW_SWITCHES, SkillsPage } from "./SkillsFold";
+import { Switch } from "../ui/Switch";
+export { Switch };   // its own module: Composer imports it without this file
+import { saverFoot } from "../../lib/savers";
 import { DeviceRunsPanel } from "./DeviceRunsPanel";
 import { UsageSharingSection } from "./UsageSharing";
 import { StorageSection } from "./StorageSection";
@@ -30,9 +35,13 @@ import { openSession } from "../../lib/devicerun";
 import { ChatImagesSection } from "./ChatImagesSection";
 import { ProfilePick, ProjectsSettings, type ProjectsSettingsProps } from "./ProjectsSettings";
 import { WorkspacesSettings } from "./WorkspacesSettings";
+import { Mark } from "./CouncilPanel";
+import { agentName, benchNames, reviewerName, who } from "../../lib/council";
 import {
   api,
   type AccountInfo,
+  type CouncilAccount,
+  type CouncilSettings,
   type EnvSetting,
   type Integration,
   type AcpAccount,
@@ -45,6 +54,7 @@ import {
   type RivendellInstance,
   type RivendellInput,
   type RivendellStatus,
+  type Saver,
   type StartupState,
   type UpdateInfo,
   type VideoTools,
@@ -56,6 +66,8 @@ import {
   type MoveRead,
   type MoveSection,
   type MoveSectionKey,
+  type Place,
+  type Weather,
 } from "../../api";
 import { fmtBytes, fmtDur, nextAction, nextLabel } from "./MoveDock";
 import {
@@ -76,6 +88,7 @@ import {
   type Family,
   type HudSettings,
   type ThemeKey,
+  type WorldClock,
 } from "../../lib/theme";
 import { describe, importLegacy, type Profile, type ProfilesInfo, type ProfileWrite } from "../../lib/profiles";
 import { AGENT_DEFAULT, agentLabel, optionRows, setAgentLabels } from "../../lib/agents";
@@ -85,16 +98,18 @@ import { useAiFeatures } from "../../lib/ai";
 import { setIntegrations, useIntegrations } from "../../lib/integrations";
 import { ExtPluginCard } from "./ExtPluginCard";   // fork: plugins
 import { askConfirm } from "../ui/Ask";
-import { TONES, chime, pushSupported, requestPush, type ToneKey } from "../../lib/push";
+import { TONES, chime, push, pushGranted, pushSupported, requestPush, type ToneKey } from "../../lib/push";
 import { isNativeApp, isWinApp, macRebuild, macSet, useMacSettings, type MacSwitch } from "../../lib/mac";
-import { EFFORTS, PERMS, PONYTAILS } from "../Composer";
-import { latestPerFamily } from "../../models";
-import { UpdateButton } from "./UpdateButton";
+import { EFFORTS, FlowsSettings, PERMS, PONYTAILS } from "../Composer";
+import { changeFlows, useFlowSettings } from "../../lib/flowsettings";
+import { latestPerFamily, modelRows } from "../../models";
+import { UpdateButton, type Feed } from "./UpdateButton";
 import { restartBridge } from "../../lib/restart";
 import { takeSettingsFocus } from "../../lib/opensettings";
 import { testText } from "../../lib/rivendelltasks";
 import { PromptBubble } from "../PromptBubble";
 import { FinalResult } from "../RunStream";
+import { Keys } from "../ui/Keys";
 
 export interface SettingsModalProps {
   /** The open session's folder: which project's servers and skills EXPERIMENTAL lists. */
@@ -109,7 +124,7 @@ export interface SettingsModalProps {
   onToggle: (key: "scanlines" | "sweep" | "glow") => void;
   onPatch: (patch: Partial<HudSettings>) => void;
   models: { id: string; label: string }[];
-  onFeed: (texts: string[], project?: string, fresh?: boolean) => void; // a failed self-update hands git's error to Claude
+  onFeed: Feed; // a failed self-update hands git's error to Claude
   onClose: () => void;
   // A profile can carry the open session's tool switches, so the panel reads them.
   sessionTools: string[];
@@ -127,6 +142,10 @@ export interface SettingsModalProps {
   projects: ProjectsSettingsProps;
   /** The open session's project — where SETTINGS ▸ Skills starts. */
   project: string | null;
+  // APPEARANCE ▸ CLOCK & WEATHER: App's weather (lib/ambient useWeather) and its two setters.
+  weather: Weather;
+  onSetUnit: (unit: string) => Promise<string | null>;
+  onSetPlace: (p: Place) => Promise<string | null>;
   /** The open session, and any chat by id: AGENT TOOLS' This chat and its activity's links. */
   sessionId?: string | null;
   chatInfo?: (id: string) => ChatInfo | undefined;
@@ -155,6 +174,8 @@ export type Tab = "appearance" | "transcript" | "notifications"
 const LEGACY_TAB: Record<string, string> = { session: "PROFILES", accounts: "ACCOUNTS", mcp: "MCP SERVERS", ai: "MODEL-SPENDING EXTRAS" };
 export function normalizeTab(t: string | undefined): { tab: Tab | undefined; sec: string | null } {
   if (t === "plugins") return { tab: "integrations", sec: "RIVENDELL" };
+  // The Almanac's ⚙ (openSettings("clock")).
+  if (t === "clock") return { tab: "appearance", sec: "CLOCK & WEATHER" };
   if (t && t in LEGACY_TAB) return { tab: "aimgmt", sec: LEGACY_TAB[t] };
   return { tab: t as Tab | undefined, sec: null };
 }
@@ -171,47 +192,49 @@ export function normalizeTab(t: string | undefined): { tab: Tab | undefined; sec
 // `about` is the page's own first line: what the category is FOR, in a
 // sentence. The rail's hint names what's inside; nothing said why you'd open
 // it, so every page began on its first block and left you to work that out.
-const TABS: { key: Tab; label: string; hint: string; about: string; icon: LucideIcon; group: string }[] = [
-  { key: "appearance", label: "APPEARANCE", hint: "theme · type", icon: Palette, group: "THE HUD",
+// `lede` is the page head's one line (2026-11-06, LIVE RAIL): `about` ran two or three
+// lines on every page and pushed its first block below the fold; it now waits behind the ⓘ.
+const TABS: { key: Tab; label: string; hint: string; lede: string; about: string; icon: LucideIcon; group: string }[] = [
+  { key: "appearance", label: "APPEARANCE", hint: "theme · type", lede: "How the dashboard looks: theme, typeface, size.", icon: Palette, group: "THE HUD",
     about: "How the dashboard looks: its theme and colour, its typeface and size." },
-  { key: "transcript", label: "TRANSCRIPT", hint: "how a session draws", icon: ScrollText, group: "THE HUD",
+  { key: "transcript", label: "TRANSCRIPT", hint: "how a session draws", lede: "How a session reads, and what shows while it works.", icon: ScrollText, group: "THE HUD",
     about: "How a session reads: the chat layout, the composer's send key, the ground every turn is drawn on, whether results start open, and what shows while it works." },
-  { key: "notifications", label: "NOTIFY", hint: "events · quiet · sound", icon: Bell, group: "THE HUD",
+  { key: "notifications", label: "NOTIFY", hint: "events · quiet · sound", lede: "What interrupts you, and where.", icon: Bell, group: "THE HUD",
     about: "What interrupts you, and how: for each kind of news — a session, a Rivendell job, a PR — a pop-up, a sound, a Telegram message, or only the bell." },
   // Only inside the native app — Mystical.app or Mystical.exe (RAIL and the
   // search both skip it elsewhere): the switches that are the app's, not the
   // page's (lib/mac). One tab, named for the shell it's in.
-  { key: "mac", label: isWinApp() ? "WINDOWS APP" : "MAC APP", hint: isWinApp() ? "window · tray · hotkey" : "window · dock · panel",
+  { key: "mac", label: isWinApp() ? "WINDOWS APP" : "MAC APP", hint: isWinApp() ? "window · tray · hotkey" : "window · dock · panel", lede: isWinApp() ? "What only the Windows app can do." : "What only the Mac app can do.",
     icon: isWinApp() ? AppWindow : AppWindowMac, group: "THE HUD",
     about: isWinApp()
       ? "What only the Windows app can do: the window's title, the floating WAITING ON YOU panel, the Win+Ctrl+A summon, and rebuilding the app after an update."
       : "What only the Mac app can do: the window's title, the Dock icon, the floating WAITING ON YOU panel, and rebuilding the app after an update." },
   // First under THE WORK: where the work happens. It was the last fold of AI
   // MANAGEMENT, where a long list of repos had to share a page with logins.
-  { key: "projects", label: "PROJECTS", hint: "names · marks · sidebar", icon: FolderGit2, group: "THE WORK",
+  { key: "projects", label: "PROJECTS", hint: "names · marks · sidebar", lede: "Every repo the bridge can run in.", icon: FolderGit2, group: "THE WORK",
     about: "Every repo the bridge can run in, and what each keeps for itself: its name and mark, the profile its sessions start on, whether the sidebar lists it, its run command, design link and lessons." },
   // Beside PROJECTS: which of them the sidebar shows together. Right-clicking
   // the sidebar's workspace button lands here.
-  { key: "workspaces", label: "WORKSPACES", hint: "sidebar · project sets", icon: Layers, group: "THE WORK",
+  { key: "workspaces", label: "WORKSPACES", hint: "sidebar · project sets", lede: "Sets of projects the sidebar shows one at a time.", icon: Layers, group: "THE WORK",
     about: "Split the sidebar into sets of projects, like a browser's workspaces: personal and work apart. The sidebar shows one at a time; Default takes every project you haven't moved." },
   // Who runs a session. One page, four folds — it was tabs (SESSION, MCP,
   // ACCOUNTS, AI) that each held a piece of the same question, and the
   // sidebar's SKILLS panel besides.
-  { key: "aimgmt", label: "AI MANAGEMENT", hint: "accounts · agents · extras · claude mcp", icon: KeyRound, group: "THE WORK",
+  { key: "aimgmt", label: "AI MANAGEMENT", hint: "accounts · agents · extras · claude mcp", lede: "Who runs your sessions, and with what.", icon: KeyRound, group: "THE WORK",
     about: "Who runs your sessions and with what: the logins and the profiles bound to them, the extras and MCP servers they can reach, and the default profile." },
   // A fold of AI MANAGEMENT and a tab of the project window before; one page now,
   // with any repo's skills a pick away (.mystical/design-drafts/project-split).
   // Claude's: Kimi Code reads its own (~/.agents/skills, a project's .agents/skills).
-  { key: "skills", label: "CLAUDE SKILLS", hint: "project · machine · catalog", icon: Puzzle, group: "THE WORK",
+  { key: "skills", label: "CLAUDE SKILLS", hint: "project · machine · catalog", lede: "SKILL.md files a session can reach without you typing them.", icon: Puzzle, group: "THE WORK",
     about: "What a Claude session can reach that you didn't type: the SKILL.md files in a project or on this machine, the catalog to install from, and Claude Code plugins. Other agents keep their own — Kimi Code reads ~/.agents/skills and a project's .agents/skills." },
   // Behind the experimental switch it takes CLAUDE SKILLS' place in the rail (railFor).
-  { key: "agenttools", label: "AGENT TOOLS", hint: "mcp · skills · rules · hooks", icon: Wrench, group: "THE WORK",
+  { key: "agenttools", label: "AGENT TOOLS", hint: "mcp · skills · rules · hooks", lede: "What each agent can reach, and who said so.", icon: Wrench, group: "THE WORK",
     about: "What each agent can reach and who said so: MCP servers, skills, built-in and Mystical tools, at the machine, a project or a chat. Rules and hooks for what should happen when they run." },
-  { key: "integrations", label: "INTEGRATIONS", hint: "installed · available", icon: Waypoints, group: "THE WORK",
+  { key: "integrations", label: "INTEGRATIONS", hint: "installed · available", lede: "Other systems the bridge does work for.", icon: Waypoints, group: "THE WORK",
     about: "Other systems the bridge does work for. Each one ships with Mystical but stays silent until you install it: no tab, no card, no rows, no worker." },
-  { key: "system", label: "SYSTEM", hint: "storage · bridge · updates", icon: Server, group: "THE WORK",
+  { key: "system", label: "SYSTEM", hint: "storage · bridge · updates", lede: "The bridge itself: startup, storage, updates, environment.", icon: Server, group: "THE WORK",
     about: "The bridge itself: what its sessions left on disk, its address, starting at login, the API inspector, updates, and every setting it reads from its environment." },
-  { key: "move", label: "MOVE", hint: "export · import", icon: Truck, group: "THE WORK",
+  { key: "move", label: "MOVE", hint: "export · import", lede: "Carry this bridge to another machine in one file.", icon: Truck, group: "THE WORK",
     about: "Carry this bridge to another machine. EXPORT packs your repos' unpushed work, MCP servers, plugins, Claude Code settings and chat history into one file; IMPORT replays a file from another machine here." },
 ];
 const RAIL = TABS.filter((t) => t.key !== "mac" || isNativeApp());
@@ -233,20 +256,25 @@ const INDEX: { tab: Tab; sec: string; terms: string }[] = [
   { tab: "appearance", sec: "THEME", terms: "colour color palette scheme aurora claude flint phosphor dark light day bright" },
   { tab: "appearance", sec: "CRT EFFECTS", terms: "scanlines scan sweep text glow bloom raster" },
   { tab: "appearance", sec: "TYPE", terms: "font typeface monospace family text size zoom bigger smaller scale px auto base preview" },
+  { tab: "appearance", sec: "CLOCK & WEATHER", terms: "clock time format 12h 24h am pm almanac calendar weather city location place celsius fahrenheit units temperature world clock time zone timezone header pin" },
   { tab: "appearance", sec: "LOADING SCREEN", terms: "loading screen boot intro splash startup restart scene emblem gandalf balrog you shall not pass khazad-dum bridge durin door moria mellon speak friend enter shuffle random lord of the rings lotr middle-earth" },
   { tab: "transcript", sec: "WHILE IT WORKS", terms: "working indicator status line nyan cat orbit" },
   { tab: "transcript", sec: "LAYOUT", terms: "layout compact default chat bubbles right side header pill composer model popover effort slider permissions prompt box tabs console classic" },
+  { tab: "transcript", sec: "HEADER", terms: "header island pill bar shape fade dissolve gradient glass frosted blur clear solid transparent hide scroll auto-hide last line search switch chat agents tickets" },
   { tab: "transcript", sec: "COMPOSER", terms: "send key enter ctrl+enter cmd newline shift submit message keyboard shortcut" },
   { tab: "transcript", sec: "RESULTS", terms: "auto-open results bash output edit diffs collapse steps fold" },
   { tab: "transcript", sec: "THE GROUND", terms: "background pattern texture ground graph grid dots matrix ruled lines tooth grain noise paper lamp light haze wash mat wallpaper chat background" },
   { tab: "notifications", sec: "WHAT INTERRUPTS YOU", terms: "events pop up toast banner sound tone telegram away rivendell pr finished failed question approval" },
   { tab: "notifications", sec: "QUIET HOURS", terms: "quiet hours night do not disturb dnd mute schedule" },
   { tab: "notifications", sec: "THIS BROWSER", terms: "os notifications browser push permission alert sound volume chime mute" },
-  { tab: "mac", sec: "WINDOW", terms: "mac app windows app title bar session name dock icon keep cmd-tab space tray hotkey summon shortcut win ctrl a" },
+  { tab: "mac", sec: "WINDOW", terms: "mac app windows app title bar session name dock icon keep cmd-tab space tray hotkey summon shortcut win ctrl a cmd control" },
   { tab: "mac", sec: "PANEL", terms: "floating panel waiting on you always on top every space window" },
   { tab: "mac", sec: "APP", terms: "rebuild version screen capture recording permission mystical.exe mystical.app" },
   { tab: "aimgmt", sec: "PROFILES", terms: "model mode effort ponytail permission plan bypass opus sonnet run defaults default profile preset saved knobs tools agent account login bind" },
   { tab: "aimgmt", sec: "MODEL-SPENDING EXTRAS", terms: "ai features extras titles guard next-up scout summaries lessons dreaming cost tokens spending" },
+  { tab: "aimgmt", sec: "FLOWS", terms: "flows flow steps grill design build refactor fix ship ask review retro audit tickets parts guess compact wait go on" },
+  { tab: "aimgmt", sec: "SAVERS", terms: "savers cheaper turns cost tokens concise replies subagent effort trim test output pytest vitest jest cache one-shot trial coin flip experiment" },
+  { tab: "aimgmt", sec: "COUNCIL", terms: "council review reviewers codex claude bar score pass rounds stop early origin push code-review" },
   { tab: "aimgmt", sec: "MCP SERVERS", terms: "mcp server tool connect authenticate auth oauth token expired reconnect logout remove playwright github notion figma" },
   { tab: "aimgmt", sec: "ADD A SERVER", terms: "mcp add new server url command stdio http sse scope install connector" },
   { tab: "aimgmt", sec: "ACCOUNTS", terms: "policy wait switch fallback reset quota account add sign in oauth profile login agent acp codex opencode gemini kimi moonshot api key install test other agent" },
@@ -391,6 +419,7 @@ const SEC_ICONS: Record<string, LucideIcon> = {
   "CRT EFFECTS": ScanLine,
   TYPE: Type,
   "LOADING SCREEN": Hourglass,
+  "CLOCK & WEATHER": Clock3,
   "WORKING INDICATOR": AudioLines,
   RESULTS: ListTree,
   "WHAT INTERRUPTS YOU": Bell,
@@ -432,6 +461,7 @@ const SEC_DESC: Record<string, string> = {
   "CRT EFFECTS": "The tube laid over the screen: raster lines, a roaming glow, bloom on headings.",
   TYPE: "The typeface the HUD is set in, and the base size every other size scales from.",
   "LOADING SCREEN": "What fills the screen while the dashboard starts, and while it restarts.",
+  "CLOCK & WEATHER": "What the Clock at the top shows, and its Almanac: the time format, the weather city and units, and up to two world clocks.",
   "THE GROUND": "The texture the transcript sits on.",
   RESULTS: "Whether command output and diffs start open or folded.",
   "WORKING INDICATOR": "The tab you pick is the one the dashboard shows while it works.",
@@ -551,6 +581,7 @@ export function Row({ label, desc, info, first, children }: {
  *  for. The rail already said the first; nothing said the second. */
 function PageHead({ tab }: { tab: (typeof TABS)[number] }) {
   const voice = useVoice();
+  const [more, setMore] = useState(false);
   return (
     <div className="set-head" style={{ marginBottom: 30 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -559,9 +590,11 @@ function PageHead({ tab }: { tab: (typeof TABS)[number] }) {
           {voice(tab.label)}
         </h2>
       </div>
-      <p style={{ margin: "9px 0 0", maxWidth: 600, fontSize: "var(--t10)", lineHeight: 1.7, color: "var(--txm)" }}>
-        {tab.about}
+      <p style={{ margin: "9px 0 0", maxWidth: 600, fontSize: "var(--t10)", lineHeight: 1.7, color: "var(--txm)", display: "flex", alignItems: "center", gap: 8 }}>
+        <span>{tab.lede}</span>
+        <InfoDot on={more} about={`the ${tab.label.toLowerCase()} page`} onClick={() => setMore(!more)} />
       </p>
+      {more && <div style={{ ...ASIDE, maxWidth: 600 }}>{tab.about}</div>}
       {/* The panel's drawline: teal under the title, gone by the far edge. */}
       <div className="set-drawline" style={{
         height: 1, marginTop: 16,
@@ -598,9 +631,6 @@ function Placeholder({ icon: Icon, spin, children }: {
 
 /** On/off, the way an app's settings page says it: a toggle (each family
  *  draws its own — index.css, THE FAMILIES · SETTINGS). */
-export function Switch({ on, onClick, label }: { on: boolean; onClick: () => void; label?: string }) {
-  return <button className="set-toggle" role="switch" aria-checked={on} aria-label={label} data-on={on || undefined} onClick={onClick}><i /></button>;
-}
 
 function Volume({ value, disabled, onChange }: { value: number; disabled?: boolean; onChange: (v: number) => void }) {
   return (
@@ -922,12 +952,19 @@ const SAMPLE_ANSWER = "The strip counted pictures per turn, not per WORK zone, s
  *  re-declares the type scale (index.css), so its --fs reaches every --t*
  *  inside; --ui-font is the face DOSSIER's prose reads (--d-face). Inert: a
  *  picture, not a turn. */
-function TypePreview({ stack, size, settings }: { stack: string; size: number; settings: HudSettings }) {
+function TypePreview({ stack, size, settings, withHead }: { stack: string; size: number; settings: HudSettings; withHead?: boolean }) {
   const now = Math.floor(Date.now() / 1000);
+  // CHAT's preview wears the header too (HEADER's rows), with the turn starting
+  // a little under it, so its fade and glass show on real words.
+  const pill = settings.layout === "compact" && settings.head.shape === "pill";
+  const bottom = settings.layout === "compact" ? 44 : 50;
+  const band = withHead ? fadeBand(settings.head.fade, bottom, pill) : null;
   return (
     <div className="typepv" inert data-bg={settings.chatBg} data-layout={settings.layout}
-      style={{ "--fs": `${size}px`, "--ui-font": stack } as CSSProperties}>
-      <div data-style="dossier" style={{ fontFamily: "var(--mono)", fontSize: "var(--t13)", lineHeight: 1.6 }}>
+      style={{ "--fs": `${size}px`, "--ui-font": stack, ...(withHead ? { paddingTop: 0 } : {}) } as CSSProperties}>
+      {withHead && <PreviewHead settings={settings} pill={pill} />}
+      <div data-style="dossier" style={{ fontFamily: "var(--mono)", fontSize: "var(--t13)", lineHeight: 1.6,
+        ...(withHead ? { paddingTop: bottom - 18 } : {}), ...(band ? { maskImage: fadeMask(band), WebkitMaskImage: fadeMask(band) } : {}) }}>
         <div className="dturn flex flex-col gap-2" data-last>
           <div className="dprompt"><PromptBubble text={SAMPLE_ASK} at={now - 126} run={SAMPLE_RUN} /></div>
           <div className="dreply relative space-y-1.5">
@@ -936,6 +973,29 @@ function TypePreview({ stack, size, settings }: { stack: string; size: number; s
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** The chat header as HEADER's rows draw it (Terminal.tsx's island, standing still): the
+ *  view switch, the ⌕ when it is on, in a pill or a bar, behind its glass. */
+function PreviewHead({ settings, pill }: { settings: HudSettings; pill: boolean }) {
+  const h = settings.head;
+  return (
+    <div className={pill ? "isle isle-pill" : "panel isle"} data-glass={h.glass}
+      style={{ position: "absolute", top: 8, zIndex: 2, ...(pill ? { right: 16 } : { left: 16, right: 16 }),
+        borderRadius: pill ? 999 : undefined, border: "1px solid color-mix(in srgb, var(--acc) 20%, transparent)" }}>
+      <div aria-hidden className="isle-glass" style={{ position: "absolute", inset: 0, borderRadius: "inherit",
+        background: `color-mix(in srgb, var(--panel) ${pill ? 97 : 88}%, transparent)`, backdropFilter: "blur(10px) saturate(1.15)" }} />
+      <div className="isle-reads" style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10,
+        height: settings.layout === "compact" ? 34 : 40, padding: "0 12px" }}>
+        {h.search && <span className="ma-cs-btn"><Search size={13} strokeWidth={2} aria-hidden /></span>}
+        <span className="ma-viewsw">
+          <button type="button" aria-pressed className="caps">Chat</button>
+          <button type="button" className="caps">Agents 2</button>
+          <button type="button" className="caps">Tickets 3/5<i aria-hidden className="vs-prog" style={{ "--p": "60%" } as CSSProperties} /></button>
+        </span>
       </div>
     </div>
   );
@@ -1058,7 +1118,7 @@ function TypePicker({ settings, autoBase, onPatch }: {
 }
 
 /** What the bridge's own checkout is running, and the pull-and-restart button. */
-function UpdatePanel({ onFeed }: { onFeed: (texts: string[], project?: string, fresh?: boolean) => void }) {
+function UpdatePanel({ onFeed }: { onFeed: Feed }) {
   const [info, setInfo] = useState<UpdateInfo | null>(null);
   useEffect(() => {
     let live = true;
@@ -1114,7 +1174,7 @@ const POLICY_OPTS: { label: string; value: string }[] = [
 
 const POLICY_BLURB: Record<string, string> = {
   ask: "Offer the choices (other account · wait) and stay parked until you pick.",
-  auto: "Take the best fallback immediately and report which one it landed on.",
+  auto: "Take the best fallback immediately and report which one it landed on. Accounts out of Auto-switch are only offered to you.",
   wait: "Only wait for the window to reset — the behaviour before the ladder existed.",
 };
 
@@ -1201,15 +1261,16 @@ const MAC_BTN: CSSProperties = {
  *  lands in the bell whatever is picked here. */
 const NOTIFY_ROWS: { head: string; ask?: boolean; rows: [string, string, string?][] }[] = [
   { head: "NEEDS YOU · always in the bell, pinned", ask: true, rows: [
-    ["ask", "Approval or question", "a session's card, or a Rivendell run that paused for you"],
+    ["ask", "Approval or question", "a session's card, a goal that needs you, or a Rivendell run that paused for you"],
     ["rv_offer", "Rivendell offer", "a teammate's job that would run on your accounts"],
     ["account", "Login expired · limit choice"]] },
   { head: "SESSIONS", rows: [
-    ["done", "Finished"],
+    ["done", "Finished", "or met its goal"],
     ["failed", "Failed", "with the reason: context full, API error, killed…"],
     ["parked", "Paused by the usage limit", "it resumes on its own at the reset"],
     ["resumed", "Resumed or retrying on its own", "after a restart, a limit reset, an API error or a sign-in; a Rivendell link back"],
-    ["started", "Started elsewhere", "Telegram, Rivendell, a goal's next turn"]] },
+    ["started", "Started elsewhere", "Telegram, Rivendell, a goal's next turn"],
+    ["tickets", "Parts", "a task's parts wait for Approve & build or a part of yours for Go (only these go to Telegram), a part needs a fix, or the parts stop"]] },
   { head: "RIVENDELL", rows: [
     ["rv_held", "Job held behind running work", "it starts by itself; RUN IT TOO starts it now"],
     ["rv_done", "Job done", "PR review, implementation, todolist, changelog…"],
@@ -1235,9 +1296,81 @@ function NotifyPanel({ settings, onPatch }: { settings: HudSettings; onPatch: (p
   const save = (p: NoticePrefsPatch) =>
     void api.noticePrefs(p).then((r) => setPrefs(r.prefs), (e: Error) => notify("error", e.message));
   const q = prefs?.quiet;
+  // Where news can reach you comes first (2026-11-06, A · CHANNELS + GRID): this
+  // browser's banner, its sound, Telegram, each with its state and a way to try it.
+  // What each kind of news may do is the grid under them, as before.
+  const granted = settings.push && pushGranted();
   return (
     <>
-      <Section title="WHAT INTERRUPTS YOU">
+      <div className="ntf-ch" data-sec="THIS BROWSER">
+        <div className="ntf-chc">
+          <div className="t"><Monitor size={15} strokeWidth={1.7} aria-hidden />Pop-up
+            <span className="ntf-st" data-ok={granted || undefined}>{!pushSupported() ? "not here" : granted ? "allowed" : settings.push ? "blocked" : "off"}</span></div>
+          <div className="s">{pushSupported() ? "the system banner, while no dashboard window has focus" : "this browser has no banners; pop-ups stay inside"}</div>
+          <div className="f">
+            <Switch on={settings.push} label="system banners" onClick={() => {
+              if (settings.push) { onPatch({ push: false }); return; }
+              // Ask only on switch-on; a denial can't be re-asked, so the
+              // switch goes back off rather than sitting on and silent.
+              void requestPush().then((ok) => onPatch({ push: ok }));
+            }} />
+            <MiniBtn disabled={!granted} onClick={() => push("Mystical", "This is how a pop-up lands.", "ntf-test")}>Test</MiniBtn>
+          </div>
+        </div>
+        <div className="ntf-chc">
+          <div className="t"><AudioLines size={15} strokeWidth={1.7} aria-hidden />Sound
+            <span className="ntf-st" data-ok={settings.pushSound || undefined}>{settings.pushSound ? `${Math.round(settings.pushVolume * 100)}%` : "muted"}</span></div>
+          <div className="s">each event plays the tone picked in the grid</div>
+          <div className="f">
+            <Switch on={settings.pushSound} label="sounds" onClick={() => {
+              // Switching it on plays one — otherwise you find out how loud it
+              // is at the wrong moment.
+              if (!settings.pushSound) chime(settings.pushTone, settings.pushVolume);
+              onPatch({ pushSound: !settings.pushSound });
+            }} />
+            {/* Preview when the drag ends, not on every step. */}
+            <span className="ntf-vol" onPointerUp={() => chime(settings.pushTone, settings.pushVolume)}
+              onKeyUp={() => chime(settings.pushTone, settings.pushVolume)}>
+              <Volume value={settings.pushVolume} disabled={!settings.pushSound} onChange={(pushVolume) => onPatch({ pushVolume })} />
+            </span>
+          </div>
+        </div>
+        <div className="ntf-chc">
+          <div className="t"><Send size={15} strokeWidth={1.7} aria-hidden />Telegram
+            <span className="ntf-st" data-ok={(prefs && tg) || undefined}>{!prefs ? "…" : tg ? "on" : "off"}</span></div>
+          {prefs && tg ? (
+            <div className="s">“away” = no click or key in any dashboard for{" "}
+              <select value={prefs.away_min} aria-label="away after" style={{ ...field, padding: "1px 4px", letterSpacing: 0 }}
+                onChange={(e) => save({ away_min: Number(e.target.value) })}>
+                {[2, 5, 10, 15, 30].map((m) => <option key={m} value={m}>{m} min</option>)}
+              </select>
+            </div>
+          ) : (
+            <div className="s">{prefs ? "pings are off in System ▸ Telegram, so its column waits" : "reading…"}</div>
+          )}
+        </div>
+      </div>
+
+      {q && (
+        <div className="ntf-quiet" data-sec="QUIET HOURS">
+          <div className="k"><Moon size={14} strokeWidth={1.7} aria-hidden />Quiet hours</div>
+          <span className="h">{q.on ? `nothing pops up, sounds or reaches Telegram${q.needs ? " but what needs you" : ""}` : "off"}</span>
+          {q.on && (
+            <>
+              <input type="time" value={q.from} aria-label="quiet from" style={{ ...field, letterSpacing: 0 }}
+                onChange={(e) => e.target.value && save({ quiet: { from: e.target.value } })} />
+              <span className="h">–</span>
+              <input type="time" value={q.to} aria-label="quiet to" style={{ ...field, letterSpacing: 0 }}
+                onChange={(e) => e.target.value && save({ quiet: { to: e.target.value } })} />
+              <button className={`ntf-needs${q.needs ? " on" : ""}`} aria-pressed={q.needs} title="an approval at 23:00 still reaches you"
+                onClick={() => save({ quiet: { needs: !q.needs } })}>needs you gets through</button>
+            </>
+          )}
+          <Switch on={q.on} label="quiet hours" onClick={() => save({ quiet: { on: !q.on } })} />
+        </div>
+      )}
+
+      <Section title="WHAT INTERRUPTS YOU" top>
         {old || !prefs ? (
           <div style={{ ...CARD, fontSize: "var(--t10)", color: "var(--txd)", lineHeight: 1.6 }}>
             {old ? "This bridge started before per-event notifications. Restart it to choose them here." : "Reading…"}
@@ -1258,13 +1391,14 @@ function NotifyPanel({ settings, onPatch }: { settings: HudSettings; onPatch: (p
                           <td><span className="ev">{label}{desc && <small>{desc}</small>}</span></td>
                           <td><button className={`ntf-ck${r.pop ? " on" : ""}`} role="checkbox" aria-checked={r.pop} aria-label={`${label}: pop up`}
                             onClick={() => save({ events: { [key]: { pop: !r.pop } } })}>{r.pop ? "✓" : ""}</button></td>
-                          <td><select value={r.sound} aria-label={`${label}: sound`} style={{ ...field, padding: "3px 6px", letterSpacing: 0 }}
+                          <td><select value={r.sound} aria-label={`${label}: sound`} className="ntf-tone" data-none={r.sound === "none" || undefined}
+                            style={{ ...field, padding: "3px 6px", letterSpacing: 0 }}
                             onChange={(e) => {
                               const sound = e.target.value as (typeof SOUND_OPTS)[number];
                               if (sound !== "none") chime(sound, settings.pushVolume);
                               save({ events: { [key]: { sound } } });
                             }}>
-                            {SOUND_OPTS.map((t) => <option key={t} value={t}>{t === "none" ? "none" : TONES[t].label.toLowerCase()}</option>)}
+                            {SOUND_OPTS.map((t) => <option key={t} value={t}>{t === "none" ? "—" : TONES[t].label.toLowerCase()}</option>)}
                           </select></td>
                           <td><span className={`ntf-tg${tg ? "" : " off"}`}>
                             {ROUTE_OPTS.map((o) => (
@@ -1280,82 +1414,10 @@ function NotifyPanel({ settings, onPatch }: { settings: HudSettings; onPatch: (p
               </tbody>
             </table>
             <div className="ntf-mxnote">
-              <b>Pop up</b> means a toast while a dashboard window has focus, and the system banner when none does — never both.{" "}
-              <b>Away</b> means no click or keypress in any dashboard window for{" "}
-              <select value={prefs.away_min} aria-label="away after" style={{ ...field, padding: "2px 4px", letterSpacing: 0 }}
-                onChange={(e) => save({ away_min: Number(e.target.value) })}>
-                {[2, 5, 10, 15, 30].map((m) => <option key={m} value={m}>{m} min</option>)}
-              </select>.
-              {!tg && <> Telegram pings are off in System ▸ Telegram, so that column waits.</>}
+              <b>Pop up</b> is a toast while a dashboard window has focus, and the system banner when none does — never both.
             </div>
           </div>
         )}
-      </Section>
-
-      {q && (
-        <Section title="QUIET HOURS" top>
-          <div style={CARD}>
-            <Row first label="QUIET HOURS" desc={q.on ? `Nothing pops up, sounds or reaches Telegram from ${q.from} to ${q.to}.` : undefined}>
-              <Switch on={q.on} onClick={() => save({ quiet: { on: !q.on } })} />
-            </Row>
-            {q.on && (
-              <>
-                <Row label="FROM · TO">
-                  <input type="time" value={q.from} aria-label="quiet from" style={{ ...field, letterSpacing: 0 }}
-                    onChange={(e) => e.target.value && save({ quiet: { from: e.target.value } })} />
-                  <input type="time" value={q.to} aria-label="quiet to" style={{ ...field, letterSpacing: 0 }}
-                    onChange={(e) => e.target.value && save({ quiet: { to: e.target.value } })} />
-                </Row>
-                <Row label="LET NEEDS YOU THROUGH" desc="An approval at 23:00 still reaches you.">
-                  <Switch on={q.needs} onClick={() => save({ quiet: { needs: !q.needs } })} />
-                </Row>
-              </>
-            )}
-          </div>
-        </Section>
-      )}
-
-      <Section title="THIS BROWSER" top>
-        <div style={CARD}>
-          <Row
-            first
-            label="OS NOTIFICATIONS"
-            info={pushSupported()
-              ? "The system banner for news that pops up while no dashboard window has focus. Telegram is set per event above."
-              : "This browser has no Notification API — pop-ups stay inside the dashboard."}
-          >
-            <Switch
-              on={settings.push}
-              onClick={() => {
-                if (settings.push) { onPatch({ push: false }); return; }
-                // Ask only on switch-on; a denial can't be re-asked, so the
-                // switch goes back off rather than sitting on and silent.
-                void requestPush().then((ok) => onPatch({ push: ok }));
-              }}
-            />
-          </Row>
-          <Row label="SOUNDS" desc="Each event plays the tone picked above; off mutes them all here.">
-            <Switch
-              on={settings.pushSound}
-              onClick={() => {
-                // Switching it on plays one — otherwise you find out how loud it
-                // is at the wrong moment.
-                if (!settings.pushSound) chime(settings.pushTone, settings.pushVolume);
-                onPatch({ pushSound: !settings.pushSound });
-              }}
-            />
-          </Row>
-          {settings.pushSound && (
-            <Row label="VOLUME">
-              {/* Preview when the drag ends, not on every step. */}
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}
-                onPointerUp={() => chime(settings.pushTone, settings.pushVolume)}
-                onKeyUp={() => chime(settings.pushTone, settings.pushVolume)}>
-                <Volume value={settings.pushVolume} onChange={(pushVolume) => onPatch({ pushVolume })} />
-              </div>
-            </Row>
-          )}
-        </div>
       </Section>
     </>
   );
@@ -1404,7 +1466,7 @@ function MacPanel() {
           )}
           {mac.hotkey !== undefined && (
             <Row
-              label="SUMMON WITH WIN+CTRL+A"
+              label={<>Summon with <Keys k={mac.platform === "windows" ? "Win+Ctrl+A" : "Control+Ctrl+A"} /></>}
               desc="A system-wide shortcut raises the dashboard from any app, and hides it again when it's already in front."
             >
               <Switch on={mac.hotkey} onClick={() => flip("hotkey")} />
@@ -1577,7 +1639,7 @@ function StartupSection() {
  *  restart to reach. Same precedence as the AI tab: what you set here beats
  *  .env, and RESET puts a row back to whatever .env said rather than to a
  *  hardcoded default — so the file stays the floor under all of this. */
-function EnvPanel() {
+function EnvPanel({ only }: { only?: string[] }) {
   const [rows, setRows] = useState<EnvSetting[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // Which row was refused, and why. A rejection belongs beside the field that
@@ -1606,7 +1668,7 @@ function EnvPanel() {
     return <Placeholder icon={TriangleAlert}>This bridge is running a build without the settings registry. Restart it.</Placeholder>;
 
   const shown = rows.filter((r) => !tunesOff(r.key, ai));
-  const groups = [...new Set(shown.map((r) => r.group))];
+  const groups = [...new Set(shown.map((r) => r.group))].filter((g) => !only || only.includes(g));
   const pending = rows.some((r) => r.source === "saved" && !r.live);
 
   return (
@@ -2000,6 +2062,7 @@ function IntegrationsPanel() {
   const [down, setDown] = useState("");   // why the list can't be read; "not found" is a bridge from before integrations
   const [busy, setBusy] = useState("");   // the plugin being installed or removed
   const [err, setErr] = useState<{ id: string; msg: string } | null>(null);   // shown on the card it belongs to
+  const [open, setOpen] = useState<string | null>("rivendell");   // the one row whose settings are showing
 
   // Every answer also goes to the shared store, so the tabs and buttons a
   // plugin brings appear or leave in the same frame.
@@ -2042,23 +2105,59 @@ function IntegrationsPanel() {
   ];
   const errLine = (id: string) => (err?.id === id ? <div style={{ color: "var(--err)", marginTop: 4 }}>{err.msg}</div> : undefined);
 
+  // CONNECTED as one list (2026-11-06, A · CONNECTED LIST): a row per integration
+  // saying where it stands; Configure opens its own panel in place, one at a time.
+  // Rivendell starts open, so a deep link to one of its instances still lands.
+  const rows: { id: string; chip: string; color: string; name: string; line: string; body: ReactNode; plugin?: Integration }[] = [];
+  for (const p of installed) {
+    const offer = OFFERS.find((o) => o.id === p.id);
+    rows.push({
+      id: p.id, chip: offer?.chip ?? p.label.slice(0, 2).toUpperCase(), color: offer?.color ?? "var(--acc)", name: p.label,
+      line: p.summary, plugin: p,
+      body: p.id === "rivendell" ? <RivendellPanel onChange={recount} />
+        : p.id === "design" ? <div className="int-note">Adds a Design system row to each repo in SETTINGS ▸ Projects (link · pull · sync), the composer's DESIGN button and the project menu's Design system.</div>
+        : p.ext ? <><div className="int-note">{p.blurb}</div><ExtPluginCard p={p} onChange={recount} /></>  /* fork: plugins */
+        : <div className="int-note">{p.blurb}</div>,
+    });
+    // Device runs ride on Rivendell (teammates there ask for them), so they list beside it.
+    if (p.id === "rivendell")
+      rows.push({ id: "devices", chip: "DR", color: "var(--info, var(--acc))", name: "Device runs",
+        line: "teammates' iOS runs on this device", body: <DeviceRunsPanel /> });
+  }
+
   return (
     <>
-      {installed.map((p, i) => (
-        <Section key={p.id} title={PLUGIN_SEC[p.id] ?? p.label} desc={p.blurb} info={PLUGIN_INFO[p.id]} top={i > 0}>
-          <div style={CARD}>
-            <Row first label={p.summary}
-              desc={p.id === "design"
-                ? <>Adds a Design system row to each repo in SETTINGS ▸ Projects (link · pull · sync), the composer's DESIGN button and the project menu's Design system.{errLine(p.id)}</>
-                : errLine(p.id)}>
-              <MiniBtn danger disabled={!!busy} onClick={() => void remove(p)} title={`Remove ${p.label}`}>REMOVE</MiniBtn>
-            </Row>
-          </div>
-          {p.id === "rivendell" && <div style={{ marginTop: 11 }}><RivendellPanel onChange={recount} /><DeviceRunsPanel /></div>}
-          {p.ext && <ExtPluginCard p={p} onChange={recount} />}  {/* fork: plugins */}
-        </Section>
-      ))}
-      <Section title="AVAILABLE" top={installed.length > 0}
+      <Section title="CONNECTED" desc={`${rows.length} here, each with its own settings.`}>
+        <div className="int-list">
+          {rows.map((r) => (
+            <div key={r.id} className="int-item" data-sec={r.plugin ? (PLUGIN_SEC[r.id] ?? undefined) : undefined}>
+              <div className="int-row">
+                <span className="int-chip" aria-hidden style={{ color: r.color, background: `color-mix(in oklab, ${r.color} 16%, var(--panel))` }}>{r.chip}</span>
+                <div className="int-who">
+                  <b>{r.name}</b>
+                  <span><i className="int-dot" aria-hidden />{r.line}</span>
+                </div>
+                <button className="int-cfg" aria-expanded={open === r.id} onClick={() => setOpen(open === r.id ? null : r.id)}>
+                  {open === r.id ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}Configure
+                </button>
+              </div>
+              {open === r.id && (
+                <div className="int-exp">
+                  {r.body}
+                  {r.plugin && (
+                    <div className="int-foot">
+                      {errLine(r.id) ?? <span />}
+                      <MiniBtn danger disabled={!!busy} onClick={() => void remove(r.plugin!)} title={`Remove ${r.name}`}>Remove {r.name}</MiniBtn>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+          {rows.length === 0 && <div className="int-note" style={{ padding: "14px 16px" }}>Nothing installed yet.</div>}
+        </div>
+      </Section>
+      <Section title="AVAILABLE" top
         desc={offers.length ? "Install one to connect it. Nothing is downloaded; the code is already here, switched off." : "Everything that ships with Mystical is installed."}>
         {offers.length > 0 && (
           // .aim scopes the card tokens (--l, --l2, --f) the aim-* classes read.
@@ -2884,9 +2983,9 @@ function useAccounts(onChanged: () => void) {
     })
     .catch(() => setRows([]));
   useEffect(() => { void load(); }, []);
-  async function act(action: "add" | "remove" | "disable" | "enable", slot?: number) {
+  async function act(action: Parameters<typeof api.accountAction>[0], slot?: number, on?: boolean) {
     setBusy(true); setErr(null);
-    try { await api.accountAction(action, slot); onChanged(); await load(); }
+    try { await api.accountAction(action, slot, on); onChanged(); await load(); }
     catch (e) { setErr(e instanceof Error ? e.message : "failed"); }
     finally { setBusy(false); }
   }
@@ -3143,6 +3242,111 @@ function AimFold({ id, title, hint, count, right, secs, defaultOpen = false, ope
   );
 }
 
+/** Savers (design-drafts/cli-signals row 6; bridge/savers.py): Claude Code's own
+ *  switches that make every turn cheaper, in the Extras' card grammar with the
+ *  Accounts fold's three-way switch. TRIAL puts one on every other new session
+ *  and scores both halves on their first turn; the card's floor says how far it
+ *  got and what it found (lib/savers saverFoot). The fourth card is the
+ *  one-shot cache: always on, no switch. A bridge older than Savers answers
+ *  404, and the fold isn't drawn. */
+const SAVER_ICONS: Record<string, LucideIcon> = { concise: AlignLeft, subagent_effort: GitFork, trim_tests: ListChecks };
+const SAVER_ABOUT: Record<string, string> = {
+  concise: "Claude Code's built-in Concise style, sent with each run: the result first, no recap, the same work. It shapes the reply itself, not how the transcript draws it; Ponytail, when on, still applies.",
+  subagent_effort: "CLAUDE_CODE_SUBAGENT_EFFORT=medium on each run: subagents stop inheriting the session's effort, which is usually the highest.",
+  trim_tests: "A hook before each Bash call: a test run (pytest, vitest, jest, go test, cargo test) hands Claude its failures and its summary, not every passing line. Its exit status is untouched.",
+};
+const SAVER_MODES: { label: string; value: Saver["mode"] }[] = [
+  { label: "OFF", value: "off" },
+  { label: "TRIAL", value: "trial" },
+  { label: "ON", value: "on" },
+];
+
+/** ⓘ: what a saver does, on hover, so the card never grows. */
+function SaverInfo({ label, about }: { label: string; about: string }) {
+  return <span className="aim-xinfo" role="img" aria-label={`about ${label}: ${about}`} title={about} style={{ cursor: "help", textAlign: "center" }}>i</span>;
+}
+
+function SaverCard({ s, busy, err, onMode }: { s: Saver; busy: boolean; err?: string; onMode: (m: Saver["mode"]) => void }) {
+  const Icon = SAVER_ICONS[s.key] ?? Sparkles;
+  const f = saverFoot(s);
+  return (
+    <div className="aim-x" data-on={s.mode === "on" || undefined} data-trial={s.mode === "trial" || undefined} data-busy={busy || undefined}>
+      <div className="aim-xhd">
+        <span className="aim-xic"><Icon size={14} strokeWidth={1.7} aria-hidden /></span>
+        <b>{s.label}</b>
+        {SAVER_ABOUT[s.key] && <SaverInfo label={s.label} about={SAVER_ABOUT[s.key]} />}
+        <span style={{ flex: 1, minWidth: 8 }} />
+        <div className="aim-segwrap aim-svseg" data-mode={s.mode}>
+          <Segmented options={SAVER_MODES} value={s.mode} onPick={(m) => { if (!busy && m !== s.mode) onMode(m); }} />
+        </div>
+      </div>
+      <div className="aim-xhint">{s.hint}</div>
+      {err && <div className="aim-xerr">{err}</div>}
+      <div className="aim-xfoot">
+        {f.bar !== null && <span className="aim-xbar" aria-hidden><i style={{ width: `${f.bar * 100}%` }} /></span>}
+        <span className="aim-svfact">{f.left}</span>
+        {f.delta ? <em><b data-good={f.good === null ? undefined : String(f.good)}>{f.delta}</b> {f.unit}</em>
+          : f.untried ? <em>not tried yet</em> : null}
+      </div>
+    </div>
+  );
+}
+
+function SaversFold({ openSec }: { openSec: string | null }) {
+  // null while reading; "gone" on a bridge older than Savers.
+  const [rows, setRows] = useState<Saver[] | "gone" | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<{ key: string; msg: string } | null>(null);
+  useEffect(() => {
+    void api.savers().then((r) => setRows(r.savers))
+      .catch((e: Error) => setRows(e.message === "not found" ? "gone" : []));
+  }, []);
+  if (rows === "gone") return null;
+  async function pick(s: Saver, mode: Saver["mode"]) {
+    setBusy(s.key);
+    setErr(null);
+    try {
+      setRows((await api.setSaver(s.key, mode)).savers);
+    } catch (e) {
+      setErr({ key: s.key, msg: e instanceof Error ? e.message : "could not save" });
+    } finally {
+      setBusy(null);
+    }
+  }
+  return (
+    <AimFold id="savers" title="Savers" secs={["SAVERS"]} openSec={openSec}
+      count={Array.isArray(rows) && rows.length ? `${rows.filter((r) => r.mode !== "off").length} of ${rows.length} on` : null}
+      hint="Claude Code's own switches that make every turn cheaper" right={<span className="aim-chip">NEW</span>}>
+      <p className="aim-svlead">
+        <b>TRIAL</b> turns one on for every other new session, picked by a coin flip, and compares their first
+        turns: answer length, tokens, tool calls before the first edit, errors. After {rows?.[0]?.target ?? 20} sessions
+        it tells you the result; you pick ON or OFF.
+      </p>
+      {rows === null && <div className="aim-hint">Reading the savers…</div>}
+      {rows?.length === 0 && <div className="aim-hint">Couldn't read the savers from the bridge.</div>}
+      {rows && rows.length > 0 && (
+        <div className="aim-xgrid aim-svgrid">
+          {rows.map((s) => (
+            <SaverCard key={s.key} s={s} busy={busy === s.key} err={err?.key === s.key ? err.msg : undefined} onMode={(m) => void pick(s, m)} />
+          ))}
+          <div className="aim-x" data-on>
+            <div className="aim-xhd">
+              <span className="aim-xic"><Clock3 size={14} strokeWidth={1.7} aria-hidden /></span>
+              <b>Short cache for one-shots</b>
+              <SaverInfo label="Short cache for one-shots"
+                about="CLAUDE_CODE_PROMPT_CACHE_TTL=5m on the bridge's one-shot calls. Each runs once, so a cache kept for an hour was paid for and never read." />
+              <span style={{ flex: 1, minWidth: 8 }} />
+              <span className="aim-chip ok">ALWAYS ON</span>
+            </div>
+            <div className="aim-xhint">titles, commit messages and NEXT UP scouts cache for 5 minutes, not an hour</div>
+            <div className="aim-xfoot"><span className="aim-svfact">they never reuse it, so the hour-long write was waste</span></div>
+          </div>
+        </div>
+      )}
+    </AimFold>
+  );
+}
+
 /** SETTINGS ▸ Projects, with the logins its profile pickers name. */
 function ProjectsPage({ projects, current, onAccountsChanged, onOpenSkills }: {
   projects: ProjectsSettingsProps;
@@ -3154,8 +3358,190 @@ function ProjectsPage({ projects, current, onAccountsChanged, onOpenSkills }: {
   return <ProjectsSettings {...projects} logins={acc.rows ?? []} current={current} onOpenSkills={onOpenSkills} />;
 }
 
+/** Council (design-drafts/council-tab; bridge/council.py): who reviews a session's
+ *  work before origin, and what score lets it through. Every change saves at once
+ *  and the row shows what the bridge answered, which has clamped it. */
+function Stepper({ label, text, onStep }: { label: string; text: string; onStep: (d: number) => void }) {
+  // The Type tab's size stepper (.tp-step). A span: the row's `> div` rule would stretch a div to half the row.
+  return (
+    <span className="tp-step" role="group" aria-label={label}>
+      <button type="button" aria-label={`Lower ${label}`} onClick={() => onStep(-1)}>−</button>
+      <output className="tp-val" style={{ minWidth: 40 }} aria-live="polite">{text}</output>
+      <button type="button" aria-label={`Raise ${label}`} onClick={() => onStep(1)}>+</button>
+    </span>
+  );
+}
+
+/** Reviewers, B · ON THE BENCH (design-drafts/council-reviewers): the accounts that
+ *  review sit as chips; + Add a reviewer lists every account the bridge could run,
+ *  by agent, dimmed where one can't sit now (Sign in deep-links to ACCOUNTS). An
+ *  outside agent with a reviewer on gets a line of the projects it may read. */
+function CouncilFold({ openSec, projects, onSignIn }: { openSec: string | null; projects: ProjectsSettingsProps; onSignIn: () => void }) {
+  const [s, setS] = useState<CouncilSettings | null>(null);
+  // Each click steps from the latest value, not the rendered one, so fast clicks
+  // accumulate; only the newest request's answer (the clamped value) lands, and a
+  // failed save falls back to the last value the bridge confirmed.
+  const latest = useRef<CouncilSettings | null>(null);
+  const confirmed = useRef<CouncilSettings | null>(null);
+  const seq = useRef(0);
+  const [err, setErr] = useState<string | null>(null);
+  const [menu, setMenu] = useState(false);
+  const bench = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    void api.councilSettings().then((r) => {
+      if (!Array.isArray(r.reviewers)) return setErr("Restart the bridge to pick reviewers per account.");
+      latest.current = confirmed.current = r;
+      setS(r);
+    }).catch(() => setErr("Couldn't read the council's settings."));
+  }, []);
+  const shut = (refocus?: boolean) => {
+    setMenu(false);
+    if (refocus) bench.current?.querySelector<HTMLElement>(".cr-add")?.focus();
+  };
+  useEffect(() => {
+    if (!menu) return;
+    // As the typeface menu: start on the first row and bring the list into the pane.
+    const m = bench.current?.querySelector(".cr-menu");
+    m?.querySelector<HTMLElement>("[role=menuitemcheckbox]")?.focus({ preventScroll: true });
+    m?.scrollIntoView({ block: "nearest" });
+    const away = (e: PointerEvent) => { if (!bench.current?.contains(e.target as Node)) shut(); };
+    document.addEventListener("pointerdown", away);
+    return () => document.removeEventListener("pointerdown", away);
+  }, [menu]);
+  async function save(patch: (c: CouncilSettings) => Partial<CouncilSettings>) {
+    if (!latest.current) return;
+    setErr(null);
+    latest.current = { ...latest.current, ...patch(latest.current) };
+    setS(latest.current);
+    const id = ++seq.current;
+    try {
+      const { accounts: _rows, ...body } = latest.current;    // the rows are the bridge's to send
+      const r = await api.saveCouncilSettings(body);
+      if (id === seq.current) { latest.current = confirmed.current = r; setS(r); }
+    } catch {
+      if (id !== seq.current) return;
+      latest.current = confirmed.current;
+      setS(confirmed.current);
+      setErr("Couldn't save that.");
+    }
+  }
+  const toggle = (k: string) => void save((c) => ({ reviewers: c.reviewers.includes(k) ? c.reviewers.filter((x) => x !== k) : [...c.reviewers, k] }));
+  const reads = (agent: string, list: string[]) => void save((c) => ({ projects: { ...c.projects, [agent]: list } }));
+  const name = (rel: string) => projects.groups.find((g) => g.rel === rel)?.name ?? rel;
+  const rows = s?.accounts ?? [];
+  const outside = s ? [...new Set(s.reviewers.map((k) => k.split(":")[0]))].filter((a) => a !== "claude") : [];
+  const row = (a: CouncilAccount) => {
+    const on = !!s?.reviewers.includes(a.key), signin = !a.ok && a.signin;
+    return (
+      <div key={a.key} className={`cr-mr${on ? " hot" : ""}${a.ok ? "" : " off"}`}>
+        <button type="button" role="menuitemcheckbox" aria-checked={on} className="cr-mrb" onClick={() => toggle(a.key)}>
+          <span className="cr-tick" aria-hidden>{on ? "✓" : ""}</span>
+          <span className="cr-name">{a.label || "Machine login"}</span>
+          <span className={`cr-st${!a.ok && !signin ? " warn" : ""}`}>{a.status}</span>
+        </button>
+        {signin && <button type="button" className="cr-si" onClick={() => { shut(); onSignIn(); }}>Sign in ›</button>}
+      </div>
+    );
+  };
+  return (
+    <AimFold id="council" title="Council" secs={["COUNCIL"]} openSec={openSec} hint="reviews a session's work before origin"
+      count={s ? `${s.bar.toFixed(1)} · ${s.max_rounds} rounds · ${benchNames(s.reviewers, rows)}` : null}
+      right={<span className="aim-chip">NEW</span>}>
+      {err && <div className="aim-xerr">{err}</div>}
+      {s && (
+        <div className="aim-vfields" style={{ gridTemplateColumns: "1fr" }}>
+          <div className="aim-vfield row">
+            <div><b>Pass at</b><span>the average your reviewers have to reach, out of 10</span></div>
+            <Stepper label="the bar" text={s.bar.toFixed(1)} onStep={(d) => void save((c) => ({ bar: c.bar + d * 0.5 }))} />
+          </div>
+          <div className="aim-vfield row">
+            <div><b>Rounds at most</b><span>a round is one review from each reviewer, then one fix turn in the session</span></div>
+            <Stepper label="the rounds" text={String(s.max_rounds)} onStep={(d) => void save((c) => ({ max_rounds: c.max_rounds + d }))} />
+          </div>
+          <div className="aim-vfield row">
+            <div><b>Stop early</b><span>when a round doesn't raise the score, and ask you</span></div>
+            <Switch on={s.stop_early} label="Stop early" onClick={() => void save((c) => ({ stop_early: !c.stop_early }))} />
+          </div>
+          <div className="aim-vfield cr-revs">
+            <div className="cr-head">
+              <b>Reviewers</b>
+              <span>each reads the work fresh, in a session of its own · a must-fix blocks when more than half flag it</span>
+            </div>
+            <div ref={bench} className="cr-bench"
+              onKeyDown={(e) => {
+                if (!menu) return;
+                if (e.key === "Escape") { e.stopPropagation(); shut(true); }   // the menu, not the dialog
+                else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  const items = [...e.currentTarget.querySelectorAll<HTMLElement>("[role=menuitemcheckbox]")];
+                  const i = items.indexOf(document.activeElement as HTMLElement) + (e.key === "ArrowDown" ? 1 : -1);
+                  items[Math.max(0, Math.min(items.length - 1, i))]?.focus();
+                }
+              }}
+              // Tabbing out shuts it; a click elsewhere is the pointerdown above.
+              onBlur={(e) => { if (menu && e.relatedTarget && !e.currentTarget.contains(e.relatedTarget)) shut(); }}>
+              {s.reviewers.map((k) => {
+                const r = rows.find((x) => x.key === k), w = who(k, r);
+                return (
+                  <span key={k} className={`cr-seatchip${r && !r.ok ? " off" : ""}`} title={r?.status}>
+                    <Mark agent={w.agent} />
+                    <b>{agentName(w.agent)}</b>
+                    {w.label && <span className="cr-acc">{w.label}</span>}
+                    <button type="button" className="cr-x" aria-label={`Take ${reviewerName(w)} off the council`} onClick={() => toggle(k)}>×</button>
+                  </span>
+                );
+              })}
+              <button type="button" className="cr-add" aria-haspopup="menu" aria-expanded={menu} onClick={() => (menu ? shut() : setMenu(true))}>
+                <Plus size={12} strokeWidth={2.4} aria-hidden />Add a reviewer<ChevronDown size={12} strokeWidth={2.2} aria-hidden />
+              </button>
+              {menu && (
+                <div className="cr-menu" role="menu" aria-label="Accounts that can review">
+                  {rows.length === 0 && <div className="cr-mh">No account to add yet: sign one in under Accounts.</div>}
+                  {rows.map((a, i) => (
+                    <Fragment key={a.key}>
+                      {a.agent !== rows[i - 1]?.agent && <div className="cr-mh"><Mark agent={a.agent} /><span className="caps">{agentName(a.agent)}</span></div>}
+                      {row(a)}
+                    </Fragment>
+                  ))}
+                </div>
+              )}
+            </div>
+            {outside.length > 0 && (
+              <div className="cr-reads">
+                {outside.map((ag) => {
+                  const mine = s.projects[ag] ?? [];
+                  const label = agentName(ag);
+                  return (
+                    <div key={ag} className="cr-rd">
+                      <Mark agent={ag} />
+                      <span className="cr-lab">{label} reads</span>
+                      {mine.length === 0 && <span className="cr-none">no project yet, so it sits out</span>}
+                      {mine.map((rel) => (
+                        <span key={rel} className="cr-chip">
+                          {name(rel)}
+                          <button type="button" aria-label={`Stop ${label} reading ${name(rel)}`} onClick={() => reads(ag, mine.filter((r) => r !== rel))}>×</button>
+                        </span>
+                      ))}
+                      <select className="aim-sel cr-pickp" aria-label={`Pick projects ${label} may read`} value=""
+                        onChange={(e) => { const v = e.target.value; if (v) reads(ag, [...mine, v]); }}>
+                        <option value="">+ Pick projects</option>
+                        {projects.groups.filter((g) => !mine.includes(g.rel)).map((g) => <option key={g.rel} value={g.rel}>{g.name}</option>)}
+                      </select>
+                    </div>
+                  );
+                })}
+                <div className="cr-foot">Claude logins read every project. Any other agent reads only the projects you list for it.</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </AimFold>
+  );
+}
+
 function AiManagementPanel({ settings, onPatch, models, sessionTools, profiles, profilesAvailable, profilesError,
-  onProfilesChanged, onAccountsChanged, openSec }: {
+  onProfilesChanged, onAccountsChanged, openSec, projects }: {
   settings: HudSettings;
   onPatch: (patch: Partial<HudSettings>) => void;
   models: { id: string; label: string }[];
@@ -3166,10 +3552,25 @@ function AiManagementPanel({ settings, onPatch, models, sessionTools, profiles, 
   onProfilesChanged: () => void;
   onAccountsChanged: () => void;
   openSec: string | null;
+  projects: ProjectsSettingsProps;
 }) {
   const multiOn = useMultiOn();   // AGENT TOOLS holds Claude's MCP fold while it's on
   const aiFeatures = useAiFeatures();
   const acc = useAccounts(onAccountsChanged);
+  // Each fold head says where it stands without opening it (2026-11-06, A ·
+  // SPEAKING FOLDS): every login's week left, extras on, MCP servers that wait.
+  const [mcp, setMcp] = useState<McpInfo | null>(null);
+  useEffect(() => { void api.mcp().then(setMcp).catch(() => { /* the fold still opens */ }); }, []);
+  const mcpN = mcp && {
+    ok: mcp.servers.filter((x) => x.ok).length,
+    auth: mcp.servers.filter((x) => !x.ok && x.status.trim().startsWith("!")).length,
+    bad: mcp.servers.filter((x) => !x.ok && !x.status.trim().startsWith("!")).length,
+  };
+  const flowCfg = useFlowSettings();
+  const extrasAll = Object.keys(aiFeatures).filter((k) => !FLOW_SWITCHES.has(k)).length;   // the FLOWS sheet's aren't extras' rows
+  const extrasOn = Object.entries(aiFeatures).filter(([k, on]) => on && !FLOW_SWITCHES.has(k)).length;
+  // Council's Codex "Sign in": opens the Accounts fold on its AGENTS list.
+  const [goto, setGoto] = useState<string | null>(null);
   // Opened on one login (the composer's PROFILE menu, on a profile whose login
   // has expired) or on a blank profile (its + NEW PROFILE): read once.
   const [focus] = useState(() => takeSettingsFocus());
@@ -3296,7 +3697,8 @@ function AiManagementPanel({ settings, onPatch, models, sessionTools, profiles, 
             <LoginTile slot={a.slot} />
             <span className="aim-who">
               <b>{a.email ?? "unknown"}</b>
-              <span>{[a.plan, a.default ? "default login" : null, a.disabled ? "disabled" : null].filter(Boolean).join(" · ") || "Claude login"}</span>
+              <span>{[a.plan, a.default ? "default login" : null, a.disabled ? "disabled" : null,
+                a.auto_switch === false ? "out of Auto-switch" : null].filter(Boolean).join(" · ") || "Claude login"}</span>
             </span>
             {a.default && <span className="aim-chip">Default</span>}
             <LoginMeters a={a} />
@@ -3310,6 +3712,12 @@ function AiManagementPanel({ settings, onPatch, models, sessionTools, profiles, 
                   <MiniBtn disabled={acc.busy} danger onClick={() => void acc.act("remove", a.slot)} title="Remove this login">✕</MiniBtn>
                 </>
               )}
+              {/* Every row, disabled ones too (dimmed with the row), so the switches line up. */}
+              <span className="aim-auto" title="On: a limit can move a session onto this login without asking. Off: it's only offered to you.">
+                Auto-switch
+                <Switch on={a.auto_switch !== false} label="Auto-switch"
+                  onClick={() => acc.busy ? null : void acc.act("auto_switch", a.slot, a.auto_switch === false)} />
+              </span>
             </span>
           </div>
           {profilesAvailable && profileRows({ agent: "claude", account: String(a.slot) }, String(a.slot), "on this login")}
@@ -3413,20 +3821,50 @@ function AiManagementPanel({ settings, onPatch, models, sessionTools, profiles, 
 
   return (
     <div className="aim">
-      <AimFold id="accounts" title="Accounts" secs={["ACCOUNTS", "ON USAGE LIMIT", "CLAUDE LOGINS", "AGENTS"]} openSec={signIn ? "AGENTS" : openSec}
+      <AimFold id="accounts" title="Accounts" secs={["ACCOUNTS", "ON USAGE LIMIT", "CLAUDE LOGINS", "AGENTS"]} openSec={signIn ? "AGENTS" : goto ?? openSec}
         count={acc.rows ? `${acc.rows.length} login${acc.rows.length === 1 ? "" : "s"} · ${list.length} profile${list.length === 1 ? "" : "s"}` : null}
-        right={policyPick}>
+        right={<>
+          {acc.rows && acc.rows.length > 0 && (
+            <span className="aim-mini" aria-label="each login's week left">
+              {acc.rows.map((a) => (
+                <span key={a.slot} title={`${a.email}: ${a.left == null ? "no reading" : `${a.left}% left`}`}
+                  data-low={(a.left != null && a.left < 20) || !a.logged_in || undefined}>
+                  {a.slot} · {!a.logged_in ? "out" : a.left == null ? "—" : `${a.left}%`}
+                  <i><b style={{ width: `${a.logged_in ? a.left ?? 0 : 0}%` }} /></i>
+                </span>
+              ))}
+            </span>
+          )}
+          {policyPick}
+        </>}>
         {accountsBody}
       </AimFold>
       <AimFold id="extras" title="Extras" secs={["MODEL-SPENDING EXTRAS"]} openSec={openSec}
-        hint="the model calls the bridge makes on top of your turns, each with its switch">
+        count={extrasAll ? `${extrasOn} of ${extrasAll} on` : null}
+        hint="model calls the bridge makes on top of your turns">
         <ExtrasFold />
       </AimFold>
+      {/* design-drafts/flow-settings: Flows is its own fold, its master switch in the head */}
+      <AimFold id="flows" title="Flows" secs={["FLOWS"]} openSec={openSec}
+        count={flowCfg ? `${flowCfg.flows.filter((f) => f.on).length} of ${flowCfg.flows.length} on` : null}
+        hint="the steps a prompt follows once a flow is lit in the prompt box"
+        right={flowCfg && <span className="aim-hint aim-flowson">for every session
+          <Switch on={flowCfg.on} label="Flows on" onClick={() => void changeFlows({ key: "on", value: !flowCfg.on }).catch((e: Error) => notify("error", e.message))} /></span>}>
+        <FlowsSettings models={modelRows(models)} />
+      </AimFold>
+      <SaversFold openSec={openSec} />
+      <CouncilFold openSec={openSec} projects={projects} onSignIn={() => {
+        setGoto("AGENTS");
+        setTimeout(() => document.querySelector("[data-sec=\"ACCOUNTS\"]")?.scrollIntoView({ block: "start" }), 50);
+        setTimeout(() => setGoto(null), 100);
+      }} />
       {/* Claude's servers (`claude mcp`). Kimi Code reads its own ~/.kimi-code/mcp.json;
           a project's .mcp.json reaches both. */}
       {!multiOn && (
         <AimFold id="mcp" title="Claude MCP" secs={["MCP SERVERS", "ADD A SERVER", "MCP"]} openSec={openSec}
-          hint="servers Claude sessions load · Kimi Code keeps its own, a project's .mcp.json reaches both">
+          count={mcpN ? [`${mcpN.ok} connected`, mcpN.auth ? `${mcpN.auth} need a sign-in` : "", mcpN.bad ? `${mcpN.bad} failed` : ""].filter(Boolean).join(" · ") : null}
+          hint={mcpN ? undefined : "servers Claude sessions load"}
+          right={mcpN && mcpN.bad > 0 ? <span className="aim-chip warn">{mcpN.bad} failed</span> : undefined}>
           <McpPanel />
         </AimFold>
       )}
@@ -3927,9 +4365,11 @@ function MoveImport({ jobs, busy }: { jobs: MoveJob[]; busy: boolean }) {
 
 function MovePanel() {
   // The dock's SETTINGS ▸ and REVIEW ▸ name the page to land on.
-  const [sub, setSub] = useState<MoveSub>(() => {
+  // MOVE opens on its two ways side by side (2026-11-06, B · TWO WAYS); the dock's
+  // SETTINGS ▸ and REVIEW ▸ still land straight on the page they name.
+  const [sub, setSub] = useState<MoveSub | "home">(() => {
     const f = takeSettingsFocus();
-    return f === "import" ? "import" : "export";
+    return f === "import" ? "import" : f === "export" ? "export" : "home";
   });
   const [jobs, setJobs] = useState<MoveJob[]>([]);
   useEffect(() => {
@@ -3948,25 +4388,314 @@ function MovePanel() {
     return () => { live = false; window.clearTimeout(t); window.removeEventListener(MOVE_EVENT, tick); };
   }, []);
   const running = jobs.find((j) => j.status === "running");
+  if (sub === "home") return <MoveHome jobs={jobs} running={running} onGo={setSub} />;
+  const way = MOVE_SUBS.find((t) => t.key === sub)!;
   return (
     <>
-      <div style={{ display: "flex", gap: 2, border: "1px solid color-mix(in srgb, var(--acc) 14%, transparent)", background: "color-mix(in srgb, var(--panel) 92%, transparent)", marginBottom: 26 }}>
-        {MOVE_SUBS.map((t) => {
-          const on = sub === t.key;
-          const dot = running && (t.key === "export" ? running.kind === "export" : t.key === "import" && running.kind !== "export");
-          return (
-            <button key={t.key} onClick={() => setSub(t.key)} aria-pressed={on}
-              style={{ flex: 1, appearance: "none", cursor: "pointer", border: 0, borderBottom: `2px solid ${on ? "var(--acc)" : "transparent"}`, background: on ? "color-mix(in srgb, var(--acc) 14%, transparent)" : "transparent", color: on ? "var(--txb)" : "var(--txd)", fontFamily: "inherit", fontSize: "var(--t95)", letterSpacing: 1.5, padding: "9px 4px", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
-              <t.icon size={12} strokeWidth={1.7} aria-hidden />
-              {t.label}
-              {dot && <i style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--purple)", boxShadow: "0 0 6px var(--purple)" }} />}
-            </button>
-          );
-        })}
+      <div className="mv-back">
+        <button onClick={() => setSub("home")}><ChevronRight size={13} aria-hidden style={{ transform: "rotate(180deg)" }} />Both ways</button>
+        <span><way.icon size={13} strokeWidth={1.7} aria-hidden />{sub === "export" ? "Send this machine away" : "Bring a bridge here"}</span>
       </div>
       {sub === "export" && <MoveExport busy={!!running} />}
       {sub === "import" && <MoveImport jobs={jobs} busy={!!running} />}
     </>
+  );
+}
+
+/** MOVE's landing: what leaving would carry, what is waiting to come in, and the
+ *  moves already made — with the file one left behind, which still takes disk. */
+function MoveHome({ jobs, running, onGo }: { jobs: MoveJob[]; running?: MoveJob; onGo: (s: MoveSub) => void }) {
+  const [plan, setPlan] = useState<MovePlan | null | undefined>(undefined);
+  const [files, setFiles] = useState<MoveFile[] | null>(null);
+  const [gone, setGone] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    let live = true;
+    void api.movePlan().then((r) => { if (live) setPlan(r); }, () => { if (live) setPlan(null); });
+    void api.moveFiles().then((r) => { if (live) setFiles(r.files); }, () => { if (live) setFiles([]); });
+    return () => { live = false; };
+  }, []);
+  const sec = (k: MoveSectionKey) => plan?.sections.find((x) => x.key === k)?.items ?? [];
+  const sum = (k: MoveSectionKey, f: (i: MoveItem) => number) => sec(k).reduce((a, i) => a + f(i), 0);
+  const unpushed = sum("repos", (i) => i.unpushed ?? 0);
+  const withWork = sec("repos").filter((i) => (i.unpushed ?? 0) > 0).length;
+  const plugins = sec("plugins").filter((i) => !i.marketplace && !i.ref.startsWith("marketplace")).length;
+  const day = (t: number) => new Date(t * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  const past = [...jobs].filter((j) => j.status !== "running").reverse();
+  const shown = (files ?? []).filter((f) => !gone.has(f.path));
+  async function drop(f: MoveFile) {
+    if (!(await askConfirm(`Delete ${f.name}? It frees ${fmtBytes(f.bytes)}; a move that already ran keeps everything it brought in.`, { ok: "Delete" }))) return;
+    try { await api.moveDelete(f.path); setGone((g) => new Set(g).add(f.path)); }
+    catch (e) { notify("error", (e as Error).message); }
+  }
+  return (
+    <>
+      <div className="mv-ways">
+        <div className="mv-way">
+          <span className="mv-ic"><HardDriveUpload size={18} strokeWidth={1.7} aria-hidden /></span>
+          <h3>Send this machine away</h3>
+          <p>One file with everything a new machine needs. Sign-ins stay behind.</p>
+          {plan === undefined && <div className="mv-wait">looking at this machine: its repos, MCP servers, history…</div>}
+          {plan === null && <div className="mv-wait">couldn't read this machine; the export page says why.</div>}
+          {plan && (
+            <ul>
+              <li><b>{unpushed}</b>unpushed commit{unpushed === 1 ? "" : "s"}{withWork ? ` in ${withWork} repo${withWork === 1 ? "" : "s"}` : ""}</li>
+              <li><b>{fmtBytes(sum("history", (i) => i.bytes ?? 0))}</b>chat history, {sec("history").length} project{sec("history").length === 1 ? "" : "s"}</li>
+              <li><b>{sec("mcp").length} + {plugins}</b>MCP servers and plugins</li>
+              <li><b>{fmtBytes(sum("bridge", (i) => i.bytes ?? 0))}</b>bridge settings and accounts</li>
+            </ul>
+          )}
+          <div className="mv-foot"><MiniBtn primary disabled={!!running} onClick={() => onGo("export")}>Choose what goes</MiniBtn></div>
+        </div>
+        <div className="mv-way">
+          <span className="mv-ic"><HardDriveDownload size={18} strokeWidth={1.7} aria-hidden /></span>
+          <h3>Bring a bridge here</h3>
+          <p>Read a move file first: you see what it holds before anything is written.</p>
+          {files === null ? <div className="mv-wait">looking for move files…</div>
+            : shown.length === 0 ? <div className="mv-wait">No move file on this machine yet. Copy one into your home folder.</div>
+            : shown.slice(0, 2).map((f) => (
+              <div key={f.path} className="mv-file">
+                <FileArchive size={16} strokeWidth={1.7} aria-hidden />
+                <div><b title={f.path}>{f.name}</b><span>{f.dir} · {fmtBytes(f.bytes)} · {day(f.mtime)}</span></div>
+              </div>
+            ))}
+          <div className="mv-foot"><MiniBtn disabled={!!running} onClick={() => onGo("import")}>{shown.length ? "Read it" : "Import"}</MiniBtn></div>
+        </div>
+      </div>
+      <Section title="PAST MOVES" top desc={past.length ? undefined : shown.length ? "No move ran from this dashboard yet; a file one left is still here." : "None yet."}>
+        {(past.length > 0 || shown.length > 0) && (
+          <div className="mv-past">
+            {past.map((j) => (
+              <div key={j.id} className="mv-row">
+                <span className={`mv-st ${j.status}`}>{j.status === "done" ? "✓" : j.status === "failed" ? "✕" : "–"}</span>
+                <div><b>{j.kind === "export" ? "Exported" : j.kind === "read" ? "Read" : "Imported"} {j.title}</b>
+                  <span>{day(j.ended ?? j.started)}{j.result?.bytes ? ` · ${fmtBytes(j.result.bytes)}` : ""}{j.status !== "done" ? ` · ${j.status}` : ""}</span></div>
+              </div>
+            ))}
+            {shown.map((f) => (
+              <div key={f.path} className="mv-row">
+                <span className="mv-st"><FileArchive size={13} strokeWidth={1.7} aria-hidden /></span>
+                <div><b>{f.name}</b><span>still on disk · {fmtBytes(f.bytes)}</span></div>
+                <MiniBtn danger onClick={() => void drop(f)}>Delete file</MiniBtn>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+    </>
+  );
+}
+
+/** A search box that lists matches as you type and sets nothing until one is
+ *  picked, by click or ↑↓ + Enter: the weather city and the world clocks'
+ *  zones. A bare box that waited for Enter read as "how do I put this in". */
+function SearchPick<T>({ placeholder, find, label, hint, onPick, width = 240 }: {
+  placeholder: string;
+  /** The matches, or why there are none ("No match", a lookup error). */
+  find: (q: string) => Promise<T[] | string>;
+  label: (x: T) => string;
+  hint?: (x: T) => string;
+  onPick: (x: T) => void;
+  width?: number;
+}) {
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState<T[]>([]);
+  const [why, setWhy] = useState<string | null>(null);
+  const [at, setAt] = useState(0);
+  const id = useId();
+  useEffect(() => {
+    if (!q.trim()) { setHits([]); setWhy(null); return; }
+    let live = true;
+    const t = window.setTimeout(() => void find(q).then((r) => {
+      if (!live) return;
+      const list = typeof r === "string" ? [] : r;
+      setHits(list);
+      setAt(0);
+      setWhy(typeof r === "string" ? r : list.length ? null : "No match");
+    }), 220);
+    return () => { live = false; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
+  const pick = (x: T) => { onPick(x); setQ(""); };
+  return (
+    <div className="set-pick" style={{ width }}>
+      <input value={q} onChange={(e) => setQ(e.target.value)} onBlur={() => setQ("")} placeholder={placeholder}
+        role="combobox" aria-expanded={hits.length > 0} aria-controls={id} aria-autocomplete="list"
+        aria-activedescendant={hits.length ? `${id}-${at}` : undefined}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" && hits.length) { e.preventDefault(); setAt((i) => Math.min(i + 1, hits.length - 1)); }
+          else if (e.key === "ArrowUp" && hits.length) { e.preventDefault(); setAt((i) => Math.max(i - 1, 0)); }
+          else if (e.key === "Enter" && hits[at]) { e.preventDefault(); pick(hits[at]); }
+          else if (e.key === "Escape" && q) { e.stopPropagation(); setQ(""); }   // the box, not the dialog
+        }} />
+      {q && (hits.length > 0 || why) && (
+        <div id={id} role="listbox" className="set-pick-list">
+          {why ? <div className="set-pick-why">{why}</div> : hits.map((x, i) => (
+            <div key={label(x) + i} id={`${id}-${i}`} role="option" aria-selected={i === at}
+              onMouseEnter={() => setAt(i)} onMouseDown={(e) => { e.preventDefault(); pick(x); }}>
+              <span>{label(x)}</span>{hint && <small>{hint(x)}</small>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** APPEARANCE ▸ CLOCK & WEATHER: what the Clock and its Almanac show. The
+ *  12H switch is the store the transcript's turn clocks read too
+ *  (lib/surfaces); the city and units live on the bridge (bridge/weather.py);
+ *  the world clocks are this browser's (HudSettings.clocks). */
+function ClockWeather({ settings, onPatch, weather, onSetUnit, onSetPlace }: {
+  settings: HudSettings;
+  onPatch: (p: Partial<HudSettings>) => void;
+  weather: Weather;
+  onSetUnit: (unit: string) => Promise<string | null>;
+  onSetPlace: (p: Place) => Promise<string | null>;
+}) {
+  const h12 = useClock12();
+  const voice = useVoice();
+  const [err, setErr] = useState<string | null>(null);
+  const clocks = settings.clocks;
+  const put = (i: number, c: WorldClock | null) => {
+    const next = [...clocks];
+    if (c) next[i] = c; else next.splice(i, 1);
+    onPatch({ clocks: next.filter(Boolean) });
+  };
+  const findPlace = async (q: string) => {
+    const r = await api.weatherSearch(q).catch((e: Error) => ({ error: e.message, results: undefined }));
+    return r.error ?? r.results ?? [];
+  };
+  // Not one already picked, nor this browser's own zone, which the Almanac shows as "you".
+  const home = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const findZone = async (q: string) => matchZones(q, zoneList().filter((z) => z !== home && !clocks.some((c) => c.zone === z)));
+  const zoneHint = (z: string) => { const t = zoneTime(z, Date.now(), h12); return `${t.time}${t.ampm && ` ${t.ampm}`} · ${fmtOffset(t.offset)}`; };
+  return (
+    <div style={CARD}>
+      <Row first label="TIME FORMAT" desc="the Clock, the Almanac and every time in the transcript">
+        <div style={{ width: 160 }}>
+          <Segmented options={[{ label: "24H", value: "24" }, { label: "12H", value: "12" }]}
+            value={h12 ? "12" : "24"} onPick={(v) => setClock12(v === "12")} />
+        </div>
+      </Row>
+      <Row label="UNITS" desc="temperature and wind speed">
+        <div style={{ width: 160 }}>
+          <Segmented options={[{ label: "°C", value: "C" }, { label: "°F", value: "F" }]}
+            value={weather.unit} onPick={(u) => void onSetUnit(u === "F" ? "fahrenheit" : "celsius")} />
+        </div>
+      </Row>
+      <Row label="WEATHER CITY"
+        desc={err ? <span style={{ color: "var(--err)" }}>{err}</span> : <>Now {placeName(weather.loc)}. Type a few letters, then pick the place.</>}>
+        <SearchPick placeholder="Search a city…" find={findPlace} label={(p) => p.name}
+          onPick={(p) => void onSetPlace(p).then(setErr)} />
+      </Row>
+      {[0, 1].map((i) => {
+        const c = clocks[i];
+        return (
+          <Row key={i} label={`WORLD CLOCK ${i + 1}`}
+            desc={c ? <>{zoneCity(c.zone)}, {zoneHint(c.zone)}{c.pin ? " · in the header" : ""}</> : "Search a city or a region: Amsterdam, New York, Europe…"}>
+            <SearchPick width={200} placeholder={c ? `Change ${zoneCity(c.zone)}…` : "Search a time zone…"}
+              find={findZone} label={(z) => z.replace(/_/g, " ")} hint={zoneHint}
+              onPick={(zone) => put(i, { zone, pin: c?.pin ?? false })} />
+            {c && (
+              <>
+                <span style={KEY_TX}>{voice("HEADER")}</span>
+                <Switch on={c.pin} onClick={() => put(i, { ...c, pin: !c.pin })} label={`Show ${zoneCity(c.zone)} in the header`} />
+                <MiniBtn onClick={() => put(i, null)} title={`Remove ${zoneCity(c.zone)}`}>REMOVE</MiniBtn>
+              </>
+            )}
+          </Row>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---- SYSTEM's tabs ------------------------------------------------------------
+// SYSTEM was fifteen sections in one 8-screen scroll; five tabs now (2026-11-06,
+// B · TABS): the bridge itself, how runs start, Telegram, disk, and the tuning
+// nobody needs daily. A search hit or a deep link names a section; it opens the
+// tab that holds it.
+type SysTab = "overview" | "runs" | "telegram" | "storage" | "advanced";
+const SYS_TABS: { key: SysTab; label: string }[] = [
+  { key: "overview", label: "Overview" }, { key: "runs", label: "Runs" }, { key: "telegram", label: "Telegram" },
+  { key: "storage", label: "Storage" }, { key: "advanced", label: "Advanced" },
+];
+const SYS_ENV: Record<SysTab, string[]> = {
+  overview: [], storage: [],
+  runs: ["RUNS", "PROJECTS", "BROWSER", "DEV SERVER", "UPLOADS"],
+  telegram: ["ACCESS", "SERVERS", "TUNNEL"],
+  advanced: ["AI TUNING"],
+};
+function sysTabOf(sec: string | null | undefined): SysTab {
+  if (!sec) return "overview";
+  if (sec === "STORAGE") return "storage";
+  if (sec === "HTTP INSPECTOR") return "advanced";
+  return (Object.keys(SYS_ENV) as SysTab[]).find((t) => SYS_ENV[t].includes(sec)) ?? "overview";
+}
+
+// ---- LIVE RAIL ----------------------------------------------------------------
+// Each rail row says what its page is set to, so you can read your setup without
+// opening ten pages (2026-11-06, .mystical/design-drafts/settings-pages, A · LIVE RAIL).
+// Quiet grey text; amber only when the page wants you (a login signed out).
+// Fetched once per open, from the same GETs the pages make themselves.
+type Readout = { text: string; want?: boolean };
+// The storage scan walks every repo's .mystical/ (~2 s); once per page load is plenty.
+let storageScan: Promise<number> | null = null;
+const titled = (s: string) => s.toLowerCase().replace(/(^|\s)\S/g, (c) => c.toUpperCase());
+
+function useRailReadouts(settings: HudSettings, projectCount: number, plugins: Record<string, boolean>,
+  project: string | null): Partial<Record<Tab, Readout>> {
+  const [live, setLive] = useState<{ accounts?: AccountInfo[]; workspaces?: number; skills?: number; storage?: number }>({});
+  useEffect(() => {
+    let on = true;
+    const put = (part: typeof live) => { if (on) setLive((l) => ({ ...l, ...part })); };
+    void api.accounts().then((r) => put({ accounts: r.accounts })).catch(() => {});
+    void api.workspaces().then((r) => put({ workspaces: r.workspaces.length })).catch(() => {});
+    void api.skills(project).then((r) => put({ skills: r.project.length + r.system.length })).catch(() => {});
+    void (storageScan ??= api.storage().then((r) => r.bytes))
+      .then((b) => put({ storage: b }))
+      .catch(() => { storageScan = null; });
+    return () => { on = false; };
+  }, [project]);
+  const out: Partial<Record<Tab, Readout>> = {
+    appearance: { text: titled(themeDef(settings.theme).name) },
+    transcript: { text: settings.layout === "compact" ? "Compact" : "Default" },
+    notifications: { text: settings.push ? (settings.pushSound ? "Pop-up · sound" : "Pop-up") : "Bell only" },
+    projects: { text: String(projectCount) },
+  };
+  const installed = Object.values(plugins).filter(Boolean).length;
+  if (installed) out.integrations = { text: `${installed} on` };
+  if (live.workspaces !== undefined) out.workspaces = { text: String(live.workspaces) };
+  if (live.skills !== undefined) out.skills = { text: String(live.skills) };
+  if (live.storage !== undefined) out.system = { text: fmtBytes(live.storage) };
+  if (live.accounts) {
+    const out_ = live.accounts.filter((a) => !a.disabled && !a.logged_in).length;
+    const n = live.accounts.length;
+    out.aimgmt = out_ ? { text: "sign in", want: true } : { text: `${n} login${n === 1 ? "" : "s"}` };
+  }
+  return out;
+}
+
+/** The rail's foot: the bridge you are talking to, and the way to restart it
+ *  (restartBridge asks first, as SYSTEM's own button does). */
+function RailFoot({ onOpen }: { onOpen: () => void }) {
+  const [branch, setBranch] = useState<string | null>(null);
+  useEffect(() => {
+    let on = true;
+    void api.update().then((u) => { if (on) setBranch(u.branch || null); }).catch(() => {});
+    return () => { on = false; };
+  }, []);
+  return (
+    <div className="set-railfoot">
+      <button className="set-railfoot-who" onClick={onOpen} title="open System">
+        <i aria-hidden />
+        <span>Bridge online</span>
+        {branch && <em>· {branch}</em>}
+      </button>
+      <button className="set-railfoot-go" onClick={() => void restartBridge()} title="restart the bridge" aria-label="restart the bridge">
+        <RotateCw size={14} strokeWidth={1.8} aria-hidden />
+      </button>
+    </div>
   );
 }
 
@@ -3991,20 +4720,27 @@ export function SettingsModal(props: SettingsModalProps) {
     projects,
     project,
     startTab,
+    weather,
+    onSetUnit,
+    onSetPlace,
   } = props;
+  // HEADER rows patch one field of the look (lib/headlook) and keep the rest.
+  const headPatch = (p: Partial<HeadLook>) => onPatch({ head: { ...settings.head, ...p } });
 
   // A caller may still name one of the tabs AI MANAGEMENT replaced; it lands
   // on that page, on the fold the tab became.
   const [start] = useState(() => normalizeTab(startTab));
   const startSec = start.sec;
   const [tab, setTab] = useState<Tab>(start.tab ?? "appearance");
+  const [sysTab, setSysTab] = useState<SysTab>(() => sysTabOf(start.sec));
   // SETTINGS ▸ Skills' repo: Projects ▸ a project ▸ Skills ▸ Open… picks it; else the session's.
   const [skillsFor, setSkillsFor] = useState<string | null>(null);
   const aiFeatures = useAiFeatures();   // the PONYTAIL level hides with its switch
   // Search. A query replaces the panel with its results; picking one puts the
   // tab back and scrolls to the setting, so `q` is also "which view is this".
   const [q, setQ] = useState("");
-  const [jump, setJump] = useState<Hit | null>(null);
+  // Opened for an APPEARANCE block (the Almanac's ⚙), it scrolls there as a search hit would.
+  const [jump, setJump] = useState<Hit | null>(() => start.tab === "appearance" && startSec ? { tab: "appearance", sec: startSec } : null);
   const [env, setEnv] = useState<EnvSetting[]>([]);
   const asked = useRef(false);
   const pane = useRef<HTMLDivElement>(null);
@@ -4020,6 +4756,16 @@ export function SettingsModal(props: SettingsModalProps) {
   if (!plugins.rivendell) hidden.add("ADD AN INSTANCE");
   const multiOn = useMultiOn();
   const hits = search(q, env.filter((s) => !tunesOff(s.key, aiFeatures)), hidden, multiOn);
+  const readouts = useRailReadouts(settings, props.projects.groups.length, plugins, project);
+  // The search sits at the top of the rail now; ⌘F (Ctrl+F) lands in it from anywhere in the dialog.
+  const searchBox = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") { e.preventDefault(); searchBox.current?.focus(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   // The switch moves pages under an open dialog: a name for the other half lands on its twin.
   const page: Tab = multiOn && tab === "skills" ? "agenttools" : !multiOn && tab === "agenttools" ? "system" : tab;
   const shown: Tab | "search" = q.trim() ? "search" : page;
@@ -4034,6 +4780,7 @@ export function SettingsModal(props: SettingsModalProps) {
   }, [multiOn, tab, startSec]);
   function go(h: Hit) {
     setTab(h.tab);
+    if (h.tab === "system") setSysTab(sysTabOf(h.sec));
     setQ("");
     setJump(h);
   }
@@ -4086,9 +4833,8 @@ export function SettingsModal(props: SettingsModalProps) {
         background: "color-mix(in srgb, var(--panel3) 72%, transparent)",
         zIndex: 93,
         display: "flex",
-        alignItems: "flex-start",
+        alignItems: "center",
         justifyContent: "center",
-        paddingTop: "7vh",
         animation: "backdropIn .22s ease both",
       }}
     >
@@ -4096,17 +4842,8 @@ export function SettingsModal(props: SettingsModalProps) {
         onClick={(e) => e.stopPropagation()}
         className="panel setdlg"
         style={{
-          // Content is capped at 760px by .mcol; the family layer's rail is 236
-          // and the pane pads 32 a side — so 1062 IS the content's width. Wider
-          // is empty gutter (the shared --modal-w, 75vw, spent ~130px a side on
-          // it); 976, sized for the old 180 rail, squeezed the rows to 674.
-          width: "min(1062px, 94vw)",
-          // One height for every category, not one per: sizing to the tab meant
-          // the panel jumped ~200px between INTERFACE (one switch) and
-          // APPEARANCE, and a dialog that resizes under the pointer costs more
-          // than the void it saves. 86vh rather than the old 76vh — the tabs
-          // that overflow are the ones you spend time in.
-          height: "86vh",
+          // Its width and height live in index.css (.setdlg), beside the phone
+          // layout they give way to.
           display: "flex",
           flexDirection: "column",
           border: "1px solid color-mix(in srgb, var(--acc) 40%, transparent)",
@@ -4146,19 +4883,6 @@ export function SettingsModal(props: SettingsModalProps) {
           <span className="set-crumb">Settings{crumbTab && <i><u>/</u> {sentence(crumbTab.label)}</i>}</span>
           <InfoDot on={scopeOpen} about="where these are stored" onClick={() => setScopeOpen(!scopeOpen)} />
           <span style={{ flex: 1 }}></span>
-          <input
-            type="search"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && hits.length) go(hits[0]);
-              // Otherwise Escape would close the whole modal from inside the box.
-              if (e.key === "Escape" && q) { e.stopPropagation(); setQ(""); }
-            }}
-            placeholder="Search settings"
-            className="set-search"
-            style={{ ...field, flex: "0 1 220px", minWidth: 140 }}
-          />
           <button
             className="set-close"
             title="close (Esc)"
@@ -4201,6 +4925,23 @@ export function SettingsModal(props: SettingsModalProps) {
             lets it turn from a side rail into a top strip on a phone. */}
         <div className="setbody">
           <div className="setrail" ref={rail}>
+            <label className="set-railsearch">
+              <input
+              type="search"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && hits.length) go(hits[0]);
+                // Otherwise Escape would close the whole modal from inside the box.
+                if (e.key === "Escape" && q) { e.stopPropagation(); setQ(""); }
+              }}
+              placeholder="Search settings"
+              className="set-search"
+              ref={searchBox}
+              style={{ ...field }}
+              />
+              <kbd aria-hidden>⌘F</kbd>
+            </label>
             {railFor(multiOn).map((t, i, rail) => (
               <Fragment key={t.key}>
                 {t.group !== rail[i - 1]?.group && <div className="setgroup">{sentence(t.group)}</div>}
@@ -4218,12 +4959,18 @@ export function SettingsModal(props: SettingsModalProps) {
                       {t.hint}
                     </div>
                   </div>
+                  {readouts[t.key] && (
+                    <span className="set-railro" data-want={readouts[t.key]!.want || undefined}>
+                      {readouts[t.key]!.want && <i aria-hidden />}{readouts[t.key]!.text}
+                    </span>
+                  )}
                 </button>
               </Fragment>
             ))}
+            <RailFoot onOpen={() => { setQ(""); setTab("system"); }} />
           </div>
 
-          <div ref={pane} className={`mscroll mcol setpane${shown === "projects" ? " prj-fill" : ""}`} style={{ flex: 1, minWidth: 0, overflowY: "auto" }}>
+          <div ref={pane} className={`mscroll setpane${shown === "projects" ? " prj-fill" : ""}`} style={{ flex: 1, minWidth: 0, overflowY: "auto" }}>
             {/* Keyed on the page, so a new category remounts and its entrance
                 runs again (.setpage in index.css). Search is a page too. */}
             <div key={shown} className="setpage">
@@ -4304,6 +5051,10 @@ export function SettingsModal(props: SettingsModalProps) {
                   <TypePicker settings={settings} autoBase={autoBase} onPatch={onPatch} />
                 </Section>
 
+                <Section title="CLOCK & WEATHER" top>
+                  <ClockWeather settings={settings} onPatch={onPatch} weather={weather} onSetUnit={onSetUnit} onSetPlace={onSetPlace} />
+                </Section>
+
                 {/* lib/intro, drawn by BootIntro + BootScenes. The boot is the
                     only place it shows, so the caption says when it will. */}
                 <Section title="LOADING SCREEN" top>
@@ -4333,7 +5084,11 @@ export function SettingsModal(props: SettingsModalProps) {
             )}
 
             {shown === "transcript" && (
-              <>
+              // Rows on the left, the transcript they draw on the right (2026-11-06,
+              // A · SIDE PREVIEW): the same sample turn TYPE previews, so a change
+              // shows on a real prompt and answer, not in a caption.
+              <div className="tr-two">
+                <div className="tr-rows">
                 {/* Its own tab, again. It was folded into APPEARANCE when it
                     held one switch and a dropdown and left 700px of void; the
                     dropdown is now five previews, which is the page that void
@@ -4353,18 +5108,46 @@ export function SettingsModal(props: SettingsModalProps) {
                         />
                       </div>
                     </Row>
-                    {/* COMPACT's composer (lib/theme COMPOSER_STYLES): the session as tabs on
-                        the box, as status lines under a bare
-                        command line, or the CLASSIC one row. DEFAULT never reads it. */}
-                    <Row label="PROMPT BOX" desc="how the COMPACT layout's prompt box carries the session"
-                      info="TABS (the default): the title, branch, PR, running app and context meter as folder tabs on the box's top edge, the tools in the box's footer. CONSOLE: no box; a command line with an accent bar, then a place line and a quiet settings line. CLASSIC: the prompt box as it was, the session's nameplate sharing one row with the tools above the box. The DEFAULT layout keeps its own row whichever you pick.">
-                      <div style={{ width: 280 }}>
-                        <Segmented
-                          options={[{ label: "TABS", value: "tabs" }, { label: "CONSOLE", value: "console" }, { label: "CLASSIC", value: "classic" }]}
-                          value={settings.composer}
-                          onPick={(composer) => onPatch({ composer })}
-                        />
+                  </div>
+                </Section>
+
+                <Section
+                  title="HEADER"
+                  top
+                  info="The island over the chat: its view switch (CHAT, AGENTS, TICKETS), search and readouts. SHAPE is for COMPACT, where it is a pill on the right or a bar across the top. FADE dissolves the chat before it reaches the header, so no half line sits beside or under it. GLASS is how much of the chat shows through the header itself."
+                >
+                  <div style={CARD}>
+                    {settings.layout === "compact" && (
+                      <Row first label="SHAPE" desc="a pill on the right, or a bar across the top">
+                        <div style={{ width: 300 }}>
+                          <Segmented options={[{ label: "PILL", value: "pill" }, { label: "BAR", value: "bar" }]}
+                            value={settings.head.shape} onPick={(shape) => headPatch({ shape })} />
+                        </div>
+                      </Row>
+                    )}
+                    <Row first={settings.layout !== "compact"} label="FADE UNDER IT" desc="how the chat dissolves as it scrolls under the header">
+                      <div style={{ width: 300 }}>
+                        <Segmented options={[{ label: "OFF", value: "off" }, { label: "SOFT", value: "soft" }, { label: "DEEP", value: "deep" }]}
+                          value={settings.head.fade} onPick={(fade) => headPatch({ fade })} />
                       </div>
+                    </Row>
+                    <Row label="GLASS" desc="see-through, blurred, or a solid panel">
+                      <div style={{ width: 300 }}>
+                        <Segmented options={[{ label: "CLEAR", value: "clear" }, { label: "FROSTED", value: "frosted" }, { label: "SOLID", value: "solid" }]}
+                          value={settings.head.glass} onPick={(glass) => headPatch({ glass })} />
+                      </div>
+                    </Row>
+                    <Row label="HIDE WHILE READING" desc="slides away as you scroll down, back on scroll up">
+                      <Switch on={settings.head.hide} onClick={() => headPatch({ hide: !settings.head.hide })} />
+                    </Row>
+                    {/* Always drawn, so picking a shape never resizes the card; a pill has no row for it. */}
+                    <Row label="LAST LINE" desc={settings.layout === "compact" && settings.head.shape === "pill"
+                      ? "in the bar: when scrolled up, name the turn you're in (a pill has no room for it)"
+                      : "when scrolled up, name the turn you're in and jump to the end"}>
+                      <Switch on={settings.head.last} onClick={() => headPatch({ last: !settings.head.last })} />
+                    </Row>
+                    <Row label="SEARCH BUTTON" desc="the ⌕ that searches this chat">
+                      <Switch on={settings.head.search} onClick={() => headPatch({ search: !settings.head.search })} />
                     </Row>
                   </div>
                 </Section>
@@ -4384,7 +5167,7 @@ export function SettingsModal(props: SettingsModalProps) {
                         />
                       </div>
                     </Row>
-                    <Row label="WHILE IT WORKS" desc="what Enter does while a turn is running — STEER folds your message into the turn at its next tool step, no stop needed; QUEUE runs it after the turn ends. Alt+Enter does the other one.">
+                    <Row label="WHILE IT WORKS" desc="where the prompt box's NOW|NEXT switch starts while a turn runs — STEER (NOW) folds your message into the turn at its next tool step, no stop needed; QUEUE (NEXT) runs it after the turn ends. Alt+Enter does the other one.">
                       <div style={{ width: 220 }}>
                         <Segmented
                           options={[{ label: "STEER", value: "steer" }, { label: "QUEUE", value: "queue" }]}
@@ -4427,15 +5210,6 @@ export function SettingsModal(props: SettingsModalProps) {
                       <Switch
                         on={!settings.foldsOpen}
                         onClick={() => onPatch({ foldsOpen: !settings.foldsOpen })}
-                      />
-                    </Row>
-                    <Row
-                      label="STEP MESSAGES"
-                      info="What Claude says between steps stays in the conversation as its own message, with the steps after it folded under one line — the way Claude Code reads. Off, those messages sit inside the WORK box with the steps, and only your prompt and the answer are outside it."
-                    >
-                      <Switch
-                        on={settings.stepNotes}
-                        onClick={() => onPatch({ stepNotes: !settings.stepNotes })}
                       />
                     </Row>
                   </div>
@@ -4509,7 +5283,12 @@ export function SettingsModal(props: SettingsModalProps) {
                     )}
                   </div>
                 </Section>
-              </>
+                </div>
+                <aside className="tr-pv" aria-label="preview">
+                  <div className="tp-bar"><b>Preview</b><span>{settings.layout} · {settings.chatBg}</span></div>
+                  <TypePreview stack={faceStack(settings.font, settings.theme)} size={settings.baseFont || autoBase} settings={settings} withHead />
+                </aside>
+              </div>
             )}
 
 
@@ -4538,7 +5317,7 @@ export function SettingsModal(props: SettingsModalProps) {
               <AiManagementPanel settings={settings} onPatch={onPatch} models={models} sessionTools={sessionTools}
                 profiles={profiles} profilesAvailable={profilesAvailable} profilesError={profilesError}
                 onProfilesChanged={onProfilesChanged} onAccountsChanged={onAccountsChanged}
-                openSec={jump?.sec ?? startSec} />
+                openSec={jump?.sec ?? startSec} projects={projects} />
             )}
             {shown === "integrations" && <IntegrationsPanel />}
             {shown === "move" && <MovePanel />}
@@ -4546,55 +5325,60 @@ export function SettingsModal(props: SettingsModalProps) {
 
             {shown === "system" && (
               <>
-                <StorageSection onOpenMystical={multiOn ? () => openMysticalPanel({ project, session: project ? null : props.sessionId }) : undefined} />
+                <div className="sys-tabs" role="tablist">
+                  {SYS_TABS.map((t) => (
+                    <button key={t.key} role="tab" aria-selected={sysTab === t.key} data-on={sysTab === t.key || undefined}
+                      onClick={() => setSysTab(t.key)}>{t.label}</button>
+                  ))}
+                </div>
 
-                <ChatImagesSection />
-
-                <ExperimentalSection top onOpenAgentTools={() => setTab("agenttools")} />
-
-                <Section title="BRIDGE" top>
-                  <div style={CARD}>
-                    <Row first label="HOST">
-                      <span style={{ fontSize: "var(--t11)", color: "var(--tx)" }}>{host}</span>
-                    </Row>
-                    <Row label="PORT">
-                      <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: "var(--t11)", color: "var(--tx)" }}>
-                        {port}
-                      </span>
-                    </Row>
-                  </div>
-                </Section>
-
-                <StartupSection />
-
-                <UsageSharingSection />
-
-                <Section title="HTTP INSPECTOR" top>
-                  <div style={CARD}>
-                    <Row
-                      first
-                      label="API TRAFFIC"
-                      info="Every request a run makes to the Anthropic API — its token accounting, its SSE frames, its timings — through a local pass-through proxy. Off by default: it sits on the critical path of the turns it watches."
+                {sysTab === "overview" && (
+                  <>
+                    <Section title="BRIDGE">
+                      <div style={CARD}>
+                        <Row first label="HOST">
+                          <span style={{ fontSize: "var(--t11)", color: "var(--tx)" }}>{host}</span>
+                        </Row>
+                        <Row label="PORT">
+                          <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: "var(--t11)", color: "var(--tx)" }}>
+                            {port}
+                          </span>
+                        </Row>
+                      </div>
+                    </Section>
+                    <Section
+                      title="PLATFORM"
+                      top
+                      info="Updating pulls the bridge's own checkout, rebuilds this dashboard and restarts the bridge; running turns resume on their own."
                     >
-                      <button onClick={onOpenInspector}
-                        style={{ appearance: "none", cursor: "pointer", border: "1px solid color-mix(in srgb, var(--acc) 30%, transparent)", background: "transparent", color: "var(--acc)", fontFamily: "inherit", fontSize: "var(--t9)", letterSpacing: 1.5, padding: "6px 12px", flex: "none" }}>
-                        OPEN
-                      </button>
-                    </Row>
-                  </div>
-                </Section>
+                      <UpdatePanel onFeed={onFeed} />
+                    </Section>
+                    <StartupSection />
+                    <UsageSharingSection />
+                    {/* IMAGES and EXPERIMENTAL: sysTabOf files any section it doesn't name here. */}
+                    <ChatImagesSection />
+                    <ExperimentalSection top onOpenAgentTools={() => setTab("agenttools")} />
+                  </>
+                )}
 
-                <Section
-                  title="PLATFORM"
-                  top
-                  info="Updating pulls the bridge's own checkout, rebuilds this dashboard and restarts the bridge; running turns resume on their own."
-                >
-                  <UpdatePanel onFeed={onFeed} />
-                </Section>
+                {sysTab === "storage" && <StorageSection onOpenMystical={multiOn ? () => openMysticalPanel({ project, session: project ? null : props.sessionId }) : undefined} />}
 
-                {/* Everything config.py reads from the environment, which until
-                    now meant a text editor and a restart to change. */}
-                <EnvPanel />
+                {sysTab === "advanced" && (
+                  <Section title="HTTP INSPECTOR">
+                    <div style={CARD}>
+                      <Row
+                        first
+                        label="API TRAFFIC"
+                        info="Every request a run makes to the Anthropic API — its token accounting, its SSE frames, its timings — through a local pass-through proxy. Off by default: it sits on the critical path of the turns it watches."
+                      >
+                        <MiniBtn onClick={onOpenInspector}>Open</MiniBtn>
+                      </Row>
+                    </div>
+                  </Section>
+                )}
+
+                {/* Everything config.py reads from the environment, split by the tab it belongs to. */}
+                {SYS_ENV[sysTab].length > 0 && <EnvPanel key={sysTab} only={SYS_ENV[sysTab]} />}
               </>
             )}
             </div>

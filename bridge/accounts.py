@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from bridge import credentials, usage
 
@@ -175,7 +176,9 @@ def _sync_user_mcp(p: str) -> None:
 
 # --- registry (ROOT/accounts.json) ------------------------------------------
 # Slot 1 is implicit: it *is* ~/.claude, so it needs no entry and is listed
-# whenever an ambient login exists. Only added slots are persisted.
+# whenever an ambient login exists. Only added slots are persisted, plus slot 1's
+# Auto-switch switch under "1" once it has been set (set_auto_switch): every
+# reader of slot rows skips that key.
 
 def _registry_path() -> str:
     return os.path.join(ROOT, "accounts.json")
@@ -242,6 +245,7 @@ def list_accounts() -> list:
     if ambient:
         out.append({"slot": DEFAULT_SLOT, "email": _email_at(IDENTITY),
                     "alias": None, "disabled": False, "default": True,
+                    "auto_switch": bool((reg.get(str(DEFAULT_SLOT)) or {}).get("auto_switch", True)),
                     "plan": _plan_of(credentials.parse(ambient))})
     for key, e in reg.items():
         if not str(key).isdigit() or int(key) == DEFAULT_SLOT:
@@ -252,7 +256,7 @@ def list_accounts() -> list:
         live = _email_at(os.path.join(profile_dir(slot), ".claude.json"))
         out.append({"slot": slot, "email": live or e.get("email"),
                     "alias": e.get("alias"), "disabled": bool(e.get("disabled")),
-                    "default": False,
+                    "default": False, "auto_switch": bool(e.get("auto_switch", True)),
                     "plan": _plan_of(credentials.load(credentials_path(slot)))})
     return sorted(out, key=lambda a: a["slot"])
 
@@ -581,6 +585,8 @@ def remove(slot: int) -> None:
         reg.pop(str(slot), None)
         _save(reg)
     _wipe(slot)
+    from bridge import council                  # lazy: council imports this module
+    council.forget(f"claude:{slot}")            # the next login in this slot starts off the council
 
 
 def _set_disabled(slot: int, value: bool) -> None:
@@ -602,6 +608,19 @@ def disable(slot: int) -> None:
 
 def enable(slot: int) -> None:
     _set_disabled(slot, False)
+
+
+def set_auto_switch(slot: int, on: bool) -> None:
+    """Keep an account in Auto-switch (the on-limit move that doesn't ask you)
+    or out of it; out, it is only offered to you. Unlike disable(), slot 1 can
+    have it too, under a registry key of its own."""
+    slot = int(slot)
+    with _lock:
+        reg = _load()
+        if slot != DEFAULT_SLOT and str(slot) not in reg:
+            raise ValueError(f"no account in slot {slot}")
+        reg.setdefault(str(slot), {})["auto_switch"] = bool(on)
+        _save(reg)
 
 
 # --- pick(): which account takes the work ------------------------------------
@@ -640,6 +659,11 @@ def usage_for(slot: int) -> dict:
     return usage.get_usage(credentials_path(slot))
 
 
+def note_rate_limit(slot: "int | None", info: dict) -> None:
+    """A running turn's rate_limit_event, filed under the login it ran on."""
+    usage.note_event(credentials_path(slot), info)
+
+
 def headroom(slot: int) -> "int | None":
     """Percent of this account's tighter window still unspent; None when the
     meter is unreadable."""
@@ -654,7 +678,7 @@ def resets_at(slot: int) -> "str | None":
     return (_tighter(usage_for(slot)) or {}).get("resets_at")
 
 
-def meter(slot: int) -> dict:
+def meter(slot: int, max_age: float = usage.CACHE_TTL) -> dict:
     """Everything an account row says about this login's quota. Both windows,
     not just the tighter one: the weekly cap is usually what's binding, but its
     reset is days out, and "when do I get going again" is the 5-hour one.
@@ -664,29 +688,44 @@ def meter(slot: int) -> dict:
     endpoint just wouldn't serve (wait): no token to renew, or a turn already
     died on this login (runner._auth_dead, cleared by the sign-in)."""
     from bridge import runner                   # lazy: runner imports the world
+    if max_age < usage.CACHE_TTL:
+        usage.get_usage(credentials_path(slot), max_age)   # read it now; usage_for gets this one
     m = usage_for(slot)
     return {"left": headroom(slot), "resets_at": resets_at(slot),
             "five_hour": m.get("five_hour"), "seven_day": m.get("seven_day"),
             "limits": m.get("limits") or [],
+            # how fresh the reading is: when it was read, whether a running turn
+            # is reporting it, and that turn's last word (allowed_warning, ...)
+            "read_at": m.get("read_at"), "live": bool(m.get("live")), "status": m.get("status"),
             "runs_out_at": usage.pace(credentials_path(slot)),
             "logged_in": usage.has_token(credentials_path(slot))
                          and int(slot) not in runner._auth_dead}
 
 
-def with_meters() -> list:
+def with_meters(max_age: float = usage.CACHE_TTL) -> list:
     """Every login with its meter(). The Accounts panel lists these, and both
     composers read from them the in-use login's usage and how much each
     profile's login has left. Both servers call this one function so they
-    return the same rows."""
-    return [{**a, **meter(a["slot"])} for a in list_accounts()]
+    return the same rows. max_age=0 reads every login now (Check now).
+    Side by side: a cold meter is a `claude -p` each (5.2 s for three in a row
+    on a fresh bridge, which the dashboard's boot waited on)."""
+    accts = list_accounts()
+    if not accts:
+        return []
+    with ThreadPoolExecutor(max_workers=len(accts)) as pool:
+        return list(pool.map(lambda a: {**a, **meter(a["slot"], max_age)}, accts))
 
 
-def pick(exclude=(), strategy: str = "best") -> "int | None":
+def pick(exclude=(), strategy: str = "best",
+         auto_switch: bool = False) -> "int | None":
     """The slot that should take over, or None when nothing has headroom.
 
     best          -- most quota left (default)
     consume-first -- among accounts with room, the one whose weekly window
                      resets soonest, so perishable quota is spent first
+
+    auto_switch picks only among accounts still in Auto-switch: the ones a
+    limit may move work onto without asking you.
 
     An account whose meter won't read is a last resort rather than a skip: the
     usage endpoint 429s readily (the Claude CLI polls it too, and reading two
@@ -697,7 +736,7 @@ def pick(exclude=(), strategy: str = "best") -> "int | None":
     skip = {int(s) for s in exclude}
     viable, unknown = [], []
     for a in list_accounts():
-        if a["slot"] in skip or a["disabled"]:
+        if a["slot"] in skip or a["disabled"] or (auto_switch and not a["auto_switch"]):
             continue
         meter = usage_for(a["slot"])
         used = _used(meter)

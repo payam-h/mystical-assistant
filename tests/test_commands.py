@@ -122,6 +122,33 @@ def test_project_settings_can_enable_a_plugin_the_user_settings_do_not(home, tmp
     assert "cf:wrangler" not in _names(commands.available(None))
 
 
+def test_a_plugin_manifest_lists_skills_deeper_than_skills_star(home):
+    # Matt Pocock's pack keeps skills/<group>/<name>/SKILL.md and names each one in
+    # .claude-plugin/plugin.json; an entry can also be a directory of skills.
+    _plugin(home, "mattpocock-skills@claude-plugins-official")
+    root = os.path.join(home, "plugins", "cache", "mattpocock-skills")
+    for rel, desc in (("skills/engineering/grill-with-docs", "interview me"),
+                      ("skills/in-progress/wip", "not listed"),
+                      ("extra/teach", "learn it")):
+        os.makedirs(os.path.join(root, rel))
+        with open(os.path.join(root, rel, "SKILL.md"), "w") as f:
+            f.write(f"---\ndescription: {desc}\n---\nbody\n")
+    manifest = os.path.join(root, ".claude-plugin", "plugin.json")
+    os.makedirs(os.path.dirname(manifest))
+    json.dump({"skills": ["./skills/engineering/grill-with-docs", "./extra/", 7]}, open(manifest, "w"))
+
+    by = {c["name"]: c for c in commands.available(None)}
+    assert by["mattpocock-skills:grill-with-docs"]["description"] == "interview me"
+    assert "mattpocock-skills:teach" in by
+    assert not [n for n in by if n.split(":")[-1] in ("wip", "engineering", "in-progress")]
+
+    json.dump({"skills": "./extra"}, open(manifest, "w"))   # the one-path form
+    assert "mattpocock-skills:teach" in _names(commands.available(None))
+    with open(manifest, "w") as f:
+        f.write("{not json")
+    assert "mattpocock-skills:teach" not in _names(commands.available(None))
+
+
 def test_bundled_commands_are_always_offered_and_never_shadow_disk(home):
     _skill(home, "compact", "my own compact")
     got = commands.available(None)
@@ -173,3 +200,13 @@ def test_miniapp_route_serves_the_active_projects_list(home, tmp_path, monkeypat
     h._api_commands(1)
     assert box["code"] == 200
     assert "proj-only" in _names(box["obj"]["commands"])
+
+
+def test_available_lists_bundled_pack_once(home, monkeypatch):
+    from bridge import aifeatures, paths
+    monkeypatch.setattr(aifeatures, "enabled", lambda key: key == "router")
+    _plugin(home, "mattpocock-skills@claude-plugins-official", skills=["grill-with-docs"])
+    names = [c["name"] for c in commands.available(None)]
+    assert names.count("mattpocock-skills:grill-with-docs") == 1
+    entry = next(c for c in commands.available(None) if c["name"] == "mattpocock-skills:grill-with-docs")
+    assert "from mattpocock-skills" not in entry["description"]  # the bundled copy won, not the installed

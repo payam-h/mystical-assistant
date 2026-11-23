@@ -1,4 +1,3 @@
-import type { SessionBreakdown, ToolSpend } from "../api";
 import type { Turn } from "../chat";
 import { limitNudge } from "./limit.ts";
 import { promptLabel } from "./multi.ts";
@@ -12,6 +11,14 @@ export function ckId(turnId: string, key?: string): string {
 export function steerKey(index: number): string {
   return `steer${index}`;
 }
+
+/** The prompt of the turn boot recovery starts for Claude Code to carry on a
+ *  turn a bridge restart cut (Python recovery.CONTINUED). Nothing was sent: the
+ *  transcript draws it as a seam, never as a plate (lib/clisignals seamOf). */
+export const CONTINUED = "⏮ Claude Code carried on the turn a bridge restart cut.";
+/** The words a declined continuation's Carry on sends (Python recovery.NUDGE). */
+export const RESTART_NUDGE = "⏮ You were interrupted mid-task by a bridge restart — not by the user. "
+  + "Review your recent transcript and continue exactly where you left off; finish the task you were doing. Don't start over.";
 
 /** Why the bridge sent a turn of its own to carry the work on (bridge/limits.py
  *  and ladder.py for a limit, recovery.py for a restart, runner.py
@@ -50,11 +57,22 @@ export interface TurnRow {
   ids: string[];               // every turn in the chain, for "which row am I reading"
 }
 
-const firstLine = (text: string) => text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+// A callout box an answer opens with (`> [!IMPORTANT]`: what only you can do) isn't
+// the answer: the line under it is, else the box's first item. Mirrors
+// bridge/transcript_page.first_line, which outlines the turns the chat doesn't hold.
+const firstLine = (text: string) => {
+  let lines = text.trim().split("\n");
+  if (/^>\s*\[!(note|tip|important|warning|caution)\]$/i.test(lines[0].trim())) {
+    let end = lines.findIndex((l) => !l.trimStart().startsWith(">"));
+    if (end < 0) end = lines.length;
+    lines = [...lines.slice(end), ...lines.slice(1, end).map((l) => l.trim().replace(/^>\s*([-*+]\s+)?/, ""))];
+  }
+  return lines.map((l) => l.trim()).find(Boolean) ?? "";
+};
 // The head of an answer as a line of plain text: its markdown marks would print raw.
 const clean = (line: string) => line.replace(/^(#+|>|[-*+]|\d+[.)])\s+/, "").replace(/\*\*|__|`/g, "").trim();
 // An option's "(Recommended)" is the model's tag on it, not part of what you chose.
-const chosen = (label: string | null | undefined) => label ? label.replace(/\s*\(Recommended\)\s*$/i, "") : null;
+export const chosen = (label: string | null | undefined) => label ? label.replace(/\s*\(Recommended\)\s*$/i, "") : null;
 
 /** A turn's outline: off its events when the chat holds them (current, and live
  *  while it runs), else off the bridge's summary (transcript_page.summarize). */
@@ -150,29 +168,4 @@ export function fmtElapsed(s: number): string {
   if (s < 60) return `${Math.round(s)}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
-}
-
-export type TimeKind = "think" | "gen" | "tools" | "you";
-
-/** The TURNS tab's TIME dock: the session's time by kind, the tools that took
- *  it (the longest `top`, the rest as a count and a sum) — what the tab's rows
- *  don't already say, its Working cell being the total. */
-export function timeSplit(b: SessionBreakdown, top = 6) {
-  const tools = Object.entries(b.tools).map(([name, t]: [string, ToolSpend]) => ({ name: toolName(name), ...t }))
-    .sort((x, y) => y.union_s - x.union_s);
-  const rest = tools.slice(top);
-  const kinds: { k: TimeKind; label: string; secs: number }[] = [
-    { k: "think", label: "Thinking", secs: b.thinking_s },
-    { k: "gen", label: "Generating", secs: b.model_s },
-    // shortcut: each tool's own union summed, so two tools running at once count twice; add a tools_s union in attribution.py if the bar reads wrong
-    { k: "tools", label: "Tools", secs: tools.reduce((s, t) => s + t.union_s, 0) },
-    { k: "you", label: "Waiting on you", secs: b.waiting_s },
-  ];
-  return { kinds, tools: tools.slice(0, top), rest: rest.length, restSecs: rest.reduce((s, t) => s + t.union_s, 0) };
-}
-
-/** An MCP tool as `server · tool`; the CLI's own tools keep their names. */
-export function toolName(name: string): string {
-  const m = /^mcp__(.+?)__(.+)$/.exec(name);
-  return m ? `${m[1]} · ${m[2]}` : name;
 }

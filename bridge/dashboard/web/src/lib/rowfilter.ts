@@ -13,7 +13,7 @@ export const ROW_FILTERS: { f: RowFilter; label: string }[] = [
  *  good: quiet in the zone, but "failures" is where you'd go looking for it. */
 export function rowMatches(
   f: RowFilter,
-  e: { type: string; text?: string; error?: boolean; ok?: boolean; decision?: string },
+  e: { type: string; text?: string; error?: boolean | string; ok?: boolean; decision?: string },   // a retry's error is its message
   done: { is_error?: boolean; recovered?: boolean; images?: string[]; patch?: string[] } | undefined,
   cat?: string,
 ): boolean {

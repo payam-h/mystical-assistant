@@ -10,7 +10,6 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "./api";
-import { workCall } from "./readapi";
 import type {
   AnswerSelection,
   SecretAnswer,
@@ -676,16 +675,18 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   ) {
     const sid = opts?.sessionId ?? sessionId;
     if (!text || !sid) return;
-    // `/work run [n]` starts a run from this chat (bridge/workrun.py). It's watched on the Work page.
-    const workCmd = /^\/work(?:\s+run(?:\s+(\d+))?)?\s*$/.exec(text.trim());
-    if (workCmd) {
+    // `/goal <objective>` sets this session's goal and a bare `/goal` clears it:
+    // the bridge's own command (goals.set_by_user), never a prompt for Claude.
+    const goalCmd = /^\/goal\b\s*([\s\S]*)$/.exec(text.trim());
+    if (goalCmd) {
       setSendError(null);
       try {
-        if (!/\brun\b/.test(text)) throw new Error("The work list is under Work, in LIST.");
-        await workCall("run/start", sid, null, { parallel: workCmd[1] ? Number(workCmd[1]) : undefined });
-        onSent?.();     // the chat shows the run starting, as a line
+        await api.setGoal(sid, goalCmd[1].trim());
+        onSent?.();
+        void qc.invalidateQueries({ queryKey: ["goal", sid] });
+        refresh();
       } catch (e) {
-        setSendError(e instanceof ApiError ? e : new ApiError(0, (e as Error).message));
+        setSendError(e instanceof ApiError ? e : new ApiError(0, "Couldn't set the goal."));
       }
       return;
     }

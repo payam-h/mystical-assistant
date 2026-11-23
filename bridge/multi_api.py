@@ -50,7 +50,8 @@ def image_root(chat_id: int, session: "str | None", project: "str | None") -> "s
         return None
     d = os.path.realpath(os.path.join(config.BASE_PATH, rel))
     base = os.path.realpath(config.BASE_PATH)
-    return chat_images.root_of(d) if d.startswith(base + os.sep) else None
+    from bridge import browser
+    return chat_images.root_of(d) if d != base and browser.within_base(d) else None
 
 
 def image_file(qs: dict, chat_id: int) -> "tuple[bytes, str] | None":
@@ -76,6 +77,25 @@ def _work_root(chat_id: int, session: "str | None", project: "str | None") -> "t
     if s:
         return worklist.root_of(s.get("cwd")), _chat_of(s)["id"]
     return (image_root(chat_id, None, project), None) if config.is_owner(chat_id) else (None, None)
+
+
+def _post_browser(body: dict, chat: dict) -> "tuple[dict, int]":
+    """The Mystical browser (bridge/site_browser.py): open a site for this chat, and the card's buttons."""
+    from bridge import site_browser
+    op = body.get("op")
+    try:
+        if op == "open":
+            return site_browser.open_site(chat["id"], str(body.get("url") or "")), 200
+        if op == "state":
+            return site_browser.state(chat["id"], str(body.get("url") or "")), 200
+        if op == "front":
+            site_browser.front()
+            return {"ok": True}, 200
+        if op == "close":
+            return {"closed": site_browser.close()}, 200
+    except site_browser.Refused as e:
+        return {"error": str(e)}, 400
+    return {"error": "No such browser action."}, 400
 
 
 def _post_design(path: str, body: dict, s: dict, chat_id: int) -> "tuple[dict, int]":
@@ -139,15 +159,15 @@ def get(path: str, qs: dict, chat_id: int) -> "tuple[dict, int] | None":
     if path == "worklist":
         if not experimental.enabled():
             return _OFF
-        from bridge import workrun
         root, chat = _work_root(chat_id, _one(qs, "session"), _one(qs, "project"))
-        return ({**worklist.view(root, chat), **workrun.run_view(root)}, 200) if root else ({"error": "No project here."}, 404)
+        from bridge import chatplan
+        return ({**worklist.view(root), "plan": chatplan.view(root, chat)}, 200) if root else ({"error": "No project here."}, 404)
     if path == "saved-views":
         if not experimental.enabled():
             return _OFF
         return saved_views.listed(image_root(chat_id, _one(qs, "session"), _one(qs, "project")))
     if path == "chat-images":
-        return {"mode": chat_images.mode()}, 200
+        return {"mode": chat_images.mode(), "shown": chat_images.shown()}, 200
     if path not in ("tree", "channel", "session/handoff", "session/brief", "project/helper",
                     "mcp-share", "skill-share", "agent-tools", "rules", "rules/log", "mystical-dir",
                     "mystical-dir/read", "chat-search", "chat-report", "hooks"):
@@ -244,7 +264,18 @@ def post(path: str, body: dict, chat_id: int) -> "tuple[dict, int] | None":
         return _OFF
     if path == "chat-images":
         try:
-            return {"mode": chat_images.set_mode(str(body.get("mode") or ""))}, 200
+            if "mode" not in body and "shown" not in body:
+                raise ValueError("send mode or shown")
+            # Both checked before either is kept, so a bad pair changes nothing.
+            if "mode" in body and body["mode"] not in chat_images.MODES:
+                raise ValueError("mode must be attachment or inline")
+            if "shown" in body and body["shown"] not in chat_images.SHOWN:
+                raise ValueError("shown must be chat or gallery")
+            if "mode" in body:
+                chat_images.set_mode(body["mode"])
+            if "shown" in body:
+                chat_images.set_shown(body["shown"])
+            return {"mode": chat_images.mode(), "shown": chat_images.shown()}, 200
         except ValueError as e:
             return {"error": str(e)}, 400
     if path == "chat-images/upload":
@@ -255,18 +286,13 @@ def post(path: str, body: dict, chat_id: int) -> "tuple[dict, int] | None":
         if not experimental.enabled():
             return _OFF
         root, chat = _work_root(chat_id, body.get("session_id"), body.get("project"))
-        if path.startswith("worklist/run/"):
-            from bridge import workrun
-            return workrun.api(path, body, root, store.get_session(chat) if chat else None)
+        if path.startswith("worklist/plan/"):
+            from bridge import chatplan
+            return chatplan.api(path, body, root, store.get_session(chat) if chat else None)
         if path.startswith("worklist/refine/"):
-            from bridge import workrefine, workrun
-            out, status = workrefine.api(path, body, root, chat, chat_id)
-            return ({**out, **workrun.run_view(root)}, status) if status == 200 else (out, status)
-        out, status = worklist.api(path, body, root, chat)
-        if status == 200:
-            from bridge import workrun
-            out.update(workrun.run_view(root))
-        return out, status
+            from bridge import workrefine
+            return workrefine.api(path, body, root, chat, chat_id)
+        return worklist.api(path, body, root, chat)
     if path == "design-theme":
         return design_board.save_theme(body) if experimental.enabled() else _OFF
     if path.startswith("saved-views"):
@@ -309,6 +335,8 @@ def post(path: str, body: dict, chat_id: int) -> "tuple[dict, int] | None":
         return chat_aside.translate(body, chat_id, s.get("cwd"))
     if path == "chat/explain":
         return chat_aside.explain(body, chat_id, s.get("cwd"))
+    if path == "chat/browser":
+        return _post_browser(body, chat)
     if path.startswith("chat/design"):
         return _post_design(path, body, s, chat_id)
     if path in ("chat/docs", "chat/doc-read"):

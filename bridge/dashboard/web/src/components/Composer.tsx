@@ -1,11 +1,14 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { Brain, ChevronRight, ChevronsRight, DraftingCompass, Gauge, Merge, Paperclip, Pause, Pin, Scissors, ShieldHalf, SlidersHorizontal, Square, TriangleAlert, UserRound, Users } from "lucide-react";
-import { api, type AccountInfo, type EffortLevel, type GraphState, type ModelId, type SlashCommand, type UsageInfo } from "../api";
-import { chipWindow, deadLogin, loginSlot, loginWindows, modelRows, type Window } from "../models";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { Blocks, Brain, Bug, ChevronDown, ChevronRight, ChevronsRight, DraftingCompass, Gauge, GitMerge, Hammer, Hand, Lock, Merge, MessageCircleQuestionMark, Paperclip, Pause, Pin, Play, RotateCcw, Route as RouteIcon, Scissors, Settings, ShieldHalf, SkipForward, SlidersHorizontal, Square, TriangleAlert, UserRound, Users, Zap, type LucideIcon } from "lucide-react";
+import { api, type AccountInfo, type FlowChange, type FlowSetting, type FlowSettings, type FlowStep, type EffortLevel, type GitStatus, type GraphState, type ModelId, type Route, type SlashCommand, type UsageInfo } from "../api";
+import { KINDS, KIND_ORDER, kindFacts, nextKind, presetFor, sendPlan, shownKind, type Fact, type KindId, type KindPick, type KindRun, type LastCheck } from "../lib/kinds";
+import { chipWindow, deadLogin, loginSlot, loginWindows, modelName, modelRows, type Window } from "../models";
 import { describe, slotHue, type Profile } from "../lib/profiles";
 import type { AgentPickers } from "../lib/agents";
 import { ago, fmtReset, hhmm } from "../lib/surfaces";
 import { loginName, otherLogin } from "../lib/limit";
+import { freshness, lowWindow, meterTone, readAgo, windowWord } from "../lib/clisignals";
+import { Spinner } from "./ui";
 import { openSettings } from "../lib/opensettings";
 import { useIntegrations } from "../lib/integrations";
 import { ImageLightbox, MediaThumb, ZoomButton, isFileUrl, withName } from "./ImageLightbox";
@@ -14,8 +17,18 @@ import type { AskMode } from "./AskDock";
 import { ICON_BODY } from "../lib/fileicons.gen";
 import { applyMention, mentionAt, rankPaths, type Mention } from "../lib/mention";
 import { isExact, rankCommands, slashAt } from "../lib/slash";
+import { SMART_ZONE, caption, ghostFor, isDropped, isStale, shouldAutoApply, swapLead } from "../lib/route";
+import type { FlowChip, FlowOption } from "../lib/flowview";
+import type { FlowAct } from "../lib/useFlow";
 import { Tip } from "./ui/Tip";
+import { Switch } from "./ui/Switch";
+import { notify } from "./hud/Notifications";
+import { changeFlows, refreshFlowSettings, useFlowSettings } from "../lib/flowsettings";
+import { useAiFeatures } from "../lib/ai";
+import { promptSteps, runs, STEP_DOES } from "../lib/flowsteps";
+import { flowRuns, saveRun } from "../lib/flowruns";
 import { askConfirm } from "./ui/Ask";
+import { deckView, enterTarget, type EnterMode } from "../lib/boxdeck";
 import { useChatChrome } from "../lib/chatchrome";
 import { MarkdownInput, type MarkdownInputHandle } from "./MarkdownInput";
 import { HelpersRow } from "./HelpersRow";
@@ -23,6 +36,7 @@ import { rankProfiles, skillQuery, STEER_SOFT_WORDS, type Caps, type HelperConfi
 import { multi as multiApi } from "../lib/multistore";
 import { chatImagesInline, uploadChatImage, useChatImages } from "../lib/chatimages";
 import { isInlineImage } from "../lib/embeds";
+import { keyAttrs, SHORTCUTS } from "../lib/shortcuts";
 
 const STILL_SAVING = "An image is still saving. Send again in a moment.";
 
@@ -58,22 +72,33 @@ export const PONYTAILS: { id: string; label: string }[] = [
   { id: "ultra", label: "Ultra" },
 ];
 
-// Past this share of the window, COMPACT lights up. A fraction, not a token
+// Past this share of the window, the CTX percentage lights up. A fraction, not a token
 // count: the ceiling moves with the model and with a session's own compact-at.
 const COMPACT_SUGGEST = 0.75;
-// The context readout is a segmented instrument, not a track: eight lamps read
-// as fast as a bar at a tenth of the width, and the width is the point — the
-// old full-bleed bar spent a whole row of the composer to render "1%".
-const CTX_SEGMENTS = 8;
+// The context readout is a number and a ⚙ (design-drafts/composer-flow-chip): the eight
+// lamps before it still took a tab's width to say "7%". Where it compacts lives behind the ⚙.
+// Unset ("auto"/null, claude's own trigger near the window's end) reads as 1M.
+const AUTOCOMPACT_AT: [string, string][] = [["150000", "150K"], ["500000", "500K"], ["1000000", "1M"]];
+// The prompt box's kinds of work (lib/kinds), each with its glyph on the rail.
+const KIND_ICON: Record<KindId, LucideIcon> = { design: DraftingCompass, build: Hammer, refactor: Blocks, fix: Bug, ship: GitMerge, ask: MessageCircleQuestionMark };
+// The FLOW chip's and the FLOWS sheet's glyph per flow id (lib/flowview flowOf), looked up by plain string.
+export const FLOW_ICON: Record<string, LucideIcon> = KIND_ICON;
+// The FLOWS sheet's line beside the picked flow's name.
+const FLOW_ABOUT: Record<string, string> = {
+  design: "grill, then draw it, then build", build: "grill, then build: here, or in parts",
+  refactor: "improve, then build in parts", fix: "find the cause, fix it, then review",
+  ship: "merge, check, clean up", ask: "an answer, nothing changed",
+};
+// PRESET names a run's fields as the box does; the bridge's flow settings as they do (lib/flowruns).
+const RUN_KEY: Record<keyof KindRun, string> = { model: "model", perm: "mode", effort: "effort", ponytail: "trim" };
 const PONYTAIL_TIP = "PONYTAIL — code-minimalism for this session's runs.\n\nClaude answers as a lazy senior dev: reuse what's already in the repo, stdlib or native platform before a new dependency, shortest diff that works, no speculative abstractions.\n\nOff = normal. Lite → Full → Ultra = increasing pressure to write less code. Default keeps whatever the bridge is configured with.";
 
 // hint → a quieter second line under the label (what a mode does); tag → a
-// small pill after it (the run sheet's PROFILE, on the row the profile sets)
+// small pill after it (PRESET's PROFILE, on the row the profile sets)
 type DropOption<T extends string> = { id: T; label: string; short?: string; group?: string; tail?: ReactNode; title?: string; tone?: string; hint?: string; tag?: string };
 
-/** The rows of a picker menu — shared by the chip dropdowns and the COMPACT
- *  layout's run popover, which lists the same models (with the same usage
- *  meters) and the same permission modes inline. */
+/** The rows of a picker menu: every chip dropdown's (Drop), PRESET's model
+ *  and mode selects among them, with the same usage meters on the models. */
 function MenuRows<T extends string>({ options, value, onPick }: {
   options: DropOption<T>[];
   value: T;
@@ -135,16 +160,19 @@ const OVERRIDE_TIP = "set in this session; pick the profile's value to follow it
 // The PROFILE menu's last row isn't a profile: it opens SETTINGS ▸ SESSION on a
 // blank profile form. Real ids are p_<hex>, so this one never clashes.
 const NEW_PROFILE = "+new";
-function OverrideDot() {
-  return <span title={OVERRIDE_TIP} style={{ color: "var(--acc)", flex: "none" }}>•</span>;
+function OverrideDot({ tip = OVERRIDE_TIP }: { tip?: string }) {
+  return <span title={tip} style={{ color: "var(--acc)", flex: "none" }}>•</span>;
 }
+// The FLOW chip's next step, in words (its title).
+const MARK_WORDS = { auto: "starts by itself", held: "held: you start it", you: "waits for you" } as const;
 
 function Drop<T extends string>({
-  label, code, value, options, fallback, open, onToggle, onPick, minWidth = 78, align = "left", title, dot, tone, meter, menu, className,
+  label, code, value, options, fallback, open, onToggle, onPick, minWidth = 78, align = "left", title, dot, tone, meter, menu, className, face,
 }: {
   label: string;
-  // On the chip's wrapper, for a layout that treats this chip apart (TABS'
-  // footer lets the PROFILE name give way first, .pb-l .drop-prof).
+  // The chip's whole face, when the field draws its own (the rail's usage ring); the menu is unchanged.
+  face?: ReactNode;
+  // A class on the chip's wrapper, for a layout that treats this chip apart.
   className?: string;
   // A field glyph printed inside the chip. The identity of the field then
   // travels with the control instead of sitting beside it as a separate span,
@@ -197,11 +225,13 @@ function Drop<T extends string>({
   return (
     <div className={className} style={{ position: "relative", display: "flex", alignItems: "center", gap: 6 }}>
       <button className="drop-btn" onClick={onToggle} title={title ?? `${label} — ${cur.label}`} style={btn}>
-        {code && <span className="ctrl-fld">{code}</span>}
-        <span className="drop-val" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: code ? 1 : undefined }}>{cur.short ?? cur.label}</span>
-        {dot && <OverrideDot />}
-        {meter}
-        <span style={{ color: code ? "var(--txl)" : "var(--txd)", fontSize: "var(--t8)", flex: "none" }}>▾</span>
+        {face ?? <>
+          {code && <span className="ctrl-fld">{code}</span>}
+          <span className="drop-val" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: code ? 1 : undefined }}>{cur.short ?? cur.label}</span>
+          {dot && <OverrideDot />}
+          {meter}
+          <span style={{ color: code ? "var(--txl)" : "var(--txd)", fontSize: "var(--t8)", flex: "none" }}>▾</span>
+        </>}
       </button>
       {open && (
         <div
@@ -249,23 +279,31 @@ function LeftMeter({ left, severity }: { left: number; severity?: string }) {
  *  new sessions get (the chip SETTINGS ▸ AI & PROFILES wears), a pin on every
  *  other row that makes it the default without binding this session. A row is
  *  a div, not a button, because the pin is a button of its own. */
-function ProfileRows({ profiles, accounts, value, defaultId, onPick, onDefault }: {
+function ProfileRows({ profiles, accounts, value, defaultId, onPick, onDefault, reading, onCheck }: {
   profiles: Profile[];
   accounts?: AccountInfo[];
   value: string;
   defaultId?: string | null;   // undefined: a bridge too old to say, so no pill and no pin
   onPick: (id: string) => void;
   onDefault?: (id: string) => void;
+  /** A read of the meters in flight: the age (s) past which it redoes one; null for none. */
+  reading: number | null;
+  /** Check now: read every login through Claude Code. */
+  onCheck?: () => void;
 }) {
   const key = (id: string) => (e: ReactKeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(id); }
   };
+  const now = Date.now() / 1000;
   return (
     <div role="listbox" aria-label="Profiles">
       {profiles.map((p) => {
         const on = p.id === value;
         const dead = deadLogin(accounts, p.agent, p.account);
-        const wins = dead === null ? loginWindows(accounts?.find((a) => a.slot === loginSlot(p.agent, p.account))) : [];
+        const acct = dead === null ? accounts?.find((a) => a.slot === loginSlot(p.agent, p.account)) : undefined;
+        const wins = loginWindows(acct);
+        // How fresh its reading is (live, N min ago, checking), where the meter line ends.
+        const fresh = acct ? freshness(acct, now, reading) : null;
         return (
           <div key={p.id} className="pm-row" role="option" aria-selected={on} tabIndex={0} data-on={on || undefined} data-dead={dead !== null || undefined}
             title={dead !== null ? `Account ${dead}'s Claude login has expired. Opens SETTINGS ▸ ACCOUNTS to sign it in again.` : undefined}
@@ -278,21 +316,38 @@ function ProfileRows({ profiles, accounts, value, defaultId, onPick, onDefault }
               <span className="pm-l1"><span className="pm-name">{p.name}</span><span className="pm-knobs">{knobs(p)}</span></span>
               {dead !== null
                 ? <span className="pm-exp">LOGIN EXPIRED ▸ pick to sign in again</span>
-                : wins.length > 0 && <span className="pm-fuel">{wins.map((w) => <Fuel key={w.tag} w={w} />)}</span>}
+                : wins.length > 0 ? <span className="pm-fuel">{wins.map((w) => <Fuel key={w.tag} w={w} />)}</span>
+                : fresh && <span className="pm-wait">reading through Claude Code…</span>}
             </span>
-            {defaultId !== undefined && (
-              <span className="pm-tail">
-                {p.id === defaultId
+            {(defaultId !== undefined || fresh) && (
+              <span className="pm-tail" data-fresh={fresh ? "" : undefined}>
+                {defaultId !== undefined && (p.id === defaultId
                   ? <span className="pm-tag" title="new sessions get this profile unless their project names another">DEFAULT</span>
                   : <button type="button" className="pm-pin" aria-label="Make default"
                       title="Make default · new sessions start on this profile, unless their project names another"
-                      onClick={(e) => { e.stopPropagation(); onDefault?.(p.id); }}><Pin size={13} /></button>}
+                      onClick={(e) => { e.stopPropagation(); onDefault?.(p.id); }}><Pin size={13} /></button>)}
+                {fresh && (
+                  <span className="pm-fresh" data-k={fresh.k}
+                    title={fresh.k === "live" ? "a turn on this login is running and reporting it"
+                      : fresh.k === "checking" ? "reading it through Claude Code" : "its last reading; Check now reads it again"}>
+                    {fresh.k === "live" ? <i className="meter-live" aria-hidden />
+                      : fresh.k === "checking" ? <Spinner className="h-[9px] w-[9px] border-[1.5px] opacity-100" /> : null}
+                    {fresh.text}
+                  </span>
+                )}
               </span>
             )}
           </div>
         );
       })}
-      <button type="button" className="pm-row pm-new caps" onClick={() => onPick(NEW_PROFILE)}>+ New profile</button>
+      <div className="pm-foot">
+        <button type="button" className="pm-row pm-new caps" onClick={() => onPick(NEW_PROFILE)}>+ New profile</button>
+        {onCheck && (
+          <span className="pm-check">idle logins are read on open ·{" "}
+            <button type="button" disabled={reading === 0} onClick={(e) => { e.stopPropagation(); onCheck(); }}>Check now</button>
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -326,6 +381,25 @@ function ClaudeLogo({ size = 12 }: { size?: number }) {
   );
 }
 
+/** The rail's usage (prompt-kinds R3 · RAIL): a 12px ring of what the login's window has left, its
+ *  %, and when it refills. Spent, the whole ring takes the tone (err) and the clock is the refill time.
+ *  The track is the theme's neutral --line2, as the mockup's; a theme without one tints it. */
+function UsageRing({ left, tone, clock }: { left: number; tone: string; clock: string }) {
+  const r = 4.5, c = 2 * Math.PI * r, w = 2.4;
+  return (
+    <span className="pb-ring">
+      <svg width={12} height={12} viewBox="0 0 12 12" aria-hidden>
+        <circle cx={6} cy={6} r={r} fill="none" strokeWidth={w} stroke={left > 0 ? `var(--line2, color-mix(in srgb, ${tone} 22%, transparent))` : tone} />
+        {/* round caps reach half a stroke past each end, so the dash is a stroke shorter: 92% keeps its gap */}
+        {left > 0 && <circle cx={6} cy={6} r={r} fill="none" strokeWidth={w} stroke={tone} strokeLinecap="round"
+          strokeDasharray={`${Math.max(0, (c * left) / 100 - w)} ${c}`} transform="rotate(-90 6 6)" />}
+      </svg>
+      <span className="pb-pc" style={{ color: tone }}>{left}%</span>
+      <span className="pb-clock">{clock}</span>
+    </span>
+  );
+}
+
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`;
@@ -344,28 +418,6 @@ const chip: CSSProperties = {
 export function SteerIcon({ size = 13 }: { size?: number }) {
   return <Merge size={size} strokeWidth={1.8} style={{ transform: "rotate(90deg)", flex: "none" }} aria-hidden />;
 }
-
-/** COMPACT layout's one run control, in two pieces: the chip in the footer
- *  (RunTrigger) and the sheet it opens (RunSheet), which the Composer renders
- *  among the cmdbox's popovers so it spans the box in every layout — hung from
- *  the chip, a sheet this wide ran off the column. Model, mode and effort are
- *  all on show at once, each under its own head with a word on what it
- *  decides, nothing nested: the popover this replaces opened the two lists
- *  inside itself one at a time, reflowing under an effort slider whose stops
- *  had no names. A pick applies at once and the sheet stays open (it is a
- *  settings sheet, not a menu — all three get set in one visit); a click
- *  away or Esc closes it. Design: drafts/run-picker. */
-type RunProps<M extends string> = {
-  model: M;
-  modelOpts: DropOption<M>[];
-  perm: string;
-  permOpts: DropOption<string>[];
-  effort: EffortLevel | "";
-  /** Another agent: modelOpts/permOpts are already its own; its effort is its
-   *  own list (or none), and its name stands in for an unset model. */
-  agent?: AgentPickers | null;
-  overrides?: string[]; // the knobs set by hand over the session's profile (OverrideDot)
-};
 
 /** What the composer does differently with Settings ▸ Experimental on. null/absent
  *  while it's off: then every check below reads as it always did. */
@@ -388,112 +440,269 @@ function effortRow(effort: string, agent?: AgentPickers | null): { id: string; l
   return EFFORTS.find((e) => e.id === effort) ?? EFFORTS[0];
 }
 
-function RunTrigger<M extends string>({ open, onToggle, model, modelOpts, perm, permOpts, effort, agent, overrides }: RunProps<M> & {
-  open: boolean;
-  onToggle: () => void;
-}) {
-  const own = (k: string) => !!overrides?.includes(k);
-  const cur = modelOpts.find((o) => o.id === model) ?? modelOpts[0];
-  const modelName = agent && !model ? agent.label : cur ? cur.short ?? cur.label : String(model);
-  const permRow = permOpts.find((o) => o.id === perm) ?? modeRow(perm);
-  const effRow = effortRow(effort, agent);
-  const sep = <span className="run-sep" aria-hidden>·</span>;
-  return (
-    // A chip like the PROFILE and PONYTAIL chips beside it: the field's glyph
-    // in a tile, the model bold, the mode and effort quieter, a caret.
-    <button className="run-trigger" onClick={onToggle}
-      title={`Model ${modelName} · mode ${permRow.label} · effort ${effRow.label}`}
-      style={{ appearance: "none", cursor: "pointer", border: 0, padding: 0, background: "transparent",
-               fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 7, color: "var(--txd)",
-               whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%" }}>
-      <span className="ctrl-fld"><SlidersHorizontal size={12} /></span>
-      <span style={{ fontWeight: 600, color: open ? "var(--acc)" : "var(--txb)", fontSize: "var(--t105)", overflow: "hidden", textOverflow: "ellipsis" }}>{modelName}{own("model") && <OverrideDot />}</span>
-      {perm !== "" && <>{sep}<span style={{ fontSize: "var(--t10)" }}>{permRow.label}{own("permission_mode") && <OverrideDot />}</span></>}
-      {effort !== "" && <>{sep}<span style={{ fontSize: "var(--t10)" }}>{effRow.label}{own("effort") && <OverrideDot />}</span></>}
-      <span className="run-car" aria-hidden style={{ color: open ? "var(--acc)" : "var(--txl)", fontSize: "var(--t8)", flex: "none" }}>▾</span>
-    </button>
-  );
-}
+/** The FLOWS settings, for every session (bridge/flowsettings.py), drawn twice from the parts below:
+ *  FlowsSheet in the gear's popover (A · STEP LIST, design-drafts/flow-sheet, 2026-11-16) and
+ *  FlowsSettings in SETTINGS ▸ AI MANAGEMENT at the page's own scale (A · LIST + DETAIL,
+ *  design-drafts/flow-settings, 2026-11-17). Both keep one height whichever flow is picked. */
+type FlowChangeFn = (c: FlowChange) => void;
 
-function RunSheet<M extends string>({ model, modelOpts, onModel, perm, permOpts, onPerm, effort, onEffort, agent, overrides, profile, extra }: RunProps<M> & {
-  /** A row under the three: the chat's helper limits (HelpersRow). */
-  extra?: ReactNode;
-  onModel: (m: M) => void;
-  onPerm: (p: string) => void;
-  onEffort: (e: EffortLevel | "") => void;
-  /** The profile the session is bound to: what a knob set by hand overrides. */
-  profile?: { model: string; mode: string; effort: string } | null;
-}) {
-  const own = (k: string) => !!overrides?.includes(k);
-  const effOpts: DropOption<string>[] = agent ? agent.effort ?? [] : EFFORTS;
-  // The profile's own value for a knob this session overrides — the row the
-  // OverrideDot's "pick the profile's value to follow it again" means, which
-  // nothing named before. null while the knob follows the profile, or the
-  // profile leaves it unset.
-  const from = {
-    model: own("model") && profile?.model ? profile.model : null,
-    perm: own("permission_mode") && profile?.mode ? profile.mode : null,
-    effort: own("effort") && profile?.effort ? profile.effort : null,
-  };
-  const tagged = <T extends string>(opts: DropOption<T>[], id: string | null) =>
-    id === null ? opts : opts.map((o) => (o.id === id ? { ...o, tag: "PROFILE" } : o));
-  const head = (label: string, hint: string, opts: { id: string; label: string }[], id: string | null) => (
-    <div className="rp-hd">
-      <b>{label}</b>
-      {id === null
-        ? <i>{hint}</i>
-        : <i title={OVERRIDE_TIP}><span className="rp-dot">•</span> set here · profile: {opts.find((o) => o.id === id)?.label ?? id.replace(/^claude-/, "")}</i>}
+/** The picked flow's run default for every session, folded to one line ("Opus 5.5 · Bypass · Max ·
+ *  trim default"); open, PRESET's Model, Mode, Effort and Trim rows, drawn the same, with no profile
+ *  marks (the default is no profile's). */
+function FlowRunRows({ f, change, models, open, onOpen, flat }: { f: FlowSetting; change: FlowChangeFn; models: DropOption<string>[];
+  open: boolean; onOpen: () => void;
+  /** SETTINGS: the picks in one row, always open, no summary line to fold them. */
+  flat?: boolean }) {
+  const [list, setList] = useState<"" | keyof KindRun>("");
+  const trim = useAiFeatures().ponytail;
+  const val = flowRuns([f])[f.id];
+  const perm = val.perm ? PERMS.find((o) => o.id === val.perm)?.label ?? modeRow(val.perm).label : "Session";
+  const effort = effortRow(val.effort, null).label;
+  const pony = PONYTAILS.find((o) => o.id === val.ponytail)?.label ?? val.ponytail;
+  const sel = (k: keyof KindRun, label: string, opts: DropOption<string>[], shown: string) => (
+    <div className="fs-pick"><span className="caps">{label}</span>
+      <Drop<string> label={label.toUpperCase()} className="pb-sel" value={val[k]} fallback={{ id: val[k], label: shown }} options={opts}
+        open={list === k} onToggle={() => setList((l) => (l === k ? "" : k))}
+        onPick={(v) => { change({ flow: f.id, key: RUN_KEY[k], value: v }); setList(""); }} />
     </div>
   );
   return (
-    <div role="dialog" aria-label="Model, mode and effort" className="rp-sheet"
-      style={{
-        position: "absolute", left: -1, right: -1, bottom: "calc(100% + 9px)", zIndex: 30,
-        border: "1px solid color-mix(in srgb, var(--acc) 35%, transparent)",
-        background: "color-mix(in srgb, var(--panel2) 98%, transparent)",
-        boxShadow: "0 -8px 26px var(--shadow-pop)", animation: "mpop .12s ease",
-      }}>
-      <div className="rp-grid">
-        <div className="rp-sec">
-          {head("MODEL", "what runs the turn", modelOpts, from.model)}
-          <div className="rp-list">
-            {modelOpts.length
-              ? <MenuRows options={tagged(modelOpts, from.model)} value={model} onPick={onModel} />
-              : <div className="rp-none">this agent hasn't listed its models yet — TEST it in Settings ▸ Accounts</div>}
-          </div>
-        </div>
-        {permOpts.length > 0 && (
-          <div className="rp-sec">
-            {head("MODE", "what it may do without asking", permOpts, from.perm)}
-            <div className="rp-list"><MenuRows options={tagged(permOpts, from.perm)} value={perm} onPick={onPerm} /></div>
+    <div className="fs-kv" data-top=""><span className="caps">Runs on</span>
+      <div className="fs-runs-w">
+        {!flat && <button type="button" className="fs-runs" aria-expanded={open} onClick={onOpen}>
+          {modelName(val.model)}<span>{[perm, effort, trim && `trim ${pony.toLowerCase()}`].filter(Boolean).map((x) => ` · ${x}`).join("")}</span>
+          <ChevronDown size={11} strokeWidth={2} aria-hidden />
+        </button>}
+        {(open || flat) && (
+          <div className="fs-grid">
+            {sel("model", "Model", models, modelName(val.model))}
+            {sel("perm", "Mode", PERMS, perm)}
+            {sel("effort", "Effort", EFFORTS.filter((e) => e.id), effort)}
+            {trim && sel("ponytail", "Trim", PONYTAILS, pony)}
           </div>
         )}
       </div>
-      {effOpts.length > 0 && (
-        <div className="rp-eff">
-          {head("EFFORT", "how hard it thinks", effOpts, from.effort)}
-          {/* One named stop per level — the slider it replaces had ticks and no names. */}
-          <div className="rp-seg" role="group" aria-label="Effort">
-            {effOpts.map((e) => (
-              <button key={e.id || "auto"} type="button" className="rp-sg" aria-pressed={e.id === effort}
-                data-on={e.id === effort ? "" : undefined} data-prof={e.id === from.effort ? "" : undefined}
-                title={e.id === from.effort ? "your profile's pick" : undefined}
-                onClick={() => onEffort(e.id as EffortLevel | "")}>{e.label}</button>
-            ))}
+    </div>
+  );
+}
+
+/** The sheet's two-way choices: one segment, its options [value, label, title?]. */
+function FlowSeg<T extends string | boolean>({ label, value, opts, set }: { label: string; value: T;
+  /** [value, label, a plain title or a Tip's content] */
+  opts: [T, ReactNode, ReactNode?][]; set: (v: T) => void }) {
+  return (
+    <div className="pb-sg" role="group" aria-label={label}>
+      {opts.map(([v, text, tip]) => {
+        const b = <button key={String(v)} type="button" className="caps" aria-pressed={value === v}
+          title={typeof tip === "string" ? tip : undefined} onClick={() => set(v)}>{text}</button>;
+        return tip && typeof tip !== "string" ? <Tip key={String(v)} text={tip} anchor="right" pin={false} width={340} className="fs-tipw">{b}</Tip> : b;
+      })}
+    </div>
+  );
+}
+
+/** Why IN PARTS (design-drafts/flow-sheet a4-tickets-tip): hovering it says what parts give over sub agents. */
+const WHY_TICKETS = (
+  <span className="fs-why">
+    <b className="caps">Why parts instead of sub agents</b>
+    <ul>
+      <li><b>Their own chat.</b> Each part is a real session. You can open it, watch it work, and answer its questions directly.</li>
+      <li><b>Their own branch.</b> Parallel work doesn't collide, and each part's changes are merged on purpose.</li>
+      <li><b>A plan you can see.</b> Parts are drawn as waves, and a part starts only after the parts it depends on are done.</li>
+      <li><b>They can be retried.</b> A failed part can be run again without redoing the rest.</li>
+      <li><b>They last.</b> A part keeps its record after the turn ends. A sub agent is gone when the turn ends.</li>
+    </ul>
+    <span>Sub agents are still best for quick lookups, searches and reviews. Build in parts when two or more of them can be built at the same time.</span>
+  </span>
+);
+
+/** Why a switched-on step may still not run: PONYTAIL is off. "" when it runs as set. */
+const ponyNote = (st: FlowStep) => st.ponytail_off === true ? "PONYTAIL is off: this step doesn't run"
+  : st.ponytail_off ? "PONYTAIL is off: no REVIEW after a here build (the council's after the parts merge still runs)" : "";
+
+const flowName = (id: string) => KINDS[id as KindId]?.name ?? id.toUpperCase();
+const titleCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+
+/** One flows editor's state: the bridge's settings, the picked flow (or "general"), the last refusal. */
+function useFlowsEdit(initial: string) {
+  const cfg = useFlowSettings();
+  const [sel, setSel] = useState(initial);
+  const [runsOpen, setRunsOpen] = useState(false);
+  const [err, setErr] = useState("");
+  const change: FlowChangeFn = (c) => { setErr(""); void changeFlows(c).catch((e: Error) => setErr(e.message)); };
+  const pick = (id: string) => { setSel(id); setRunsOpen(false); };
+  const f = cfg?.flows.find((x) => x.id === sel) ?? cfg?.flows[0];
+  return { cfg, sel, f, runsOpen, setRunsOpen, err, change, pick };
+}
+
+/** The switches every flow shares, as [title, hint, control]: the sheet's GENERAL page, SETTINGS' 2×2. */
+function generalRows(cfg: FlowSettings, change: FlowChangeFn): [string, string, ReactNode][] {
+  return [
+    ["Guess the flow as I type", "off: only a tap or Tab lights one",
+      <Switch on={cfg.guess === "auto"} label="Guess the flow as I type" onClick={() => change({ key: "guess", value: cfg.guess === "auto" ? "hand" : "auto" })} />],
+    ["A prompt with no flow lit", "from Telegram, or sent bare",
+      <FlowSeg label="A prompt with no flow lit" value={cfg.nokind} set={(v) => change({ key: "nokind", value: v })} opts={[
+        ["claude", "Claude picks", "Claude picks one of the flows that are on, or runs SHIP and ASK as the turn itself"],
+        ["typed", "As typed", "Claude picks nothing: the prompt goes as typed"]]} />],
+    ["Put safe commands in front", "five of them, without a tap",
+      <Switch on={cfg.autopick} label="Put safe commands in front" onClick={() => change({ key: "autopick", value: !cfg.autopick })} />],
+    ["Offer /compact past 150k", "and mark 150k on the meter",
+      <Switch on={cfg.smartzone} label="Offer /compact past 150k" onClick={() => change({ key: "smartzone", value: !cfg.smartzone })} />],
+  ];
+}
+
+/** The picked flow: its numbered steps (a fixed one always runs; the others switch, for every session
+ *  from its next step), After a step, Build, Runs on. The sheet's open Runs on takes the steps' room. */
+function FlowDetail({ f, change, models, runsOpen, onRuns, flat }: { f: FlowSetting; change: FlowChangeFn;
+  models: DropOption<string>[]; runsOpen: boolean; onRuns: () => void; flat?: boolean }) {
+  const name = flowName(f.id);
+  return (
+    <>
+      {!runsOpen && <>
+        <ol className="fs-steps" aria-label={`${name} steps`}>
+          {f.steps.map((st, i) => (
+            <li key={st.step} className="fs-st" data-off={runs(st) ? undefined : ""} data-pony={st.ponytail_off ? "" : undefined}
+              title={ponyNote(st) || undefined}>
+              <i>{i + 1}</i><b className="caps">{titleCase(st.step)}</b><span>{STEP_DOES[st.step] ?? ""}</span>
+              {st.fixed
+                ? <em title={`${name} always runs ${st.step.toUpperCase()}`} aria-label={`${st.step}: always runs`}><Lock size={11} strokeWidth={2.2} aria-hidden /></em>
+                : <Switch on={st.on} label={[st.step, ponyNote(st)].filter(Boolean).join(". ")}
+                    onClick={() => change({ flow: f.id, key: "step", step: st.step, value: !st.on })} />}
+            </li>
+          ))}
+        </ol>
+        {f.steps.length > 1 && (
+          <div className="fs-kv"><span className="caps">After a step</span>
+            <FlowSeg label={`${name}: after a step`} value={f.next} set={(v) => change({ flow: f.id, key: "next", value: v })} opts={[
+              [true, <><Zap size={10} strokeWidth={2.4} aria-hidden />Go on</>, "the next step starts by itself"],
+              [false, <><Hand size={10} strokeWidth={2.2} aria-hidden />Wait for me</>, "each step waits for you"]]} />
+          </div>
+        )}
+        {f.tickets !== undefined && (
+          <div className="fs-kv"><span className="caps">Build</span>
+            <div className="fs-build">
+              <FlowSeg label={`${name}: build`} value={f.tickets} set={(v) => change({ flow: f.id, key: "tickets", value: v })} opts={[
+                [false, "Here", "builds in this session"],
+                [true, "In parts", WHY_TICKETS]]} />
+              {f.tickets && (
+                <label className="fs-sw" title="new parts start building by themselves, without waiting for Approve & build">
+                  <Switch on={!f.approve} label={`${name}: start parts without asking`}
+                    onClick={() => change({ flow: f.id, key: "approve", value: !f.approve })} />start without asking</label>
+              )}
+            </div>
+          </div>
+        )}
+      </>}
+      <FlowRunRows f={f} change={change} models={models} open={runsOpen} onOpen={onRuns} flat={flat} />
+    </>
+  );
+}
+
+export function FlowsSheet({ initial, models }: { initial?: string | null;
+  /** The rows of the picked flow's Model select: Claude's, never an agent session's own. */
+  models: DropOption<string>[] }) {
+  const { cfg, sel, f, runsOpen, setRunsOpen, err, change, pick } = useFlowsEdit(initial ?? "build");
+  if (!cfg || !f) return null;
+  const general = sel === "general";
+  const Glyph = FLOW_ICON[f.id] ?? RouteIcon;
+  const pickName = flowName(f.id);
+  return (
+    <div className="pb-pp fs-sheet" role="dialog" aria-label="Flows" style={{ overflow: "visible" }}>
+      <h4><Settings size={10} strokeWidth={2.2} aria-hidden />Flows
+        <span>on<Switch on={cfg.on} label="Flows on" onClick={() => change({ key: "on", value: !cfg.on })} /></span></h4>
+      <div className="fs-body">
+        <div className="fs-list" role="group" aria-label="Flows">
+          {cfg.flows.map((x) => {
+            const Icon = FLOW_ICON[x.id] ?? RouteIcon;
+            return (
+              // The name is the row's button (a row holding the switch can't be one); a click anywhere else picks it too.
+              <div key={x.id} className="fs-row" data-sel={!general && x.id === f.id ? "" : undefined}
+                data-off={x.on ? undefined : ""} onClick={() => pick(x.id)}>
+                <Icon size={14} strokeWidth={2} aria-hidden />
+                <button type="button" className="fs-name" aria-pressed={!general && x.id === f.id}>{flowName(x.id)}</button>
+                <small title="steps that run">{x.steps.filter(runs).length}/{x.steps.length}</small>
+                <span onClick={(e) => e.stopPropagation()}>
+                  <Switch on={x.on} label={`${flowName(x.id)} on`} onClick={() => change({ flow: x.id, key: "on", value: !x.on })} />
+                </span>
+              </div>
+            );
+          })}
+          <div className="fs-row fs-gen" data-sel={general ? "" : undefined} onClick={() => pick("general")}>
+            <Settings size={13} strokeWidth={2} aria-hidden />
+            <button type="button" className="fs-name caps" aria-pressed={general}>General</button>
+            <ChevronRight size={11} strokeWidth={2} aria-hidden />
           </div>
         </div>
-      )}
-      {extra}
+        <div className="fs-pane">
+          {general ? <>
+            <div className="fs-dh"><Settings size={13} strokeWidth={2} aria-hidden /><b className="caps">General</b><span>for all flows</span></div>
+            <div className="fs-gl">
+              {generalRows(cfg, change).map(([t, h, c]) => <div key={t} className="fs-g"><div><b>{t}</b><span>{h}</span></div>{c}</div>)}
+            </div>
+          </> : <>
+            <div className="fs-dh"><Glyph size={13} strokeWidth={2} aria-hidden />{pickName}<span>{FLOW_ABOUT[f.id]}</span></div>
+            <FlowDetail f={f} change={change} models={models} runsOpen={runsOpen} onRuns={() => setRunsOpen((o) => !o)} />
+          </>}
+        </div>
+      </div>
+      <div className="pb-pf">{err ? <span data-tone="err">{err}</span> : "Every session. PRESET changes just this one."}
+        {!general && <button type="button" onClick={() => change({ reset: f.id })}><RotateCcw size={10} strokeWidth={2.2} aria-hidden />Reset {pickName}</button>}
+      </div>
+    </div>
+  );
+}
+
+/** SETTINGS ▸ AI MANAGEMENT ▸ Flows, at the page's scale (design-drafts/flow-settings a1, a2): the
+ *  shared switches as a 2×2 of the page's rows, then the flows as cards beside the picked one. The
+ *  master switch is the fold's own (SettingsModal). */
+export function FlowsSettings({ models }: { models: DropOption<string>[] }) {
+  const { cfg, f, err, change, pick } = useFlowsEdit("build");
+  useEffect(() => { void refreshFlowSettings(); }, []);   // another browser or app may have changed them
+  if (!cfg || !f) return <div className="aim-hint">Reading the flow settings…</div>;
+  return (
+    <div className="fss">
+      <div className="aim-sub"><b>For every flow</b></div>
+      <div className="aim-vfields two">
+        {generalRows(cfg, change).map(([t, h, c]) => <div key={t} className="aim-vfield row"><div><b>{t}</b><span>{h}</span></div>{c}</div>)}
+      </div>
+      <div className="aim-sub"><b>Each flow</b><span className="aim-hint">pick one to change its steps</span></div>
+      {err && <div className="aim-xerr">{err}</div>}
+      <div className="fss-body">
+        <div className="fss-list" role="group" aria-label="Flows">
+          {cfg.flows.map((x) => {
+            const Icon = FLOW_ICON[x.id] ?? RouteIcon;
+            const name = titleCase(flowName(x.id));
+            return (
+              <div key={x.id} className="fss-fr" data-sel={x.id === f.id ? "" : undefined} data-off={x.on ? undefined : ""} onClick={() => pick(x.id)}>
+                <span className="aim-xic"><Icon size={14} strokeWidth={1.7} aria-hidden /></span>
+                <button type="button" aria-pressed={x.id === f.id}><b>{name}</b>
+                  <small>{x.steps.filter(runs).length} of {x.steps.length} step{x.steps.length === 1 ? "" : "s"}</small></button>
+                <span onClick={(e) => e.stopPropagation()}>
+                  <Switch on={x.on} label={`${name} on`} onClick={() => change({ flow: x.id, key: "on", value: !x.on })} />
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        <div className="fss-det">
+          <div className="fss-dh"><b>{titleCase(flowName(f.id))}</b><span className="aim-hint">{FLOW_ABOUT[f.id]}</span>
+            <button type="button" className="aim-xbtn" onClick={() => change({ reset: f.id })}><RotateCcw size={11} strokeWidth={2} aria-hidden />Reset</button>
+          </div>
+          <FlowDetail f={f} change={change} models={models} runsOpen={false} onRuns={() => {}} flat />
+        </div>
+      </div>
     </div>
   );
 }
 
 export function Composer({
   disabled, running, model, models, usage, accounts, agentPick, profile, profiles, onProfile, defaultProfile, onDefaultProfile, overrides, effort, perm, onPerm, ponytail, onPonytail, showPonytail, injectedText, injectNonce, sessionId,
-  draft, onDraft, contextTokens, contextWindow, onModel, onEffort, onSend, onSteer, onStop, onCompact,
+  draft, onDraft, contextTokens, contextWindow, onModel, onEffort, onSend, onSteer, onStop, onCompact, autocompact, onAutocompact,
   queued, onCancelQueued, onEjectQueued, onSteerQueued, project, onOpenMap, paused, onTogglePause, pills, fileSink, placeholder,
-  dock, ask, multi,
+  dock, ask, bg = 0, onAccounts, routing, routeCtx, helper, onRouteFresh, flowQueued, smartZone, flowChip, runningFlow = null, onFlow, multi, git, lastCheck, designLinked, words,
 }: {
+  /** The chat's code-like words, newest first, for completing as you type (lib/completewords). */
+  words?: string[];
   /** Multi-agent chats (ComposerMulti). */
   multi?: ComposerMulti | null;
   disabled: boolean;
@@ -543,10 +752,16 @@ export function Composer({
   contextWindow?: number;
   onModel: (m: ModelId) => void;
   onEffort: (e: EffortLevel | "") => void;
-  onSend: (text: string, images: string[]) => void;
+  /** run: the kind's preset, sent with this prompt only (COMPACT's kinds, lib/kinds). flow: the
+   *  flow the prompt starts and who picked it; the bridge puts its first step in front. */
+  onSend: (text: string, images: string[], noPath?: boolean, run?: KindRun | null, typed?: string,
+           flow?: { id: KindId; by: "you" | "guess" }) => void;
   onSteer?: (text: string, images: string[]) => void;
   onStop: () => void;
   onCompact?: (instructions?: string) => void;
+  /** The session's auto-compact point ("auto" | token count | null = claude's default), and its setter. */
+  autocompact?: string | null;
+  onAutocompact?: (v: string | null) => void;
   queued?: { id: string; text: string }[];
   onCancelQueued?: (id: string) => void;
   onEjectQueued?: (id: string) => void; // pull it out and run it in a fresh session
@@ -567,25 +782,65 @@ export function Composer({
   dock?: ReactNode;
   /** While it waits, the box answers it: its text and its button belong to the ask. */
   ask?: AskMode | null;
+  /** Background tasks the answered turn left running (status `background`): a
+   *  steer keeps them running, and STOP ends them. 0 for anything else. */
+  bg?: number;
+  /** Re-read the logins' meters, any older than `fresh` s (the PROFILE menu). */
+  onAccounts?: (fresh: number) => Promise<unknown>;
+  /** SKILL ROUTER: what is typed gets the Matt Pocock /command that fits (lib/route). */
+  routing?: boolean;
+  /** What the router reads besides the text: the session's checkout, its last prompts, how
+   *  its last turn ended, whether it has had one. Absent: nothing to route against yet. */
+  routeCtx?: { project: string; cwd?: string; prompts: string[]; lastStatus?: string; first: boolean };
+  /** Tab on a route that opens in a fresh session (the next free ticket): its draft. */
+  onRouteFresh?: (text: string) => void;
+  /** A flow step sits in the session's queue: the NEXT STEP ghost stays hidden. */
+  flowQueued?: boolean;
+  /** Sub-switch: the 150k mark on the CTX meter. */
+  smartZone?: boolean;
+  /** The session's path, for the FLOW chip beside + (lib/flowview flowChip); null: no chip. */
+  flowChip?: FlowChip | null;
+  /** The flow the session is on until its last step is done (lib/flowview runningFlow): its glyph's dot. */
+  runningFlow?: string | null;
+  /** The FLOW chip's switches, Reset and skips (lib/useFlow). */
+  onFlow?: (act: FlowAct) => void;
+  /** What the kinds' facts read (lib/kinds kindFacts): the session's git status, its newest
+   *  check, and whether its project is linked to Claude Design (null: not known yet). */
+  git?: GitStatus | null;
+  lastCheck?: LastCheck | null;
+  designLinked?: boolean | null;
+  /** The open session is a helper: its next turn runs on its own picks, so the kinds dim like an agent's. */
+  helper?: boolean;
 }) {
   const text = draft;
   const setText = onDraft;
   const [images, setImages] = useState<string[]>([]);
   const [zoom, setZoom] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [openDrop, setOpenDrop] = useState<"" | "profile" | "model" | "effort" | "mode" | "pony" | "verbs" | "run" | "plus" | "queued" | "helpers">("");
-  // The run sheet stays open across picks, so it takes a dialog's Esc as well
-  // as a click away; the other drops close on their pick.
+  const [openDrop, setOpenDrop] = useState<"" | "profile" | "model" | "effort" | "mode" | "pony" | "verbs" | "preset" | "plus" | "queued" | "fits" | "helpers" | "flow" | "flows" | "ctx">("");
+  // NOW|NEXT (B · DECK): what Enter does with the text while a turn runs. Alt+Enter does the other.
+  // fork: SETTINGS ▸ WHILE IT WORKS picks the side it starts on (STEER = NOW, the owner's default).
+  const startMode: EnterMode = useChatChrome().busyEnter === "steer" ? "now" : "next";
+  const [enterMode, setEnterMode] = useState<EnterMode>(startMode);
+  // NOW is picked for one turn: the next turn, or another session, starts back on the setting's side.
+  useEffect(() => { if (!running) setEnterMode(startMode); }, [running, sessionId, startMode]);
+  // PRESET's model or mode list, open inside it; and where it hangs: above the card and its tabs, its
+  // right edge on the preset segment's (measured as it opens; index.css keeps it inside the card).
+  const [ppList, setPpList] = useState<"" | "model" | "mode" | "jump">("");
+  const [ppAt, setPpAt] = useState(0);
+  useEffect(() => setPpList(""), [openDrop]);
+  // PRESET stays open across picks, so it takes a dialog's Esc as well as a
+  // click away; the other drops close on their pick.
   useEffect(() => {
-    if (openDrop !== "run") return;
+    if (openDrop !== "preset" && openDrop !== "flow" && openDrop !== "flows") return;
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpenDrop(""); };
     window.addEventListener("keydown", esc);
     return () => window.removeEventListener("keydown", esc);
   }, [openDrop]);
-  const { compact, lead, composer, sendKey, busyEnter } = useChatChrome();
+  const { compact, lead, sendKey } = useChatChrome();
   const plugins = useIntegrations();   // the DESIGN button exists while Claude Design is installed
-  // TABS / CONSOLE: COMPACT's new composers. CLASSIC is the old markup.
-  const shelled = compact && composer !== "classic";
+  // COMPACT wears the TABS shell; DEFAULT keeps the old markup.
+  const shelled = compact;
   // MODEL rows grouped by usage pool, each with what it has left on the login
   // the session is spending, whichever account that is.
   const modelOpts = useMemo(
@@ -604,6 +859,7 @@ export function Composer({
   const own = (k: string) => !!overrides?.includes(k);
   const fileRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<MarkdownInputHandle>(null);
+  const escRef = useRef(false);   // the last editor key was Esc: the next Tab is the browser's
   // Images on their way into the text (SYSTEM ▸ Send images: In the chat).
   useChatImages();
   const [embedErr, setEmbedErr] = useState<string | null>(null);
@@ -625,6 +881,18 @@ export function Composer({
     const f = () => taRef.current?.focus();
     window.addEventListener("ask:focus", f);
     return () => window.removeEventListener("ask:focus", f);
+  }, []);
+
+  // A letter typed with nothing else to take it (App): it starts your message
+  // here. The first composer to answer takes it, so two on screen don't both type.
+  useEffect(() => {
+    const f = (e: Event) => {
+      if (e.defaultPrevented || !taRef.current) return;
+      e.preventDefault();
+      taRef.current.type((e as CustomEvent<string>).detail);
+    };
+    window.addEventListener("hud:type", f);
+    return () => window.removeEventListener("hud:type", f);
   }, []);
 
   // Focus the command line whenever a session is opened or switched (and on
@@ -669,6 +937,17 @@ export function Composer({
       .catch(() => { if (live) setTree([]); });
     return () => { live = false; };
   }, [project]);
+
+  // Names the project's code defines, for completing as you type (bridge/complete.py). Once per
+  // project: the bridge caches them until the repo's index changes.
+  const [symbols, setSymbols] = useState<{ name: string; file: string }[]>([]);
+  useEffect(() => {
+    if (!project) { setSymbols([]); return; }
+    let live = true;
+    void api.completeSymbols(project).then((r) => { if (live) setSymbols(r.symbols); }).catch(() => { if (live) setSymbols([]); });
+    return () => { live = false; };
+  }, [project]);
+  const diskPaths = useCallback((prefix: string) => api.completePaths(project ?? null, prefix).then((r) => r.paths), [project]);
 
   const [caret, setCaret] = useState(0);
   const [mentionPick, setMentionPick] = useState(0);
@@ -740,7 +1019,7 @@ export function Composer({
   const slashOn = slash !== null;
   // A box that leads with a /word needs the list too, to draw it as a command
   // (MarkdownInput): a draft can come back with one already in it.
-  const leadsSlash = text.startsWith("/");
+  const leadsSlash = text.trimStart().startsWith("/");
   // The list is Claude's (.claude/skills, commands, plugins, CLI builtins): an
   // agent session's / would run none of them, so it gets no list.
   const onAgent = !!agentPick;
@@ -768,6 +1047,15 @@ export function Composer({
       .catch(() => { if (live) setCmdsStale(true); });
     return () => { live = false; };
   }, [slashOn, leadsSlash, project, noList, skillPrefix, goals, cwd]);
+  // The router has it read up front, once per project, so a command it puts in front draws as one at once.
+  useEffect(() => {
+    if ((!routing && !shelled) || onAgent) return;
+    let live = true;
+    void api.commands(project)
+      .then((r) => { if (live) { setCmds(r.commands); setCmdsStale(false); } })
+      .catch(() => { if (live) setCmdsStale(true); });
+    return () => { live = false; };
+  }, [routing, shelled, project, onAgent]);
   const slashQ = slash ? (skillPrefix ? skillQuery(slash.q, skillPrefix) : slash.q) : "";
   const shits = slash && !noList ? rankCommands(cmds, slashQ) : [];
   const slashOpen = !!slash && !noList && !slashDismissed && (shits.length > 0 || cmdsStale);
@@ -798,6 +1086,188 @@ export function Composer({
       return true;
     }
     return false;
+  }
+
+  // --- skill router (lib/route, bridge/route.py) ---------------------------
+  // 400 ms after the text settles it goes to /local/route, which answers with the one
+  // Matt Pocock /command that fits, or none. An auto pick goes in front by itself and
+  // draws solid. Any other waits for Tab, drawn where it moves nothing: in an empty box
+  // as a ghost on the line the text will start (a next step), and while there is text
+  // as a small segment in the caption row under it, so nothing shifts under the caret.
+  // Never while a turn runs (steer or queue) or a docked ask takes the text, never over
+  // a /command, never for an agent (its / runs none of these), and not at all (no caption
+  // row either) while the project's / list has none of Matt's commands to offer.
+  // COMPACT has no auto pick and no typed-text suggestion: its kinds take the typed text.
+  // The empty box's ghost stays, its caption on the rail.
+  const pack = cmds.some((c) => c.name.startsWith("mattpocock-skills:"));
+  const routeOn = !!routing && pack && !!routeCtx && !onAgent && !running && !ask?.send;
+  // App memoises routeCtx on its turns; the session is in the key because two fresh ones read alike.
+  const ctxKey = useMemo(() => (routeOn ? JSON.stringify([sessionId, routeCtx]) : ""), [routeOn, sessionId, routeCtx]);
+  const [held, setHeld] = useState<{ r: Route; for: string; ctx: string } | null>(null);   // the last reply, and what it answered
+  const [applied, setApplied] = useState<Route | null>(null);   // the auto pick put in front of this draft
+  const [dropped, setDropped] = useState(false);                // no auto pick for this draft: one was taken out, or it wasn't typed fresh here
+  const [hidden, setHidden] = useState(false);                  // Esc on the route on show, until the box empties or fills
+  const [noPath, setNoPath] = useState(false);                 // Esc took an auto pick out of this draft: its send says "no path"
+  const [kindPick, setKindPick] = useState<KindPick>(null);     // COMPACT: the kind you tapped or Tabbed to; null = guess it from the text
+  // PRESET's edits to a kind's run, per session; they win over the flow's bridge default (lib/kinds presetFor).
+  // shortcut: in memory, a reload drops them; persist per session if that's missed
+  const [runEdits, setRunEdits] = useState<Record<string, Partial<Record<KindId, Partial<KindRun>>>>>({});
+  const [fitPick, setFitPick] = useState(0);
+  const fitsId = useId();
+  const routeSeq = useRef(0);
+  const landed = useRef<string | null>(null);                   // the text as the auto pick left it, until the next edit
+  const now = useRef({ text, dropped });
+  now.current = { text, dropped };
+  const blank = text.trim() === "";
+  useEffect(() => {
+    const seq = ++routeSeq.current;
+    // A held route answered older text: it goes once the box leads with a / or is emptied, until the next reply.
+    if (!routeOn || text.startsWith("/")) { setHeld(null); return; }
+    if (blank) setHeld((h) => (h && h.for.trim() !== "" ? null : h));
+    const c = routeCtx!;
+    const stale = () => isStale(text, now.current.text, seq, routeSeq.current);
+    const t = window.setTimeout(() => {
+      api.route({
+        project: c.project, cwd: c.cwd, session: sessionId ?? undefined, text, prompts: c.prompts, last_status: c.lastStatus, first: c.first,
+        ctx_tokens: contextTokens === undefined ? undefined : Math.round(contextTokens),
+      }).then(({ route }) => {
+        if (stale()) return;
+        setHeld(route && { r: route, for: text, ctx: ctxKey });
+        if (route && !shelled && shouldAutoApply(text, route, now.current.dropped)) {
+          taRef.current?.prepend(`/${route.name} `);
+          setApplied(route);
+          landed.current = `/${route.name} ${text}`;
+        }
+      }, () => { if (!stale()) setHeld(null); });   // no answer is no route, never the one held for older text
+    }, 400);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text, ctxKey, contextTokens]);
+  useEffect(() => { if (!blank && isDropped(text, applied?.name ?? null)) setDropped(true); }, [text, applied, blank]);
+  useEffect(() => { if (text !== landed.current) landed.current = null; }, [text]);
+  // Hiding lasts until the box empties or fills; an emptied box is a fresh draft.
+  useEffect(() => { setHidden(false); if (blank) { setApplied(null); setDropped(false); setNoPath(false); setKindPick(null); } }, [blank]);
+  // Another session's draft, or one restored after a reload, wasn't typed fresh here: it gets no auto pick.
+  useEffect(() => {
+    setApplied(null); setHidden(false); setNoPath(false); setDropped(text.trim() !== ""); setKindPick(null);
+    // PRESET edits made before a session existed (the blank screen) belong to no session: they go.
+    setRunEdits((m) => { if (!("" in m)) return m; const next = { ...m }; delete next[""]; return next; });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+  const live = routeOn && held && held.ctx === ctxKey && !hidden && (!blank || held.for.trim() === "") ? held.r : null;
+  const auto = !shelled && routeOn && applied && !dropped && !isDropped(text, applied.name) ? applied : null;
+  // What you typed, without the auto pick: DESIGN, GRILL and COMPACT put their own command in front.
+  const typed = auto ? swapLead(text, auto.name, null) : text;
+  // The kind of work on show (COMPACT only; DEFAULT has no rail to show one). An answer to a
+  // docked ask, an agent's session and a typed /command go as typed: no kind, the kinds dim.
+  // FLOWS (the gear's sheet, bridge-wide): off, the row is FLOWS OFF and prompts go as typed with
+  // the session's own picks; a flow switched off leaves the row and Tab's cycle and is never guessed.
+  const flowCfg = useFlowSettings();
+  const flowsOn = flowCfg ? flowCfg.on : !!routing;
+  const flowsOff = useMemo(() => flowCfg?.flows.filter((f) => !f.on).map((f) => f.id) ?? [], [flowCfg]);
+  const kindsOn = shelled && flowsOn && !onAgent && !helper && !ask?.send && !leadsSlash;
+  const pick = kindPick && kindPick !== "plain" && flowsOff.includes(kindPick) ? null : kindPick;
+  const { kind, how: kindHow } = kindsOn ? shownKind(pick, typed, { start: routeCtx?.first === true, design: !!plugins.design, off: flowsOff, hand: flowCfg?.guess === "hand" }) : { kind: null, how: "none" as const };
+  const run = kind ? presetFor(kind, flowRuns(flowCfg?.flows), runEdits[sessionId ?? ""]?.[kind]) : null;
+  // A kind you picked on an empty box shows its starter there (the placeholder; Tab writes it).
+  const starter = kindHow === "picked" && blank && kind ? KINDS[kind].starter : null;
+  // ghostFor: never over a /command, nor for an auto pick that isn't in the text.
+  // A flow step already queued is the next step: its ghost would offer it twice.
+  // A starter on show wins: the kind you picked outranks a suggestion.
+  const ghost = live && blank && !starter && !(flowQueued && live.kind === "next") ? ghostFor("", live) : null;
+  const rowRoute = !shelled && live && !blank && ghostFor(text, live) ? live : null;
+  const shown = auto ?? (ghost ? live : rowRoute);   // what the caption and the list of other fits are about
+  const how = auto ? "auto" : ghost ? "inline" : "row";
+  // The list of other fits goes with the command it is for (⌫ while it is open), backdrop and all.
+  useEffect(() => { if (!shown) setOpenDrop((d) => (d === "fits" ? "" : d)); }, [shown]);
+  const fits = shown ? [
+    ...shown.alts.map((a) => ({ name: a.name as string | null, label: `/${a.name}`, desc: a.why, title: a.desc })),
+    { name: null, label: "Send as typed", desc: "no command", title: undefined },
+  ] : [];
+  const openFits = () => { setFitPick(0); setOpenDrop((d) => (d === "fits" ? "" : "fits")); };
+  // The editor keeps the focus while the list is open, as a combobox's input does: the
+  // highlighted row is its active descendant, so a screen reader reads the row ↑/↓ land on.
+  useEffect(() => {
+    const el = document.querySelector('[data-ctx-type="editor"][data-ctx-id="composer"] .cm-content');
+    if (!el) return;
+    if (openDrop === "fits") { el.setAttribute("aria-controls", fitsId); el.setAttribute("aria-activedescendant", `${fitsId}-${fitPick}`); }
+    else { el.removeAttribute("aria-controls"); el.removeAttribute("aria-activedescendant"); }
+  }, [openDrop, fitPick, fitsId]);
+
+  /** Esc or Send as typed: the route on show goes. An auto pick is taken out of the text. An empty
+   *  box's ghost hides until the box fills and is let go, so it doesn't show in the row while the
+   *  next prompt is typed (which may still get its auto pick); a typed draft's goes for the draft. */
+  function dismiss() {
+    if (auto) { setText(swapLead(text, auto.name, null)); setDropped(true); return; }
+    setHidden(true);
+    if (blank) setHeld(null);
+    else setDropped(true);
+  }
+
+  /** A row of the other fits: its command swaps in for the one on show; Send as typed (null) takes it out. */
+  function pickFit(name: string | null) {
+    setOpenDrop("");
+    if (!name) dismiss();
+    else if (auto) setText(swapLead(text, auto.name, name));
+    else if (blank) setText(`/${name} `);
+    else taRef.current?.prepend(`/${name} `);
+  }
+
+  /** While open, the other fits take ↑/↓, Enter or Tab, and Esc, as the / list does; Alt+↓
+   *  opens them. Tab takes the route on show; Esc dismisses it. An auto pick goes with Esc too, and with the
+   *  first ⌫ while the text is as the pick left it: the caret is at the end then, where ⌫ would
+   *  cost a character of yours. A key taken here goes no further: App's own Esc would close a
+   *  panel as well. */
+  function routeKey(e: KeyboardEvent): boolean {
+    const take = () => { e.preventDefault(); e.stopPropagation(); return true; };
+    if (openDrop === "fits" && fits.length) {
+      if (e.key === "Escape") { setOpenDrop(""); return take(); }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { setFitPick((p) => (p + (e.key === "ArrowDown" ? 1 : fits.length - 1)) % fits.length); return take(); }
+      if (e.key === "Enter" || e.key === "Tab") { pickFit(fits[Math.min(fitPick, fits.length - 1)].name); return take(); }
+    }
+    if (e.altKey && e.key === "ArrowDown" && shown) { openFits(); return take(); }
+    if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return false;
+    // A selection stays yours to delete: select all + ⌫ still clears the draft.
+    const firstBksp = e.key === "Backspace" && text === landed.current && !!window.getSelection()?.isCollapsed;
+    // Only Esc on an auto pick says "no path" for the send; Backspace and Send as typed just drop it.
+    if (auto && (e.key === "Escape" || firstBksp)) { if (e.key === "Escape") setNoPath(true); dismiss(); return take(); }
+    const r = ghost ? live : rowRoute;
+    if (!r) return false;
+    if (e.key === "Tab") {
+      if (r.fresh) onRouteFresh?.(`/${r.name} ${r.arg}`);
+      else if (blank) setText(`/${r.name} ${r.arg}`);
+      else taRef.current?.prepend(`/${r.name} `);
+      return take();
+    }
+    if (e.key === "Escape") {
+      dismiss();
+      return take();
+    }
+    return false;
+  }
+
+  /** COMPACT's kinds: Tab and Shift+Tab walk them while the box has text (design … ask, then
+   *  plain, then round again), Esc drops the one on show. On an empty box Tab writes a picked
+   *  kind's starter, and Esc goes back to guessing. An open list or menu keeps its keys. */
+  function kindKey(e: KeyboardEvent): boolean {
+    // CodeMirror's convention: after Esc the next Tab leaves the editor; any other key re-arms the cycling.
+    if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return false;
+    const afterEsc = escRef.current;
+    escRef.current = e.key === "Escape";
+    if (afterEsc && e.key === "Tab") return false;
+    if (!kindsOn || openDrop || e.altKey || e.ctrlKey || e.metaKey) return false;
+    if (e.key === "Tab" && starter && !e.shiftKey) setText(starter);
+    else if (e.key === "Tab" && !blank) {
+      const dir = e.shiftKey ? -1 : 1;
+      let n = nextKind(kind, dir, flowsOff);
+      if (n === "design" && !plugins.design) n = nextKind(n, dir, flowsOff);   // no Claude Design, no DESIGN kind
+      setKindPick(n ?? "plain");
+    }
+    else if (e.key === "Escape" && kind) setKindPick(blank ? null : "plain");
+    else return false;
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
   }
 
   // --- Ctrl+R: reverse prompt search ---------------------------------------
@@ -918,7 +1388,10 @@ export function Composer({
       return;
     }
     if (!t || disabled) return;
-    onSend(t, images);
+    // The kind on show sends its preset with the prompt, and the flow when the prompt starts one.
+    const plan = sendPlan({ kind, how: kindHow, text: t, running: runningFlow, flows: flowsOn,
+                            answering: !!ask?.send, agent: onAgent, run });
+    onSend(plan.text, images, noPath || undefined, plan.run, t, plan.flow && plan.by && { id: plan.flow, by: plan.by });
     setText("");
     setImages([]);
   }
@@ -940,7 +1413,7 @@ export function Composer({
   // send gesture — the verbs are commands that stand on their own.
   function design() {
     if (stillSaving()) return;
-    const t = text.trim();
+    const t = typed.trim();
     if (!t) return;
     onSend(`/design-first ${t}`, images);
     setText("");
@@ -951,7 +1424,6 @@ export function Composer({
   const ctxMax = contextWindow || 1_000_000;
   const ctxPct = Math.min(100, Math.round((ctx / ctxMax) * 100));
   const suggest = ctx >= ctxMax * COMPACT_SUGGEST;
-  const ctxSegs = Math.min(CTX_SEGMENTS, Math.ceil((ctxPct / 100) * CTX_SEGMENTS));
   // The meter is teal until the window is actually filling. Colour that is
   // always on is colour that says nothing.
   const ctxColor = ctxPct >= 85 ? "var(--err)" : suggest ? "var(--warn)" : "var(--acc)";
@@ -968,7 +1440,7 @@ export function Composer({
       label: "GRILL",
       tip: "GRILL — a relentless interview before any code gets written.\n\nIt asks one question at a time until every open branch of the decision is closed, then you have something worth building from.\n\nType first to grill a specific idea; leave the box empty to grill the conversation so far.\n\nNeeds a grill skill installed — SKILLS ▸ PLUGINS.",
       disabled,
-      onClick: () => { const t = text.trim(); setText(""); onSend(t ? `/grill-me ${t}` : "/grill-me", []); },
+      onClick: () => { const t = typed.trim(); setText(""); onSend(t ? `/grill-me ${t}` : "/grill-me", []); },
     }]),
     ...(showPonytail && !onAgent ? [
       { key: "review", label: "REVIEW", tip: "REVIEW — /ponytail-review over the working tree: what in this diff can be deleted, reused, or replaced by stdlib.", disabled, onClick: () => onSend("/ponytail-review", []) },
@@ -992,8 +1464,8 @@ export function Composer({
 
 
   // Pieces both layouts place: DEFAULT strings them along one control row;
-  // COMPACT moves the profile and ponytail chips to the row's right end and
-  // folds model / mode / effort into the run sheet (RunTrigger + RunSheet) over SEND. A profile the
+  // COMPACT ends its rail with the profile chip as a usage ring and folds model /
+  // mode / effort / trim into the PRESET popover (presetBtn + presetPop). A profile the
   // list doesn't have (it failed to load) shows as its id, and a session
   // bound to none as NO PROFILE. Re-picking the
   // current one is no change: a bind would also drop the knobs set by hand.
@@ -1004,25 +1476,40 @@ export function Composer({
   // window refills — the two numbers that decide whether to send now; both
   // windows with exact times on hover, and in the menu's rows. No
   // profile: the default login. An agent profile spends no Claude quota, and a
-  // profile the list lacks has no known login, so neither reads. A meter the
-  // usage endpoint won't serve (an idle login's access token lapsed; the CLI
-  // renews it on that login's next turn) reads UNKNOWN rather than nothing.
+  // profile the list lacks has no known login, so neither reads. The meter is
+  // read through Claude Code (bridge/usage.py), so a login always gets a number:
+  // until its first one lands it shows a spinner. A green dot while a running
+  // turn reports it; amber at the CLI's warning, red when spent, with the clock
+  // it refills at in place of the countdown.
   const chipSlot = agentPick || (profile && !bound) ? null : loginSlot(bound?.agent, bound?.account);
   const chipAcct = chipSlot === null ? undefined : accounts?.find((a) => a.slot === chipSlot);
   const chipWins = loginWindows(chipAcct);
   const chipWin = chipWindow(chipWins);
+  const chipTone = chipWin ? meterTone(chipWin.left, chipWin.severity, chipAcct?.status) : "";
+  const chipClock = !chipWin ? "" : chipWin.left === 0 && chipWin.resets_at ? hhmm(Date.parse(chipWin.resets_at) / 1000) : fmtReset(chipWin.resets_at);
   const chipMeter = chipWin
     ? <span className="ctrl-meter" style={{ fontSize: "var(--t9)", letterSpacing: .5, flex: "none" }}>
-        <span style={{ color: sevColor(chipWin.severity) }}>{chipWin.left}%</span>
-        <span style={{ color: "var(--txd)" }}>{fmtReset(chipWin.resets_at)}</span>
+        {chipAcct?.live && <i className="meter-live" aria-hidden />}
+        <span style={{ color: chipTone }}>{chipWin.left}%</span>
+        <span style={{ color: "var(--txd)" }}>{chipClock}</span>
       </span>
     : chipAcct && chipAcct.left === null && !chipAcct.disabled
-      ? <span className="ctrl-meter" style={{ fontSize: "var(--t9)", letterSpacing: .5, color: "var(--txd)", flex: "none" }}>UNKNOWN</span>
+      ? <span className="ctrl-meter" style={{ flex: "none", color: "var(--txd)" }}><Spinner className="h-[9px] w-[9px] border-[1.5px] opacity-100" /></span>
       : undefined;
   const chipName = `PROFILE — ${bound?.name ?? (profile || "NO PROFILE")}`;
+  const chipRead = chipAcct?.live ? " · live" : chipAcct?.read_at ? ` · read ${readAgo(chipAcct.read_at, Date.now() / 1000)}` : "";
   const chipTitle = chipWins.length
-    ? `${chipName} · ${chipWins.map((w) => `${w.name}: ${w.left}% left${w.resets}`).join(" · ")}`
-    : chipMeter ? `${chipName} · usage unknown: the meter could not be read. Either Claude's usage endpoint is rate-limiting (the login itself still works) or this login's access token has lapsed; it is tried again on its own` : undefined;
+    ? `${chipName} · ${chipWins.map((w) => `${w.name}: ${w.left}% left${w.resets}`).join(" · ")}${chipRead}`
+    : chipMeter ? `${chipName} · reading this login's usage through Claude Code…` : undefined;
+  // The PROFILE menu reads idle logins as it opens (any reading over a minute
+  // old) and every login on Check now; `reading` is that age while the read
+  // runs, so the rows it redoes say checking (lib/clisignals freshness).
+  const [reading, setReading] = useState<number | null>(null);
+  const readMeters = (fresh: number) => {
+    if (!onAccounts) return;
+    setReading(fresh);
+    void onAccounts(fresh).finally(() => setReading((r) => (r === fresh ? null : r)));
+  };
   // A row picked in the PROFILE menu: + NEW PROFILE opens a blank form, an
   // expired login its RE-LOGIN, another profile binds; the pin is not a pick.
   const pickProfileRow = (id: string) => {
@@ -1033,14 +1520,17 @@ export function Composer({
     else if (id !== profile) onProfile(id);
     setOpenDrop("");
   };
-  const profileDrop = (right: boolean) => profiles && (
-    <Drop label="PROFILE" className="drop-prof" code={agentPick ? <UserRound size={12} /> : <ClaudeLogo />} value={profile} options={profileOpts}
+  // ring: the rail's usage face (UsageRing), while the login has a reading and isn't expired.
+  const profileDrop = (right: boolean, ring = false) => profiles && (
+    <Drop label="PROFILE" code={agentPick ? <UserRound size={12} /> : <ClaudeLogo />} value={profile} options={profileOpts}
+      face={ring && chipWin && boundDead === null ? <UsageRing left={chipWin.left} tone={chipTone} clock={chipClock} /> : undefined}
       fallback={{ id: profile, label: profile || "NO PROFILE" }} minWidth={104} align={right ? "right" : "left"} open={openDrop === "profile"}
       tone={boundDead !== null ? "var(--err)" : undefined} meter={boundDead !== null ? undefined : chipMeter}
       title={boundDead !== null ? `PROFILE — ${bound?.name}: account ${boundDead}'s Claude login has expired; pick it in this menu to sign in again.` : chipTitle}
-      onToggle={() => setOpenDrop((d) => (d === "profile" ? "" : "profile"))}
+      onToggle={() => { if (openDrop !== "profile") readMeters(60); setOpenDrop((d) => (d === "profile" ? "" : "profile")); }}
       onPick={pickProfileRow}
-      menu={<ProfileRows profiles={profiles} accounts={accounts} value={profile} defaultId={defaultProfile} onPick={pickProfileRow} onDefault={onDefaultProfile} />} />
+      menu={<ProfileRows profiles={profiles} accounts={accounts} value={profile} defaultId={defaultProfile} onPick={pickProfileRow} onDefault={onDefaultProfile}
+        reading={reading} onCheck={onAccounts ? () => readMeters(0) : undefined} />} />
   );
   const ponyDrop = (right: boolean) => showPonytail && !onAgent && (
     <Drop label="PONYTAIL" code={<Scissors size={12} />} value={ponytail} options={PONYTAILS} align={right ? "right" : "left"} open={openDrop === "pony"}
@@ -1074,38 +1564,125 @@ export function Composer({
     </div>
   );
   const verbMenu = openDrop === "verbs" && menuOf(verbs);
+  // GRILL stays DEFAULT's: COMPACT's + drops it, the kinds carry the work there (docs/superpowers/specs/prompt-kinds.md).
+  const plusVerbs = verbs.filter((v) => v.key !== "grill");
+  // Over the open-menu backdrop (z 25), as the rail is, so a second tap toggles directly.
   const plusBtn = (
-    <div style={{ position: "relative", flex: "none" }}>
+    <div style={{ position: "relative", flex: "none", zIndex: 26 }}>
       <button className="pb-plus" onClick={() => setOpenDrop((d) => (d === "plus" ? "" : "plus"))}
-        title={["Attach a file", ...verbs.map((v) => v.label)].join(" · ")} aria-label="Attach or run a verb">+</button>
-      {openDrop === "plus" && menuOf([{ key: "attach", label: "ATTACH A FILE", tip: "Attach a file", onClick: () => fileRef.current?.click() }, ...verbs])}
+        title={["Attach a file", ...plusVerbs.map((v) => v.label)].join(" · ")} aria-label="Attach or run a verb">+</button>
+      {openDrop === "plus" && menuOf([{ key: "attach", label: "ATTACH A FILE", tip: "Attach a file", onClick: () => fileRef.current?.click() }, ...plusVerbs])}
+    </div>
+  );
+  // FLOW (design-drafts/flow-chip, A · STEP CHIP; moved by composer-flow-chip, A · ON THE RAIL):
+  // the path's next step in the rail's facts cell, ⚡ when it starts by itself, an amber ✋ when
+  // it waits on you. Off the typing line, where it squeezed the prompt into a column; no flow
+  // name, the rail's marked glyph is the flow. Its sheet is PRESET's, hung from the
+  // chip: three switches this session may set over SETTINGS (picking SETTINGS' own value
+  // follows it again, as PRESET follows a profile), SKIP and JUMP TO, and a Reset.
+  const fchip = shelled && flowsOn && !onAgent && onFlow ? flowChip ?? null : null;
+  const [flowAt, setFlowAt] = useState(0);
+  useEffect(() => { if (!fchip) setOpenDrop((d) => (d === "flow" ? "" : d)); }, [fchip]);
+  const flowBtn = fchip && (
+    <div className="pb-flow-w">
+      <button type="button" className="pb-flow" data-mark={fchip.mark} aria-haspopup="dialog" aria-expanded={openDrop === "flow"}
+        title={`FLOW · ${fchip.label}, step ${fchip.step} of ${fchip.total}. Next: ${fchip.next.label.toUpperCase()}, ${MARK_WORDS[fchip.mark]}.`}
+        aria-label={`${fchip.label}, next ${fchip.next.label.toUpperCase()}, ${MARK_WORDS[fchip.mark]}`}
+        onClick={(e) => {
+          const card = e.currentTarget.closest(".pb-card");
+          setFlowAt(card ? e.currentTarget.getBoundingClientRect().left - card.getBoundingClientRect().left : 0);
+          setOpenDrop((d) => (d === "flow" ? "" : "flow"));
+        }}>
+        <span className="pb-flow-n caps">Next</span>
+        <b className="caps">{fchip.next.label}</b>
+        {fchip.mark === "auto" ? <Zap size={11} strokeWidth={2.4} aria-hidden /> : <Hand size={11} strokeWidth={2.2} aria-hidden />}
+      </button>
+    </div>
+  );
+  const flowSet = (k: FlowOption, v: boolean) => onFlow?.({ kind: "set", key: k, on: v === fchip?.opts[k].global ? null : v });
+  const flowRow = (k: FlowOption, label: string, on: ReactNode, off: string) => {
+    const o = fchip!.opts[k];
+    return (
+      <div className="pb-pr"><b>{label}{o.here && <OverrideDot tip="set in this session; pick SETTINGS' value to follow it again" />}</b>
+        <div className="pb-sg" role="group" aria-label={label}>
+          {([[true, on], [false, off]] as const).map(([v, face]) => (
+            <button key={String(v)} type="button" aria-pressed={o.on === v} onClick={() => flowSet(k, v)}
+              data-prof={o.here && o.global === v ? "" : undefined} title={o.global === v ? "SETTINGS' pick" : undefined}>{face}</button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+  const flowSkip = (to: string) => { onFlow?.({ kind: "skip", to }); setOpenDrop(""); };
+  const flowPop = fchip && openDrop === "flow" && (
+    <div className="pb-pp pb-flow-pp" role="dialog" aria-label="This session's path" style={{ ["--fp-at" as string]: `${flowAt}px`, overflow: "visible" }}>
+      <h4><RouteIcon size={10} strokeWidth={2.2} aria-hidden />{fchip.label}<span>step {fchip.step} of {fchip.total}</span></h4>
+      {flowRow("nextstep", "Next", <><Zap size={10} strokeWidth={2.4} aria-hidden />AUTO</>, "HOLD")}
+      {flowRow("autopick", "Picks", "AUTO", "SUGGEST")}
+      {flowRow("smartzone", "Compact", `PAST ${SMART_ZONE / 1000}K`, "NEVER")}
+      <div className="pb-pr"><b>Step</b>
+        <div className="pb-flow-acts">
+          <button type="button" disabled={fchip.skipTo === null} onClick={() => flowSkip(fchip.skipTo!)}
+            title={fchip.skipTo === null ? "the parts are still at work" : `pass over ${fchip.next.label.toUpperCase()}`}>
+            <SkipForward size={11} strokeWidth={2.2} aria-hidden />SKIP {fchip.next.label.toUpperCase()}</button>
+          <div className="pb-flow-jump">
+            <button type="button" disabled={!fchip.jumps.length} aria-haspopup="menu" aria-expanded={ppList === "jump"}
+              onClick={() => setPpList((l) => (l === "jump" ? "" : "jump"))}
+              title="skip every step before the one you pick">JUMP TO <i aria-hidden>▾</i></button>
+            {ppList === "jump" && (
+              <div className="pb-flow-list" role="menu">
+                {fchip.jumps.map((j) => <button key={j.key} type="button" role="menuitem" onClick={() => flowSkip(j.key)}>{j.label.toUpperCase()}</button>)}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="pb-pf">{fchip.here ? `${fchip.here} set here, for this session only.` : "A change here is for this session only."}
+        <button type="button" disabled={!fchip.here} onClick={() => onFlow?.({ kind: "reset" })}>{fchip.here ? "Reset to SETTINGS" : "Reset"}</button>
+      </div>
     </div>
   );
   // Claude's window and Claude's /compact: an agent's meter would divide its
   // tokens by the wrong ceiling, and /compact would reach it as plain text.
+  // SMART ZONE: the ~150k past which a flow compacts at its next boundary (bridge/route.py),
+  // the readout in the warn colour once past it.
+  const zone = !!routing && !!smartZone;
+  const pastZone = zone && ctx >= SMART_ZONE;
+  const ctxOpen = openDrop === "ctx";
+  const atPicked = (v: string) => v === (!autocompact || autocompact === "auto" ? "1000000" : autocompact);
   const ctxBlock = onAgent ? null : (
-    <div className="ctrl-ctx" title={`Context — ${ctxPct}% of ${fmtTokens(ctxMax)}${ctx > 0 ? ` (${ctx.toLocaleString()} tokens on the last request)` : ", not measured yet"}`}>
-      <span className="lbl">CTX</span>
-      <span className="seg">
-        {Array.from({ length: CTX_SEGMENTS }, (_, i) => (
-          <i key={i} style={i < ctxSegs ? { background: ctxColor } : undefined} />
-        ))}
-      </span>
-      <span style={{ color: suggest ? ctxColor : "var(--txd)", fontSize: "var(--t10)", letterSpacing: .5, flex: "none" }}>{ctxPct}%</span>
-      {suggest && ctx > 0 && <span style={{ flex: "none" }}>~{fmtTokens(ctx)}</span>}
-      {onCompact && (!shelled || suggest) && (
-        // Whatever is in the box rides along as compaction instructions ("keep
-        // the auth work, drop the log spelunking") — Piebald opens a dialog for
-        // this; we already have a text box right there.
-        <button onClick={() => { onCompact(text.trim()); setText(""); }} disabled={disabled || running}
-          title={text.trim()
-            ? "Compact the context, keeping what you've typed in mind"
-            : "Compact context (/compact) — type first to steer what the summary keeps"}
-          style={{ ...chip, flex: "none", cursor: disabled || running ? "not-allowed" : "pointer",
-                   opacity: disabled || running ? 0.4 : 1,
-                   ...(suggest ? { border: `1px solid ${ctxColor}`, color: ctxColor } : null) }}>
-          COMPACT
-        </button>
+    <div className="ctrl-ctx" data-open={ctxOpen ? "" : undefined}
+      title={ctxOpen ? undefined : `Context — ${ctxPct}% of ${fmtTokens(ctxMax)}${ctx > 0 ? ` (${ctx.toLocaleString()} tokens on the last request)` : ", not measured yet"}${zone ? ` · smart zone ${fmtTokens(SMART_ZONE)}${pastZone ? ", past it" : ""}` : ""}`}>
+      <span className="lbl" style={pastZone ? { color: "var(--warn)" } : undefined}>CTX</span>
+      <b className="cx-n" style={suggest ? { color: ctxColor } : pastZone ? { color: "var(--warn)" } : undefined}>{ctxPct}%</b>
+      <span className="cx-of">of {fmtTokens(ctxMax)}</span>
+      <button type="button" className="cx-g" aria-label="Context and auto-compact" aria-haspopup="dialog" aria-expanded={ctxOpen}
+        onMouseDown={(e) => e.preventDefault()} onClick={() => setOpenDrop((d) => (d === "ctx" ? "" : "ctx"))}>
+        <Settings size={12} strokeWidth={2} aria-hidden />
+      </button>
+      {ctxOpen && (
+        <div className="pb-pp cx-pp" role="dialog" aria-label="Context">
+          <h4>Context<span>this session</span></h4>
+          <div className="cx-meta">{ctx > 0 ? <><b>{fmtTokens(ctx)}</b> of {fmtTokens(ctxMax)} used · {ctxPct}%</> : "Not measured yet: the next turn measures it."}</div>
+          {onAutocompact && (
+            <div className="pb-pr"><b>Auto-compact</b>
+              <div className="pb-sg" role="group" aria-label="Auto-compact at">
+                {AUTOCOMPACT_AT.map(([v, face]) => (
+                  <button key={face} type="button" aria-pressed={atPicked(v)} onClick={() => onAutocompact(v)}>{face}</button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="pb-pf">Compacts when the window reaches this. Default 1M.
+            {onCompact && (
+              // Whatever is in the box rides along as compaction instructions ("keep
+              // the auth work, drop the log spelunking"): the text box is right there.
+              <button type="button" disabled={disabled || running}
+                title={text.trim() ? "Compact the context, keeping what you've typed in mind" : "Compact context (/compact) — type first to steer what the summary keeps"}
+                onClick={() => { onCompact(typed.trim()); setText(""); setOpenDrop(""); }}>Compact now</button>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1139,10 +1716,30 @@ export function Composer({
       {ask.label}</button>
   );
   const softSteer = multi?.caps?.steer === "soft";
+  // After the answer it ends the background tasks, so it says so.
+  const stopBtn = (
+    <button className="act-glyph stop" data-wide={bg ? "" : undefined} onClick={onStop} aria-label={bg ? "Stop them" : "Stop"} {...keyAttrs(SHORTCUTS.stop.keys)}
+      title={bg ? "STOP — end the background tasks this turn left running; its answer stays" : "STOP — interrupt this turn now"}>
+      <Square size={11} strokeWidth={0} fill="currentColor" aria-hidden />{bg ? "Stop them" : null}</button>
+  );
+  // The graceful counterpart to STOP: no interrupt, no half-written
+  // file — the turn lands, then the loop holds. It keeps its armed
+  // state here so the banner is confirmation, not the only tell.
+  const pauseBtn = onTogglePause && (
+    <button className={`act-glyph hold${paused ? " armed" : ""}`} onClick={onTogglePause}
+      aria-label={paused ? "Resume" : "Pause"}
+      title={paused
+        ? "PAUSED — nothing starts after this turn. Click to resume."
+        : "PAUSE — let this turn finish, then hold; no queued prompt or goal nudge starts after it"}>
+      <Pause size={11} strokeWidth={0} fill="currentColor" aria-hidden /></button>
+  );
+  const steerTip = softSteer
+    ? `STEER — ${agentPick?.label.toLowerCase() ?? "this agent"} takes this ${STEER_SOFT_WORDS}: the running tool finishes, then it reads your message and carries on (falls back to queueing if the run just ended)`
+    : "STEER — fold this into the turn that's running now (falls back to queueing if the run just ended)";
   const actions = (withDesign: boolean) => askBtn ? (
     <>
       {running && (
-        <button className="act-glyph stop" onClick={onStop} aria-label="Stop" title="STOP — interrupt this turn now">
+        <button className="act-glyph stop" onClick={onStop} aria-label="Stop" title="STOP — interrupt this turn now" {...keyAttrs(SHORTCUTS.stop.keys)}>
           <Square size={11} strokeWidth={0} fill="currentColor" aria-hidden /></button>
       )}
       <span className="act-fence" aria-hidden />
@@ -1150,27 +1747,12 @@ export function Composer({
     </>
   ) : running ? (
     <>
-      <button className="act-glyph stop" onClick={onStop} aria-label="Stop"
-        title="STOP — interrupt this turn now">
-        <Square size={11} strokeWidth={0} fill="currentColor" aria-hidden /></button>
-      {/* The graceful counterpart to STOP: no interrupt, no half-written
-          file — the turn lands, then the loop holds. It keeps its armed
-          state here so the banner is confirmation, not the only tell. */}
-      {onTogglePause && (
-        <button className={`act-glyph hold${paused ? " armed" : ""}`} onClick={onTogglePause}
-          aria-label={paused ? "Resume" : "Pause"}
-          title={paused
-            ? "PAUSED — nothing starts after this turn. Click to resume."
-            : "PAUSE — let this turn finish, then hold; no queued prompt or goal nudge starts after it"}>
-          <Pause size={11} strokeWidth={0} fill="currentColor" aria-hidden /></button>
-      )}
+      {stopBtn}
+      {pauseBtn}
       <span className="act-fence" aria-hidden />
       {withDesign && designBtn}
       {onSteer && (
-        <button className="act-alt caps" onClick={steer} disabled={!text.trim()}
-          title={softSteer
-            ? `STEER — ${agentPick?.label.toLowerCase() ?? "this agent"} takes this ${STEER_SOFT_WORDS}: the running tool finishes, then it reads your message and carries on (falls back to queueing if the run just ended)`
-            : "STEER — fold this into the turn that's running now (falls back to queueing if the run just ended)"}>
+        <button className="act-alt caps" onClick={steer} disabled={!text.trim()} title={steerTip}>
           Steer <SteerIcon />{softSteer && <span className="ma-soft">{STEER_SOFT_WORDS}</span>}</button>
       )}
       <button className="act-pri queue caps" onClick={submit} disabled={disabled || !text.trim()}
@@ -1180,14 +1762,15 @@ export function Composer({
   ) : (
     <>
       {withDesign && designBtn}
-      <button className="act-pri caps" onClick={submit} disabled={disabled || !text.trim()} title="SEND (Enter)">
-        Send <ChevronRight size={13} strokeWidth={1.8} aria-hidden /></button>
+      {/* COMPACT's key says the kind it sends as; DEFAULT has no kind, so it always reads Send. */}
+      <button className="act-pri caps" onClick={submit} disabled={disabled || !text.trim()} title={`${kind ? KINDS[kind].name : "SEND"} (Enter)`}>
+        {kind ? KINDS[kind].verb : "Send"} <ChevronRight size={13} strokeWidth={1.8} aria-hidden /></button>
     </>
   );
   const actionCluster = (<>{fileInput}{paperclip}{actions(true)}</>);
   const helpersRow = multi?.helpers && multi.onHelpers
     ? <HelpersRow config={multi.helpers} onChange={multi.onHelpers} /> : null;
-  // DEFAULT has no run sheet to hold that row, so it gets a chip of its own.
+  // DEFAULT has no PRESET to hold that row, so it gets a chip of its own.
   const helpersChip = helpersRow && (
     <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
       <button className="drop-btn ma-helpers-chip" aria-expanded={openDrop === "helpers"} title="Helpers and their limits for this chat"
@@ -1203,23 +1786,22 @@ export function Composer({
   // Pieces the compact shells arrange (.mystical/design-drafts/prompt-box):
   // every row the composer can show, as one node each, placed by TABS and
   // CONSOLE below. DEFAULT keeps its own markup further down.
-  const pausedPill = paused && (
-    <span className="pb-paused" title={running ? "this turn finishes; nothing starts after it" : "nothing starts on its own"}>
-      <Pause size={10} strokeWidth={0} fill="currentColor" aria-hidden />
-      paused{queued && queued.length > 0 ? ` · ${queued.length} held` : ""}
-      {onTogglePause && <button onClick={onTogglePause} title="Let queued prompts and goal nudges run again">RESUME</button>}
-    </span>
-  );
   // The login this chat spends is dry: a send dies in a second, then is handed
   // over or parked (the transcript's limit card). Said here before you send,
   // with the login that has room one tap away (design-drafts/limit-chat, C).
+  // Running low (the CLI's warning level) says so early, the same way, while
+  // another login has more left (design-drafts/cli-signals, row 2).
   const dry = chipWins.find((w) => w.left === 0);
-  const room = dry ? otherLogin(accounts ?? [], chipSlot) : null;
+  const low = dry ? null : lowWindow(chipWins, chipAcct?.status);
+  const other = dry || low ? otherLogin(accounts ?? [], chipSlot) : null;
+  const room = other && (dry || (other.left !== null && low && other.left > low.left)) ? other : null;
   const roomProfile = room ? profiles?.find((p) => loginSlot(p.agent, p.account) === room.slot) : undefined;
-  const dryPill = dry && (
-    <span className="pb-dry" title={`${dry.name}: used up. A prompt sent now stops at once, then moves to another login or waits for the refill.`}>
+  const dryPill = (dry || low) && (
+    <span className="pb-dry" title={dry ? `${dry.name}: used up. A prompt sent now stops at once, then moves to another login or waits for the refill.`
+      : `${low!.name}: ${low!.left}% left${low!.resets}. Claude Code warns before the limit; a turn that hits it stops, then moves to another login or waits for the refill.`}>
       <TriangleAlert size={11} strokeWidth={2} aria-hidden />
-      <span><b>{loginName(chipAcct, chipSlot)}</b> is out{dry.resets_at ? ` until ${hhmm(Date.parse(dry.resets_at) / 1000)}` : ""}</span>
+      {dry ? <span><b>{loginName(chipAcct, chipSlot)}</b> is out{dry.resets_at ? ` until ${hhmm(Date.parse(dry.resets_at) / 1000)}` : ""}</span>
+        : <span><b>{loginName(chipAcct, chipSlot)}</b> has <b>{low!.left}%</b> of its {windowWord(low!)} window{low!.resets_at ? ` · refills ${hhmm(Date.parse(low!.resets_at) / 1000)}` : ""}</span>}
       {room && roomProfile && (
         <button type="button" onClick={() => onProfile(roomProfile.id)}>
           Use {loginName(room, room.slot)}{room.left !== null ? ` · ${room.left}%` : ""}
@@ -1227,31 +1809,91 @@ export function Composer({
       )}
     </span>
   );
-  // Not positioned itself: the list anchors to .pb-ledger's left edge, so it
-  // never runs off the column when the chip sits late in a wrapped line.
-  const queuedChip = queued && queued.length > 0 && (
-    <div>
-      <button className="pb-queued" onClick={() => setOpenDrop((d) => (d === "queued" ? "" : "queued"))} title={queued.map((q) => q.text).join("\n")}>
-        {queued.length} queued <span aria-hidden style={{ fontSize: "var(--t8)", opacity: .8 }}>▾</span>
-      </button>
-      {openDrop === "queued" && (
-        <div style={{ position: "absolute", bottom: "calc(100% + 6px)", left: 0, zIndex: 30, minWidth: 260, maxWidth: 440, border: "1px solid color-mix(in srgb, var(--purple) 34%, transparent)", background: "color-mix(in srgb, var(--panel2) 98%, transparent)", boxShadow: "0 -8px 26px var(--shadow-pop)", animation: "mpop .12s ease" }}>
-          {queued.map((q) => (
-            <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid color-mix(in srgb, var(--acc) 8%, transparent)", fontSize: "var(--t105)", color: "var(--txh)" }}>
-              <span title={q.text} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.text}</span>
-              {running && onSteerQueued && <button onClick={() => onSteerQueued(q.id)} title="Steer — fold this into the turn that's running now" style={{ appearance: "none", cursor: "pointer", border: 0, background: "transparent", color: "var(--purple)", lineHeight: 1, padding: 0, flex: "none", display: "flex" }}><SteerIcon size={11} /></button>}
-              {onEjectQueued && <button onClick={() => onEjectQueued(q.id)} title="Run in a new session" style={{ appearance: "none", cursor: "pointer", border: 0, background: "transparent", color: "var(--purple)", fontSize: "var(--t11)", lineHeight: 1, padding: 0, flex: "none" }}>↗</button>}
-              {onCancelQueued && <button onClick={() => onCancelQueued(q.id)} title="Remove from queue" style={{ appearance: "none", cursor: "pointer", border: 0, background: "transparent", color: "var(--purple)", fontSize: "var(--t11)", lineHeight: 1, padding: 0, flex: "none" }}>✕</button>}
-            </div>
-          ))}
-        </div>
+  // The turn's own tab, between the lead and CTX (prompt-kinds spec): "working" while a turn
+  // runs, "· N queued ▾" while prompts wait, "paused · N held" while paused. No clock: nothing
+  // here knows when the turn began. Its list hangs from the tab row's left edge, so it never
+  // runs off the column wherever the tab sits.
+  const nq = queued?.length ?? 0;
+  const workTab = (running || paused || nq > 0) && (
+    <div className="pb-work" data-paused={paused ? "" : undefined}
+      title={paused ? (running ? "this turn finishes; nothing starts after it" : "nothing starts on its own") : undefined}>
+      {/* .pb-ww: the words a narrow box drops (index.css), the glyphs and the count stay */}
+      {paused ? <><Pause size={9} strokeWidth={0} fill="currentColor" aria-hidden /><span className="pb-ww">paused</span></>
+        : running && <><i aria-hidden /><span className="pb-ww">working</span></>}
+      {nq > 0 && <span className="pb-wq">{(running || paused) && <span className="pb-ww">· </span>}{nq} {paused ? "held" : "queued"}</span>}
+      {paused && onTogglePause && (
+        <button type="button" className="pb-resume" onClick={onTogglePause} aria-label="Resume" title="Let queued prompts and goal nudges run again">
+          <Play size={8} strokeWidth={0} fill="currentColor" aria-hidden /><span className="pb-ww">RESUME</span></button>
       )}
     </div>
   );
+  const queuedList = openDrop === "queued" && nq > 0 && (
+    <div style={{ position: "absolute", bottom: "calc(100% + 6px)", left: 12, zIndex: 30, minWidth: 260, maxWidth: 440, border: "1px solid color-mix(in srgb, var(--purple) 34%, transparent)", background: "color-mix(in srgb, var(--panel2) 98%, transparent)", boxShadow: "0 -8px 26px var(--shadow-pop)", animation: "mpop .12s ease" }}>
+      {queued!.map((q) => (
+        <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid color-mix(in srgb, var(--acc) 8%, transparent)", fontSize: "var(--t105)", color: "var(--txh)" }}>
+          <span title={q.text} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.text}</span>
+          {running && onSteerQueued && <button onClick={() => onSteerQueued(q.id)} title="Steer — fold this into the turn that's running now" style={{ appearance: "none", cursor: "pointer", border: 0, background: "transparent", color: "var(--purple)", lineHeight: 1, padding: 0, flex: "none", display: "flex" }}><SteerIcon size={11} /></button>}
+          {onEjectQueued && <button onClick={() => onEjectQueued(q.id)} title="Run in a new session" style={{ appearance: "none", cursor: "pointer", border: 0, background: "transparent", color: "var(--purple)", fontSize: "var(--t11)", lineHeight: 1, padding: 0, flex: "none" }}>↗</button>}
+          {onCancelQueued && <button onClick={() => onCancelQueued(q.id)} title="Remove from queue" style={{ appearance: "none", cursor: "pointer", border: 0, background: "transparent", color: "var(--purple)", fontSize: "var(--t11)", lineHeight: 1, padding: 0, flex: "none" }}>✕</button>}
+        </div>
+      ))}
+    </div>
+  );
+  // B · DECK (.mystical/design-drafts/prompt-box-v2): mid-turn the box says what the turn is
+  // doing now, with its clock and Pause/Stop (now the chat's live row, LiveRow), so the keys keep one job:
+  // Enter's target, picked by NOW|NEXT. The queue stacks above the box as a deck, NEXT nearest.
+  const deckRun = shelled && running && !askBtn;
+  const steers = enterTarget(enterMode, false, !!onSteer) === "steer";
+  // CTRL+ENTER mode sends on Ctrl+Enter, so the other target is Ctrl+Alt+Enter there.
+  const otherKey = sendKey === "ctrl-enter" ? "Ctrl+Alt+Enter" : "Alt+Enter";
+  const deckKeys = deckRun && (
+    <>
+      {onSteer && (
+        <div className="pb-mode" role="radiogroup" aria-label="What Enter does">
+          <button type="button" role="radio" aria-checked={enterMode === "now"} onClick={() => setEnterMode("now")}
+            className="caps" title={`NOW — Enter folds the text into the running turn (${otherKey} queues it)`}>Now</button>
+          <button type="button" role="radio" aria-checked={enterMode === "next"} onClick={() => setEnterMode("next")}
+            className="caps" title={`NEXT — Enter queues the text after this turn (${otherKey} steers)`}>Next</button>
+        </div>
+      )}
+      {steers ? (
+        <button className="act-pri caps" onClick={steer} disabled={!text.trim()} title={`${steerTip} (Enter)`}>
+          Steer <SteerIcon />{softSteer && <span className="ma-soft">{STEER_SOFT_WORDS}</span>}<span className="pb-enter" aria-hidden>⏎</span></button>
+      ) : (
+        <button className="act-pri queue caps" onClick={submit} disabled={disabled || !text.trim()}
+          title={`QUEUE — run this prompt after the current turn (Enter${onSteer ? `; ${otherKey} steers` : ""})`}>
+          Queue <ChevronsRight size={13} strokeWidth={1.8} aria-hidden /><span className="pb-enter" aria-hidden>⏎</span></button>
+      )}
+    </>
+  );
+  const deck = shelled && nq > 0 && (() => {
+    const { shown, more } = deckView(queued!, 3);
+    return (
+      <div className="pb-deck">
+        {more > 0 && (
+          <button type="button" className="pb-dk pb-dk-more" style={{ "--d": shown.length } as CSSProperties}
+            aria-expanded={openDrop === "queued"} onClick={() => setOpenDrop((d) => (d === "queued" ? "" : "queued"))}>
+            + {more} more {paused ? "held" : "queued"} <i aria-hidden>▾</i></button>
+        )}
+        {shown.map((q, i) => ({ q, i })).reverse().map(({ q, i }) => (
+          <div key={q.id} className="pb-dk" data-next={i === 0 ? "" : undefined} style={{ "--d": i } as CSSProperties}>
+            {i === 0 && <span className="pb-dk-lab caps">{paused ? "Held" : "Next"}</span>}
+            <span className="pb-dk-n">{i + 1}</span>
+            <span className="pb-dk-tx" title={q.text}>{q.text}</span>
+            <span className="pb-dk-ac">
+              {running && onSteerQueued && <button onClick={() => onSteerQueued(q.id)} aria-label="Steer" title="Steer — fold this into the turn that's running now"><SteerIcon size={12} /></button>}
+              {onEjectQueued && <button onClick={() => onEjectQueued(q.id)} aria-label="Run in a new session" title="Run in a new session">↗</button>}
+              {onCancelQueued && <button onClick={() => onCancelQueued(q.id)} aria-label="Remove from queue" title="Remove from queue">✕</button>}
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  })();
   // CSS hides an empty ledger and, past one live item, every pill's
   // description (.pill-desc) — busy means terse.
   const ledger = (className: string) => (
-    <div className={`pb-ledger ${className}`}>{dryPill}{pills}{pausedPill}{queuedChip}</div>
+    <div className={`pb-ledger ${className}`}>{pills}</div>
   );
   const attachRow = images.length > 0 && (
     <div className="pb-attach" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -1275,20 +1917,8 @@ export function Composer({
         </div>
       : <div className="ma-set-note" role="status" style={{ marginTop: 0, marginBottom: 6 }}>saving image…</div>
   );
-  const settingsChips = (right: boolean) => (<>{profileDrop(right)}{ponyDrop(right)}</>);
-  const runTrigger = (
-    <RunTrigger open={openDrop === "run"} onToggle={() => setOpenDrop((d) => (d === "run" ? "" : "run"))}
-      model={model} modelOpts={modelOpts} perm={perm} permOpts={permOpts} effort={effort}
-      agent={agentPick} overrides={overrides} />
-  );
   const popovers = (
     <>
-      {openDrop === "run" && (
-        <RunSheet model={model} modelOpts={modelOpts} onModel={onModel}
-          perm={perm} permOpts={permOpts} onPerm={onPerm}
-          effort={effort} onEffort={onEffort}
-          agent={agentPick} overrides={overrides} profile={bound} extra={helpersRow} />
-      )}
       {rsearch !== null && (
         <div style={{ position: "absolute", left: 11, right: 11, bottom: "calc(100% + 6px)", zIndex: 31, border: "1px solid color-mix(in srgb, var(--purple) 34%, transparent)", background: "var(--panel3)", boxShadow: "0 -8px 24px rgba(0,0,0,.35)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 10px", borderBottom: "1px solid color-mix(in srgb, var(--acc) 10%, transparent)" }}>
@@ -1345,6 +1975,28 @@ export function Composer({
           ))}
         </div>
       )}
+      {openDrop === "fits" && shown && (
+        // The other fits for the routed command, drawn as the / list is.
+        <div id={fitsId} role="listbox" aria-label="Other fits" style={{ position: "absolute", left: 11, right: 11, bottom: "calc(100% + 6px)", zIndex: 30, maxHeight: 240, overflowY: "auto", border: "1px solid color-mix(in srgb, var(--acc) 26%, transparent)", background: "var(--panel3)", boxShadow: "0 -8px 24px rgba(0,0,0,.35)" }}>
+          {fits.map((f, i) => (
+            <button
+              key={f.label}
+              id={`${fitsId}-${i}`}
+              type="button"
+              role="option"
+              aria-selected={i === fitPick}
+              data-on={i === fitPick ? 1 : 0}
+              onMouseDown={(e) => { e.preventDefault(); pickFit(f.name); }}
+              onMouseEnter={() => setFitPick(i)}
+              title={f.title}
+              style={{ appearance: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", border: 0, borderLeft: `2px solid ${i === fitPick ? "var(--acc)" : "transparent"}`, background: i === fitPick ? "color-mix(in srgb, var(--acc) 10%, transparent)" : "transparent", color: i === fitPick ? "var(--txb)" : "var(--txh)", fontFamily: "'JetBrains Mono',monospace", fontSize: "var(--t115)", padding: "5px 10px" }}
+            >
+              <span style={{ flex: "none", color: f.name ? "var(--acc)" : "var(--txd)" }}>{f.label}</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--txl)" }}>{f.desc}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {mentionOpen && (
         <div style={{ position: "absolute", left: 11, right: 11, bottom: "calc(100% + 6px)", zIndex: 30, maxHeight: 210, overflowY: "auto", border: "1px solid color-mix(in srgb, var(--acc) 26%, transparent)", background: "var(--panel3)", boxShadow: "0 -8px 24px rgba(0,0,0,.35)" }}>
           {hits.map((p, i) => (
@@ -1372,10 +2024,16 @@ export function Composer({
       imageSession={sessionId}
       imageProject={project}
       commands={noList ? [] : cmds}
+      words={words}
+      files={tree}
+      symbols={symbols}
+      diskPaths={diskPaths}
       onChange={(t, c) => { setText(t); setCaret(c); }}
       onCaret={setCaret}
+      ghost={ghost}
+      onCmdClick={shown ? openFits : undefined}
       onKeyDown={(e) => {
-        if (mentionKey(e) || slashKey(e)) return;
+        if (mentionKey(e) || slashKey(e) || routeKey(e) || kindKey(e)) return;
         // Ctrl+R is the browser's reload; in the command line it's the shell's
         // history search, which is what the hands in this box expect.
         if (e.key === "r" && e.ctrlKey) { e.preventDefault(); setRsearch(""); return; }
@@ -1384,10 +2042,9 @@ export function Composer({
         const send = sendKey === "ctrl-enter" ? e.ctrlKey || e.metaKey : !e.shiftKey;
         if (e.key === "Enter" && send) {
           e.preventDefault();
-          // While a turn runs, Enter goes to it at its next tool step (or to the
-          // queue, by the setting); Alt+Enter takes the other one.
-          const toTurn = running && !!onSteer && !ask?.send && (busyEnter === "steer") !== e.altKey;
-          if (toTurn) steer(); else submit();
+          // Mid-turn the shell's NOW|NEXT switch picks the target; Alt+Enter the other one.
+          if (deckRun && enterTarget(enterMode, e.altKey, !!onSteer) === "steer") steer();
+          else submit();
         }
       }}
       onPaste={(e) => { const imgs = imagesFrom(e.clipboardData?.items); if (imgs.length) { e.preventDefault(); addFiles(imgs); } }}
@@ -1396,13 +2053,16 @@ export function Composer({
         if (text.includes("\n")) void askConfirm("Clear the draft?", { ok: "Clear", danger: true }).then((yes) => { if (yes) setText(""); });
         else setText("");
       }}
-      placeholder={ask?.placeholder ?? (disabled ? "working…" : running ? (busyEnter === "steer" && onSteer ? "steer — Claude reads this at its next step…" : "queue a prompt — runs after the current turn…") : placeholder ?? `message ${onAgent ? agentPick!.label.toLowerCase() : "claude"} — describe a change, paste an error…`)}
+      placeholder={ask?.placeholder ?? (disabled ? "working…" : starter ? `${starter} · Tab writes it` : running
+        ? bg ? `Steer keeps the ${bg === 1 ? "background task" : `${bg} background tasks`} running; a queued prompt can end ${bg === 1 ? "it" : "them"}…`
+          : deckRun && steers ? "steer this turn — it reads your message next…"
+          : "queue a prompt — runs after the current turn…"
+        : placeholder ?? `message ${onAgent ? agentPick!.label.toLowerCase() : "claude"} — describe a change, paste an error…`)}
     />
   );
   const pfx = <span className="pb-pfx" style={{ color: "var(--purple)", fontSize: "var(--t13)", flex: "none", marginTop: 2 }}>~ ❯</span>;
   const boxProps = {
     "data-drag": dragging ? "" : undefined,
-    "data-running": running ? "" : undefined,
     style: { position: "relative", display: "flex", alignItems: "flex-start", gap: 11, border: `1px solid ${dragging ? "var(--acc)" : "color-mix(in srgb, var(--acc) 18%, transparent)"}`, background: "color-mix(in srgb, var(--panel2) 70%, transparent)", padding: "10px 13px", fontFamily: "'JetBrains Mono',monospace" } as CSSProperties,
     onDragOver: (e: React.DragEvent) => { e.preventDefault(); if (!dragging) setDragging(true); },
     onDragLeave: () => setDragging(false),
@@ -1412,64 +2072,216 @@ export function Composer({
       if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
     },
   };
-  const hint = (
-    <span className="pb-hint" aria-hidden>
-      {(() => {
-        const busy = running && onSteer && !ask?.send;
-        const main = ask?.send ? "answer" : busy ? (busyEnter === "steer" ? "steer" : "queue") : running ? "queue" : "send";
-        const alt = busy ? ` · ⌥↵ ${busyEnter === "steer" ? "queue" : "steer"}` : "";
-        return sendKey === "ctrl-enter" ? `⌘↵ ${main}${alt} · ↵ newline` : `↵ ${main}${alt} · ⇧↵ newline`;
-      })()}
-    </span>
+  // The router's caption, directly under the text: why the routed command is there and what
+  // Tab or Esc does with it. It is the ghost's announcement too (the ghost is aria-hidden).
+  // While the box has text a suggestion is drawn here, as the segment it would become, not
+  // in the text. The line stays while the router is on and Matt's pack is listed, empty or not,
+  // so a route coming or going never moves the box, and a live region that is already there is
+  // one screen readers speak.
+  const capt = shown ? caption(shown, how) : null;
+  const seg = shown?.name ?? "";
+  const nsAt = seg.lastIndexOf(":");
+  const routeLine = routing && pack && !onAgent && (
+    <div className="pb-route" role="status">
+      {capt && (<>
+        <b data-tone={capt.tone}>{capt.tag}</b>
+        {how === "row" && (
+          // CmdWidget's segment at caption size; a click lists the other fits, the editor keeping the focus.
+          <button type="button" className="cmdseg ghost" title={shown?.desc} aria-haspopup="listbox" aria-expanded={openDrop === "fits"}
+            onMouseDown={(e) => e.preventDefault()} onClick={() => { openFits(); taRef.current?.focus(); }}>
+            <span className="sr-only">/</span>
+            {nsAt > 0 && <><span className="sg ns">{seg.slice(0, nsAt)}</span><span className="sr-only">:</span></>}
+            <span className="sg">{seg.slice(nsAt + 1)}</span>
+          </button>
+        )}
+        {capt.why && <span className="why">{capt.why}</span>}
+        {capt.tail.map(([k, w]) => <Fragment key={w}><i aria-hidden>·</i>{k && <kbd>{k}</kbd>}<span>{w}</span></Fragment>)}
+      </>)}
+    </div>
   );
-
-  // The two new COMPACT composers (CLASSIC is the old markup further down).
-  // The lead (tile, title, project, branch, PR, running app) arrives flattened
-  // from Terminal; .pb-lead lays it out per shell in index.css.
-  const shell =
-    composer === "console" ? (
-      <>
-        {dock}
-        {embedNote}
-        {attachRow}
-        <div {...boxProps} className="cmdbox pb-cmd">
-          {pfx}
-          {popovers}
-          {editor}
-          {hint}
-          <div className="pb-acts">{actions(true)}</div>
-        </div>
-        <div className="pb-place pb-lead">{lead}</div>
-        {ledger("pb-activity")}
-        <div className="pb-set">
-          {ctxBlock}
-          {runTrigger}
-          {settingsChips(false)}
-          <span className="sp" />
-          {plusBtn}
-        </div>
-      </>
-    ) : (
-      <>
-        <div className="pb-tabs pb-lead">{lead}{ctxBlock}</div>
-        {dock}
-        {embedNote}
-        <div {...boxProps} className="cmdbox pb-card">
-          {ledger("")}
-          {attachRow}
-          <div className="pb-line">{pfx}{popovers}{editor}</div>
-          {/* DESIGN steps out while a turn runs (it could only queue): that is
-              what keeps this footer on one line at 787px with both sidebars open. */}
-          <div className="pb-foot"><div className="pb-l">{plusBtn}{settingsChips(false)}</div><div className="pb-r">{runTrigger}{actions(!running)}</div></div>
-        </div>
-      </>
+  // DEFAULT sets the editor in a row, so the caption hangs under it in a column of its own.
+  const editorCol = <div className="pb-ed">{editor}{routeLine}</div>;
+  // COMPACT's rail under the text (docs/superpowers/specs/prompt-kinds.md, R3 · RAIL): the kinds,
+  // the lit one's live facts, the run preset, the login's usage, on one line where only the facts
+  // give way. While the empty box shows the router's next step, its caption takes the facts' place;
+  // the segment is a live region, so that caption is still the ghost's announcement.
+  const profileChip = profileDrop(true, true);
+  // PRESET: the run the next send goes with, which the segment reads and the popover edits. A lit
+  // kind's is its preset (lib/kinds presetFor), and a pick here is this session's edit of it. With
+  // no kind it is the session's own picks, and a pick sets them.
+  const pre = run ?? { model, perm, effort, ponytail };
+  const PreGlyph = kind ? KIND_ICON[kind] : SlidersHorizontal;
+  const trimOn = showPonytail && !onAgent;
+  const optLabel = (opts: DropOption<string>[], id: string) => { const o = opts.find((x) => x.id === id); return o && (o.short ?? o.label); };
+  const preModel = optLabel(modelOpts, pre.model) ?? (agentPick && !kind && !pre.model ? agentPick.label : modelName(pre.model));
+  const preRest = [
+    pre.perm && (optLabel(permOpts, pre.perm) ?? modeRow(pre.perm).label),
+    pre.effort && effortRow(pre.effort, kind ? null : agentPick).label,
+    trimOn && pre.ponytail && (PONYTAILS.find((p) => p.id === pre.ponytail)?.label ?? pre.ponytail),
+  ].filter(Boolean).join(" · ");
+  // A kind's preset names its effort; with no kind lit, Auto is a pick again, as in the run sheet.
+  const preEffs: DropOption<string>[] = kind ? EFFORTS.filter((e) => e.id) : agentPick ? agentPick.effort ?? [] : EFFORTS;
+  // With no kind lit, a knob set here over the bound profile wears the OverrideDot, and the
+  // profile's own value a PROFILE mark: picking that follows the profile again (OVERRIDE_TIP).
+  const setHere = (k: "model" | "perm" | "effort") => !kind && own(k === "perm" ? "permission_mode" : k);
+  const profPick = (k: "model" | "perm" | "effort") => (setHere(k) && bound?.[k === "perm" ? "mode" : k]) || null;
+  const preEdit = (k: keyof KindRun, v: string) => {
+    const sid = sessionId ?? "";
+    if (kind) setRunEdits((m) => ({ ...m, [sid]: { ...m[sid], [kind]: { ...m[sid]?.[kind], [k]: v } } }));
+    else if (k === "model") onModel(v);
+    else if (k === "perm") onPerm(v);
+    else if (k === "effort") onEffort(v as EffortLevel | "");
+    else onPonytail(v);
+  };
+  // A select is the chips' own Drop: its MenuRows list opens over the popover.
+  const preSel = (k: "model" | "perm", label: string, opts: DropOption<string>[], shown: string) => {
+    const list = k === "model" ? "model" : "mode", prof = profPick(k);
+    return (
+      <div className="pb-pr"><b>{label}{setHere(k) && <OverrideDot />}</b>
+        <Drop<string> label={label.toUpperCase()} className="pb-sel" value={pre[k]} fallback={{ id: pre[k], label: shown }}
+          options={prof === null ? opts : opts.map((o) => (o.id === prof ? { ...o, tag: "PROFILE" } : o))}
+          open={ppList === list} onToggle={() => setPpList((l) => (l === list ? "" : list))} onPick={(v) => { preEdit(k, v); setPpList(""); }} />
+      </div>
     );
+  };
+  const preSeg = (k: "effort" | "ponytail", label: string, opts: DropOption<string>[]) => {
+    const prof = k === "effort" ? profPick(k) : null;
+    return (
+      <div className="pb-pr"><b>{label}{k === "effort" && setHere(k) && <OverrideDot />}</b>
+        <div className="pb-sg" role="group" aria-label={label}>
+          {opts.map((o) => (
+            <button key={o.id || "-"} type="button" aria-pressed={o.id === pre[k]} onClick={() => preEdit(k, o.id)}
+              data-prof={o.id === prof ? "" : undefined} title={o.id === prof ? "your profile's pick" : undefined}>{o.label}</button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+  const presetPop = openDrop === "preset" && (
+    // overflow: the select lists hang out of it (FLINT's popover rule would clip them).
+    <div className="pb-pp" role="dialog" aria-label={kind ? `${KINDS[kind].verb}'s preset` : "This session's run"}
+      style={{ ["--pp-at" as string]: `${ppAt}px`, overflow: "visible" }}>
+      <h4><PreGlyph size={10} strokeWidth={2.2} aria-hidden />{kind ? `${KINDS[kind].verb} preset` : "This session"}<span>{kind ? "for this session" : "prompts with no kind"}</span></h4>
+      {modelOpts.length > 0 && preSel("model", "Model", modelOpts, preModel)}
+      {permOpts.length > 0 && preSel("perm", "Mode", permOpts, pre.perm ? optLabel(permOpts, pre.perm) ?? modeRow(pre.perm).label : "Session")}
+      {preEffs.length > 0 && preSeg("effort", "Effort", preEffs)}
+      {trimOn && preSeg("ponytail", "Trim", PONYTAILS)}
+      {kind && (
+        <div className="pb-pf">A change here wins in this session.
+          <button type="button" onClick={() => { void saveFlowRun(kind, run!); setOpenDrop(""); }}>Save as {KINDS[kind].verb}'s preset</button>
+        </div>
+      )}
+      {/* The chat's helper limits are the session's, not a kind's: they stay with its own picks. */}
+      {!kind && helpersRow}
+    </div>
+  );
+  const presetBtn = (
+    <button type="button" className="pb-run" aria-haspopup="dialog" aria-expanded={openDrop === "preset"}
+      title={`${kind ? `${KINDS[kind].verb}'s preset` : "This session's picks"}: ${[preModel, preRest].filter(Boolean).join(" · ")}`}
+      onClick={(e) => {
+        setPpAt(e.currentTarget.closest(".pb-card")!.getBoundingClientRect().right - e.currentTarget.getBoundingClientRect().right);
+        setOpenDrop((d) => (d === "preset" ? "" : "preset"));
+      }}>
+      <PreGlyph size={12} strokeWidth={kind ? 2 : 1.8} aria-hidden />
+      <b>{preModel}</b>
+      {preRest && <span>· {preRest}</span>}
+      <i aria-hidden>▾</i>
+    </button>
+  );
+  // The facts lead with the steps the prompt will follow, then the state facts (a1-rest).
+  const steps = promptSteps({ kind, how: kindHow, running: runningFlow, cfg: flowCfg });
+  const facts = ghost && capt
+    ? <span className="pb-route"><b data-tone={capt.tone}>{capt.tag}</b>{capt.why && <span className="why">{capt.why}</span>}
+        {capt.tail.map(([k, w]) => <Fragment key={w}><i aria-hidden>·</i>{k && <kbd>{k}</kbd>}<span>{w}</span></Fragment>)}</span>
+    : ask?.send ? ask.hint && <span data-tone="dim" className="kc-hover">{ask.hint}</span>
+    : kind && <span>{[...(steps ? [{ text: steps } as Fact] : []), ...kindFacts(kind, { git: git ?? null, lastCheck: lastCheck ?? null,
+        designLinked: designLinked ?? null, mapBuiltAt: graph?.exists ? graph.built_at : null, askPerm: run?.perm ?? "" })]
+        .map((f, i) => <Fragment key={i}>{i > 0 && " · "}{f.lead}<span data-tone={f.tone}>{f.text}</span></Fragment>)}</span>;
+  // PRESET's "Save as <Flow>'s preset": the flow's bridge default, so the sheet shows it at once.
+  const saveFlowRun = async (fl: string, r: KindRun) => {
+    // One change, all or nothing; PRESET has closed by then, so a refusal is a pill.
+    try { await changeFlows(saveRun(fl, r)); }
+    catch (e) { notify("error", `${KINDS[fl as KindId]?.name ?? fl.toUpperCase()}'s preset not saved: ${(e as Error).message}`); }
+  };
+  // The gear: the FLOWS sheet (FlowsSheet below), hung from the card's left edge.
+  const gear = (
+    <>
+      <span className="fs-gsep" aria-hidden />
+      <button type="button" className="pb-kg fs-gear" aria-label="Flow settings" aria-haspopup="dialog" aria-expanded={openDrop === "flows"}
+        title="FLOWS — settings for every session" onMouseDown={(e) => e.preventDefault()}
+        onClick={() => {
+          if (openDrop !== "flows") void refreshFlowSettings();
+          setOpenDrop((d) => (d === "flows" ? "" : "flows"));
+        }}>
+        <Settings size={13} strokeWidth={2} aria-hidden />
+      </button>
+    </>
+  );
+  const flowsPop = openDrop === "flows" && <FlowsSheet initial={kind} models={agentPick ? modelRows(models, usage) : modelOpts} />;
+  const rail = (
+    <div className="pb-rail">
+      {!flowsOn ? (
+        <div className="pb-seg pb-kinds" role="group" aria-label="Kind of work">
+          <span className="fs-off">Flows off</span>{gear}
+        </div>
+      ) :
+      <div className="pb-seg pb-kinds" role="group" aria-label="Kind of work" data-dim={kindsOn ? undefined : ""}>
+        {KIND_ORDER.filter((id) => !flowsOff.includes(id)).map((id) => {
+          const Icon = KIND_ICON[id];
+          const lit = id === kind;
+          const off = !kindsOn || (id === "design" && !plugins.design);   // no Claude Design, no DESIGN kind
+          // The editor keeps the focus (and the caret) through a tap.
+          return (
+            <button key={id} type="button" className={lit ? "pb-kind" : "pb-kg"} data-how={lit ? kindHow : undefined}
+              data-run={id === runningFlow ? "" : undefined}
+              disabled={off} aria-pressed={lit && kindHow === "picked"}
+              title={lit ? `${KINDS[id].name} — ${blank ? "click to go back to guessing" : "click to send as typed"}` : KINDS[id].name}
+              onMouseDown={(e) => e.preventDefault()} onClick={() => setKindPick(lit ? (blank ? null : "plain") : id)}>
+              <Icon size={lit ? 11 : 12} strokeWidth={2} aria-hidden />
+              {lit && <><span>{KINDS[id].verb}</span>{kindHow === "auto" && <i>auto</i>}</>}
+            </button>
+          );
+        })}
+        {gear}
+      </div>}
+      <div className="pb-seg pb-facts"><span role="status">{facts}</span>{flowBtn}</div>
+      <div className="pb-seg pb-preset" data-open={openDrop === "preset" ? "" : undefined}>{presetBtn}</div>
+      {profileChip && <div className="pb-seg pb-use">{profileChip}</div>}
+    </div>
+  );
+  // COMPACT's shell. The lead (tile, title, project, branch, PR, running app)
+  // arrives flattened from Terminal; .pb-lead lays it out in index.css.
+  // B · ISLAND (.mystical/design-drafts/prompt-box-wild), drawn as C · LINE (prompt-pill-row): the
+  // lead is the whole row over the card, a rule running from it to CTX; mid-turn (data-live) the tile
+  // glows and the card keeps its height; what the turn is doing is the chat's live row (LiveRow).
+  // The login warning floats beside it as a pill.
+  const shell =
+      <>
+        <div className="pb-isles">
+          <div className="pb-tabs pb-lead" data-live={deckRun ? "" : undefined}>{lead}{workTab}{queuedList}<span className="pb-rule" aria-hidden />{ctxBlock}
+            {/* the live row carries these; while it isn't on screen (background tasks, a card, a grid view) the pill does (spine.css) */}
+            {deckRun && <span className="pb-hold">{pauseBtn}{stopBtn}</span>}</div>
+          {dryPill}
+        </div>
+        {dock}
+        {embedNote}
+        {deck}
+        <div {...boxProps} className="cmdbox pb-card" data-deck={deck ? "" : undefined}>
+          {ledger("")}
+          <div className="pb-line">
+            {plusBtn}{pfx}{popovers}{presetPop}{flowPop}{flowsPop}
+            <div className="pb-body">{attachRow}{editor}</div>
+            <div className="pb-keys">{deckKeys || actions(false)}</div>
+          </div>
+          {rail}
+        </div>
+      </>;
 
   return (
     // Its own surface, at the island's strength: header and footer are the two
     // pieces of chrome bracketing the transcript, and a ground running under
     // them makes the chat look like it has no edges.
-    <div className="composer" data-pb={shelled ? composer : undefined} data-docked={dock ? "" : undefined} style={{ flex: "none", borderTop: "1px solid color-mix(in srgb, var(--acc) 14%, transparent)", padding: "11px 16px", background: "color-mix(in srgb, var(--panel) 88%, transparent)" }}>
+    <div className="composer" data-pb={shelled ? "tabs" : undefined} data-docked={dock ? "" : undefined} style={{ flex: "none", borderTop: "1px solid color-mix(in srgb, var(--acc) 14%, transparent)", padding: "11px 16px", background: "color-mix(in srgb, var(--panel) 88%, transparent)" }}>
       {zoom && <ImageLightbox src={zoom} all={images.map((src) => ({ src }))} onClose={() => setZoom(null)} />}
       {openDrop && <div onClick={() => setOpenDrop("")}
         onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setOpenDrop(""); }}
@@ -1537,25 +2349,6 @@ export function Composer({
           make. The context meter closes the row as an instrument rather than
           spending a whole row of its own on a track that is empty most of the
           time. Layout ladder lives in index.css. */}
-      {compact ? (
-        // CLASSIC: the session's nameplate on the left (moved down from the
-        // header), everything left in this row packed to the right.
-        <div className="ctrl-cq" style={{ marginBottom: 9, position: "relative", zIndex: 26 }}>
-          <div className="ctrl-row ctrl-row-compact">
-            <div className="ctrl-lead">{lead}</div>
-            <div className="ctrl-verbs ctrl-verbs-compact">
-              <button className="ctrl-more" onClick={() => setOpenDrop((d) => (d === "verbs" ? "" : "verbs"))}
-                title="More actions">···</button>
-              {verbMenu}
-            </div>
-            {ctxBlock}
-            <div className="ctrl-set">
-              {profileDrop(true)}
-              {ponyDrop(true)}
-            </div>
-          </div>
-        </div>
-      ) : (
       <div className="ctrl-cq" style={{ marginBottom: 9, position: "relative", zIndex: 26 }}>
         <div className="ctrl-row">
           <div className="ctrl-set">
@@ -1604,24 +2397,14 @@ export function Composer({
           {ctxBlock}
         </div>
       </div>
-      )}
 
       {/* command line */}
       {dock}
       <div {...boxProps} className="cmdbox">
         {pfx}
         {popovers}
-        {editor}
-        {compact ? (
-          // CLASSIC: the run popover's trigger sits over the send cluster, on
-          // its own line, so the box's right edge reads model-then-send.
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 7, flex: "none", maxWidth: "50%", position: "relative", zIndex: 27 }}>
-            {runTrigger}
-            <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-              {actionCluster}
-            </div>
-          </div>
-        ) : actionCluster}
+        {editorCol}
+        {actionCluster}
       </div>
       </>
       )}

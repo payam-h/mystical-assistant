@@ -9,7 +9,7 @@ where things go, and the MYSTICAL panel shows it by kind.
   drafts/   design drafts and mockups (design-drafts/ is the older name, still honoured)
   scratch/  throwaway scripts, probes, downloads
   learn/    saved lessons (bridge/learn.py)
-  runs/     what work list runs kept: helpers' screenshots and logs, check output (bridge/workrun.py)
+  plans/    each chat's plan, as its agent wrote it (bridge/chatplan.py)
 
 Nothing already there is moved: code, old links and old transcripts name those paths, and an
 agent's folder may hold the only copy of something. An entry that fits no kind reads
@@ -30,7 +30,7 @@ import time
 from bridge import chat_images, devserver
 
 KINDS = {"images": "images", "docs": "docs", "drafts": "drafts", "design-drafts": "drafts",
-         "scratch": "scratch", "learn": "learn", "handoff": "bridge", "helpers": "bridge", "runs": "docs"}
+         "scratch": "scratch", "learn": "learn", "handoff": "bridge", "helpers": "bridge", "runs": "docs", "plans": "bridge"}
 OWNED = {".gitignore", ".keep.json", "dev.log", "tasks.json", "checks.json", "checks-last.log", "worklist.json"}
 NOTE = ("Keep it tidy: .mystical/scratch/ for throwaway scripts and probes, .mystical/docs/ for reports and "
         "other Markdown written to be read, .mystical/drafts/ for design drafts and mockups. "

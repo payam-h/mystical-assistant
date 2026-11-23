@@ -58,7 +58,7 @@ import threading
 import time
 import uuid
 
-from bridge import config, experimental, git, handoff, profiles, prompt_pack, store
+from bridge import config, experimental, flowbranch, git, handoff, profiles, prompt_pack, store
 
 MAIN = "main"
 USER = "you"
@@ -274,21 +274,34 @@ def _link_deps(top: str, path: str) -> list:
     return links
 
 
-def _make_copy(chat: dict, cwd: str, short: str, start_at: "str | None" = None) -> "tuple[dict | None, str | None]":
-    """A worktree for a writer. Returns ({path, branch, base, top, cwd}, refusal). It starts from
-    the chat's current state, or from `start_at` for a work run's item (bridge/workrun.py)."""
+def _copy_place(top: str, name: str) -> "tuple[str, str]":
+    """(branch, worktree path) for a copy Mystical makes of the repo at `top`: mystical/<name>, with
+    -2, -3, ... while that branch or folder is taken (another session's helper of the same name, an
+    earlier run that day).
+    shortcut: two copies named alike in the same instant would both get the name, and the second isn't
+    made and says so; lock around this and the worktree add if that ever shows up."""
+    root, taken = os.path.join(config.BASE_PATH, ".worktrees", os.path.basename(top)), set(git.branches(top))
+    slug, n = name, 2
+    while f"mystical/{slug}" in taken or os.path.lexists(os.path.join(root, slug)):
+        slug, n = f"{name}-{n}", n + 1
+    return f"mystical/{slug}", os.path.join(root, slug)
+
+
+def _make_copy(chat: dict, cwd: str, name: str) -> "tuple[dict | None, str | None]":
+    """A worktree for a writer, its branch named after the helper (mystical/helper-ink-outline), so the
+    branch list says whose copy it is. Returns ({path, branch, base, top, cwd}, refusal). It starts
+    from the chat's current state."""
     top = _top(cwd)
     if not top:
         return None, "This folder isn't a git repository, so a helper can't have its own copy."
-    rc, base, _ = (0, start_at, "") if start_at else _git(top, "stash", "create")
+    rc, base, _ = _git(top, "stash", "create")
     base = base.strip()
     if rc != 0 or not base:
         rc, base, err = _git(top, "rev-parse", "HEAD")
         base = base.strip()
         if rc != 0:
             return None, f"Couldn't read this repository's state: {err.strip()[:200]}"
-    path = os.path.join(config.BASE_PATH, ".worktrees", os.path.basename(top), f"helper-{short}")
-    branch = f"mystical/helper-{short}"
+    branch, path = _copy_place(top, f"helper-{flowbranch.short_name(name.lower()) or uuid.uuid4().hex[:8]}")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     ok, msg = git.worktree_add(top, path, branch, base)
     if not ok:
@@ -337,7 +350,7 @@ def plan_tasks(chat: dict, tasks: list) -> "tuple[list, str | None]":
         agent, account = _agent_account(chat, profile)
         counts[(agent, account)] = counts.get((agent, account), 0) + 1
         out.append({"brief": brief, "name": t.get("name") or "", "write": bool(t.get("write")),
-                    "profile": profile, "agent": agent, "account": account, "base": t.get("base"), "work": t.get("work"), "from_dir": t.get("from_dir")})
+                    "profile": profile, "agent": agent, "account": account})
     why = _load_problem(chat, "", "", adding=len(out))
     for (agent, account), n in counts.items():
         why = why or _load_problem(chat, agent, account, adding=n)
@@ -354,27 +367,18 @@ def plan_tasks(chat: dict, tasks: list) -> "tuple[list, str | None]":
     return out, None
 
 
-def card_questions(plan: list) -> list:
-    """The one card for a call that needs a tap: everything it would start."""
+def card_text(plan: list) -> "tuple[str, str]":
+    """The one card for a call that needs a tap, as (summary, detail): how many it would
+    start, and each one. A permission card, as any tool call's is. It was a question
+    card, whose note box took "stop asking, commit and push are fine" three times in
+    one chat (2026-11-21) and gave it to nobody: the card only read Start or Not now."""
     lines = []
     for t in plan:
         who = (t["profile"] or {}).get("name") or handoff.label(t["agent"])
         lines.append(f"• {who}{' (own copy of the code)' if t['write'] else ' (read only)'}: "
                      f"{' '.join(t['brief'].split())[:140]}")
     n = len(plan)
-    return [{"header": "Helpers", "multiSelect": False,
-             "question": (f"Start {n} helper{'s' if n != 1 else ''}?\n" + "\n".join(lines)),
-             "options": [{"label": "Start", "description": "Mystical runs them and shows them under this chat."},
-                         {"label": "Not now", "description": "The agent carries on alone."}]}]
-
-
-def approved(answers) -> bool:
-    """Whether a helper card's answer was Start. An unanswered card is a no."""
-    for a in answers or []:
-        labels = (a.get("labels") or []) if isinstance(a, dict) else [a]
-        if any(str(x).strip().lower().startswith("start") for x in labels):
-            return True
-    return False
+    return f"Start {n} helper{'s' if n != 1 else ''}", "\n".join(lines)
 
 
 def start(chat: dict, plan: list) -> list:
@@ -386,10 +390,10 @@ def start(chat: dict, plan: list) -> list:
         short = uuid.uuid4().hex[:8]
         # Where its shell last went, unless that's gone: it may have been a helper's copy, since merged.
         moved = chat.get("work_cwd")
-        parent_cwd = t.get("from_dir") or (moved if moved and os.path.isdir(moved) else None) or chat.get("cwd") or config.BASE_PATH
+        parent_cwd = (moved if moved and os.path.isdir(moved) else None) or chat.get("cwd") or config.BASE_PATH
         copy = None
         if t["write"]:
-            copy, why = _make_copy(chat, parent_cwd, short, t.get("base"))
+            copy, why = _make_copy(chat, parent_cwd, name)
             if why:
                 lines.append(f"{name}: not started. {why}")
                 continue
@@ -398,7 +402,7 @@ def start(chat: dict, plan: list) -> list:
         mode = _helper_mode(chat, t["agent"], (t["profile"] or {}).get("mode"), t["write"])
         member = {"name": name, "write": t["write"], "brief": t["brief"], "state": "running",
                   "agent": t["agent"], "account": t["account"], "started": time.time(),
-                  "copy": copy, "short": short, **({"work": t["work"]} if t.get("work") else {})}
+                  "copy": copy, "short": short}
         s = store.create_member(chat, name=name, cwd=cwd, profile_id=pid or chat.get("profile_id"),
                                 permission_mode=mode, member=member)
         if t["agent"] == profiles.CLAUDE:
@@ -630,31 +634,10 @@ def on_turn_end(job) -> None:
         chat = _main_of(s)
         if s.get("parent_session") and chat:
             _helper_turn_ended(job, s, chat)
-        elif chat:
-            _manager_turn_ended(job, chat)
         if chat:
             flush(store.get_session(chat["id"]))
     except Exception as e:  # noqa: BLE001
         print(f"[channel] turn end: {e!r}", file=sys.stderr)
-
-
-def _manager_turn_ended(job, chat: dict) -> None:
-    """A work run's manager may need a nudge (bridge/workrun.py)."""
-    from bridge import workrun
-    try:
-        workrun.manager_ended(job, chat)
-    except Exception as e:  # noqa: BLE001
-        print(f"[channel] work run: {e!r}", file=sys.stderr)
-
-
-def _work_ended(member: dict, state: str, report: str = "") -> str:
-    """A work run's helper finished: its item moves, and its report says what's next."""
-    from bridge import workrun
-    try:
-        return workrun.helper_ended(member, state, report)
-    except Exception as e:  # noqa: BLE001
-        print(f"[channel] work run: {e!r}", file=sys.stderr)
-        return ""
 
 
 def _helper_turn_ended(job, s: dict, chat: dict) -> None:
@@ -670,9 +653,7 @@ def _helper_turn_ended(job, s: dict, chat: dict) -> None:
         words = data_views.strip_refs(job.result or (job.texts[-1] if job.texts else "") or "").strip()
         body = words[:_RESULT_MAX] or f"{name} finished without saying anything."
     _set_state(s["id"], state, ended=time.time())
-    if m.get("work"):
-        body += _work_ended(m, state, body if state == "done" else "")
-    elif (m.get("copy") or {}).get("path") and state == "done" and not m.get("merged"):
+    if (m.get("copy") or {}).get("path") and state == "done" and not m.get("merged"):
         stat = _diff_stat(m["copy"])
         if stat:
             body += (f"\n\nIt changed files in its own copy ({stat}). Review with review_helper_changes, "
@@ -770,8 +751,6 @@ def merge(chat: dict, name: str) -> str:
     s, m = _member_by_name(chat, name)
     if s is None:
         return f'No helper is called "{name}".'
-    if m.get("work"):
-        return f"{name} is working on a run's item. Use work_run with merge_item."
     copy = m.get("copy")
     if not copy or not os.path.isdir(copy.get("path") or ""):
         return f"{name} has no copy to merge (state: {m.get('state')})."
@@ -828,8 +807,6 @@ def discard(chat: dict, name: str) -> str:
         return f'No helper is called "{name}".'
     if _running(s["id"]):
         return f"{name} is still working. Stop it first."
-    if m.get("work"):
-        return f"{name} is working on a run's item. Use work_run with restart_item."
     copy = m.get("copy")
     if copy and os.path.isdir(copy.get("path") or ""):
         _remove_copy(copy)
